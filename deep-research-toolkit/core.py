@@ -69,11 +69,11 @@ except ImportError:
 # multi_search_engine is the fallback: if DDG returns nothing (which happens
 # with some non-English queries), we try Google via this package.
 # NOTE: the install name is multi_search_engine but the import name is
-# multi_engine_search (yes, they're different -- not ideal but it works).
+# multi_search (yes, they're different -- not ideal but it works).
 # Google's index is significantly deeper for Japanese, Chinese, Korean content,
 # so this fallback matters for the multilingual doctrine.
 try:
-    from multi_engine_search import search as _google_search
+    from multi_search import search as _google_search
     _SEARCH_GOOGLE = True
 except ImportError:
     _SEARCH_GOOGLE = False
@@ -289,7 +289,7 @@ def search_web(query, n=5):
     # supplement -- we don't want duplicate results).
     if not results and _SEARCH_GOOGLE:
         try:
-            # _google_search is the search() function from multi_engine_search.
+            # _google_search is the search() function from multi_search.
             # search_engine="google" uses Google without an API key (scrapes HTML).
             # The return format is a list, but the exact structure varies --
             # we handle both dict-style and tuple-style results.
@@ -406,10 +406,12 @@ def search_hn(query, n=10):
                     break  # Stop once we have enough results
 
                 results.append({
-                    "title": item.get("title", ""),
+                    "title": item.get("title") or "",
                     # Build the HN URL from the item's ID
                     "url": f"https://news.ycombinator.com/item?id={item.get('objectID', '')}",
-                    "snippet": item.get("story_text", "")[:300],
+                    # story_text is null (not missing) for link posts, so
+                    # .get("story_text", "") would return None here
+                    "snippet": (item.get("story_text") or "")[:300],
                     "domain": "news.ycombinator.com",
                     "points": item.get("points", 0),  # Upvotes (popularity)
                 })
@@ -461,7 +463,7 @@ def fetch_page(url, max_chars=5000):
                 # A page that returns only 10 characters probably failed
                 if text and len(text.strip()) > 100:
                     return text[:max_chars]  # Truncate to max length
-        except Exception as e:
+        except Exception:
             pass  # trafilatura failed -- fall through to Tier 2
 
     # ── Tier 2: camoufox (stealth browser, for protected sites) ─────
@@ -737,8 +739,11 @@ def detect_lang(text):
     """
     if _LANG and text and len(text) > 50:
         try:
-            return _detect_lang(text[:500])  # Only analyze first 500 chars (faster)
-        except Exception as e:
+            # Only analyze first 500 chars (faster). langdetect returns
+            # regional codes like "zh-cn" / "zh-tw"; keep just the base
+            # code so it matches the keys in LANGUAGES ("zh").
+            return _detect_lang(text[:500]).split("-")[0]
+        except Exception:
             pass  # Detection failed -- return 'unknown'
     return "unknown"
 
@@ -752,15 +757,29 @@ def print_capabilities():
     Print a checklist of which libraries are available.
 
     This runs at the start of explore/deepen so you can see at a glance
-    what the toolkit can do. A means the library is installed,
-    means it's missing (that feature will be skipped).
+    what the toolkit can do. "OK" means the library is installed,
+    "--" means it's missing (that feature will be skipped).
     """
-    ddg_status = "" if _SEARCH_DDG else ""
-    google_status = "" if _SEARCH_GOOGLE else "--"
-    print(f"   Search:      DDG {ddg_status} + Google fallback {google_status}")
-    print(f"   Extract:     trafilatura {'' if _TRAF else ''}"
-          f" + camoufox {'' if _CAMO else '--'}")
-    print(f"   Academic:    S2 {'' if _S2 else ''} + arXiv {'' if _ARXIV else ''}")
-    print(f"   HN:          {'' if _HN else '(web fallback)'}")
-    print(f"   Lang detect: {'' if _LANG else ''}")
-    print(f"   APA:         {'' if _CITE else '(manual fallback)'}")
+    def ok(flag, missing="--"):
+        return "OK" if flag else missing
+
+    print(f"   Search:      DDG {ok(_SEARCH_DDG)} + Google fallback {ok(_SEARCH_GOOGLE)}")
+    print(f"   Extract:     trafilatura {ok(_TRAF)} + camoufox {ok(_CAMO)}")
+    print(f"   Academic:    S2 {ok(_S2)} + arXiv {ok(_ARXIV)}")
+    print(f"   HN:          {ok(_HN, '(web fallback)')}")
+    print(f"   Lang detect: {ok(_LANG)}")
+    print(f"   APA:         {ok(_CITE, '(manual fallback)')}")
+
+
+def extract_quoted_queries(text, min_len=10):
+    """
+    Pull search queries out of AI text where they appear in quotes.
+
+    We match EVERY quoted string first (short ones included) and only then
+    filter by length. Matching just long strings (r'"([^"]{10,})"') pairs
+    the wrong quote marks after a short quote: 'try "AI" or "junior dev
+    adoption"' would yield ' or ' as a "query". Curly quotes are handled
+    too, and a query never spans lines.
+    """
+    quoted = re.findall(r'["\u201c]([^"\u201c\u201d\n]*)["\u201d]', text or "")
+    return [q.strip() for q in quoted if len(q.strip()) >= min_len]

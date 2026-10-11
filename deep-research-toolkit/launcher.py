@@ -58,8 +58,12 @@ def run_mode(mode, extra_args=None):
     """
     Run one of the toolkit's modes (explore, analyze, stats, etc.)
 
-    Under the hood, this calls: python agent.py <mode> --key <your_key>
+    Under the hood, this calls: python agent.py <mode>
     It's like typing that command in a terminal, but the launcher does it for you.
+    The API key reaches the mode through the OPENROUTER_API_KEY environment
+    variable (which child processes inherit), NOT through a --key argument:
+    command-line arguments are visible to other programs and users on the
+    machine (Task Manager, ps), environment variables are not.
 
     Parameters:
         mode       -- which mode to run (e.g., "explore", "analyze", "ask")
@@ -72,23 +76,22 @@ def run_mode(mode, extra_args=None):
     # mode           = which mode to run (e.g., "explore")
     cmd = [sys.executable, "agent.py", mode]
 
-    # Load the API key and add it to the command
-    key = load_key()
-    if key:
-        cmd += ["--key", key]  # Adds: --key sk-or-xxxx...
+    # Load the API key into os.environ (load_key does that for us);
+    # the subprocess below inherits it.
+    load_key()
 
     # Add any extra arguments (like a question for ask mode)
     if extra_args:
         cmd += extra_args  # Adds them to the end of the command
 
-    # Show the user what we're about to run (first 4 parts only, to hide the key)
-    print(f"\n   Running: {' '.join(cmd[:4])}...\n")
+    # Show the user what we're about to run
+    print(f"\n   Running: {' '.join(cmd)}\n")
 
     # Actually run the command.
     # subprocess.run() starts a new process and waits for it to finish.
     # cwd = "current working directory" -- we set it to the toolkit folder
     # so the scripts can find each other.
-    subprocess.run(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
+    subprocess.run(cmd, cwd=os.path.dirname(os.path.abspath(__file__)), check=False)
 
 
 def main():
@@ -240,16 +243,19 @@ def main():
             if confirm == "y":
                 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
                 if os.path.exists(env_path):
-                    # Read the file, remove the API key line, keep everything else
-                    with open(env_path, "r") as f:
+                    # Read the file, remove the API key line, keep everything else.
+                    # We drop the line entirely rather than writing a placeholder
+                    # value: load_key() and setup.py would read a placeholder as a
+                    # real key and send it to the API.
+                    with open(env_path) as f:
                         lines = f.readlines()
                     with open(env_path, "w") as f:
                         for line in lines:
                             if not line.startswith("OPENROUTER_API_KEY="):
                                 f.write(line)
-                            else:
-                                # Write the key name but with a placeholder value
-                                f.write("OPENROUTER_API_KEY=DELETED_BEFORE_SUBMISSION\n")
+                        f.write("# OPENROUTER_API_KEY deleted before submission -- re-run setup.py\n")
+                    # Also forget it for the rest of this launcher session
+                    os.environ.pop("OPENROUTER_API_KEY", None)
                     print("  API key removed from .env")
                     print("  Safe to submit your toolkit now.")
                 else:
@@ -294,7 +300,8 @@ if __name__ == "__main__":
             # This installs packages, asks for the API key, etc.
             subprocess.run(
                 [sys.executable, "setup.py"],
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                check=False,
             )
 
     # Now show the main menu

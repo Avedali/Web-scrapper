@@ -215,8 +215,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
 
     section_titles = []  # Will hold the extracted titles
 
-    for line in outline.split("\n"):  # Go through the outline line by line
-        line = line.strip()
+    for raw_line in outline.split("\n"):  # Go through the outline line by line
+        # Also strip Markdown heading/bold markers ("### 1. ...", "**1. ...**")
+        # which models often add -- otherwise the pattern below never matches.
+        line = raw_line.strip().lstrip("#* ")
 
         # re.match tries to match a pattern at the START of the string.
         # This pattern matches lines that start with a number or Roman numeral,
@@ -235,7 +237,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
             # .split("--")[0] takes only the part before an em-dash
             # .split(":")[0] takes only the part before a colon
             # This strips sub-descriptions: "Introduction: The paradox" → "Introduction"
-            title = m.group(1).split("--")[0].split(":")[0].strip()
+            title = m.group(1).split("--")[0].split(":")[0].strip(" *")
 
             # Only keep titles that are reasonable length (not too short, not too long)
             if len(title) > 5 and len(title) < 80:
@@ -284,10 +286,13 @@ Output a numbered outline with section titles and one-line argument summaries.""
     for title in section_titles:
         print(f"    {title}")
 
-        # Ask the AI to write this specific section
+        # Ask the AI to write this specific section.
+        # The section writer has never seen the thesis analysis, so we
+        # must include the theses text itself -- "#2" alone means nothing.
         content = call_ai(
             f"Write this section of the paper.\n\n"
-            f"THESIS: #{thesis_num} from the thesis analysis\n"
+            f"THESIS: argue thesis #{thesis_num} from the analysis below.\n"
+            f"THESES:\n{theses[:3000]}\n\n"
             f"SECTION: {title}\n"
             f"OUTLINE:\n{outline[:1500]}\n\n"  # Include outline for context
             f"EVIDENCE:\n{evidence[:6000]}\n\n" # Include sources to cite
@@ -349,9 +354,11 @@ Output a numbered outline with section titles and one-line argument summaries.""
                 flags += hits           # Add to total count
                 c = pat.sub("", c)      # Remove all occurrences (replace with nothing)
 
-        # Clean up the mess left behind (double spaces, orphaned punctuation)
-        # r"\s{2,}" matches 2 or more whitespace characters in a row
-        c = re.sub(r"\s{2,}", " ", c).strip()
+        # Clean up the mess left behind (double spaces, orphaned punctuation).
+        # r"[ \t]{2,}" matches 2+ spaces/tabs only -- NOT newlines, so the
+        # paragraph breaks survive. Then squash 3+ newlines back to 2.
+        c = re.sub(r"[ \t]{2,}", " ", c)
+        c = re.sub(r"\n{3,}", "\n\n", c).strip()
 
         # If we found and removed phrases, the text probably reads awkwardly.
         # Ask the AI to rewrite it smoothly while keeping facts and citations.
@@ -525,33 +532,39 @@ def _build_evidence_block(corpus_dir):
 
 def _build_apa(corpus_dir):
     """
-    Generate APA 7th edition references from source metadata.
+    Generate APA 7th edition references from the corpus.
 
     APA format for a web source looks like:
     Author. (Year). Title. Site Name. Retrieved Month Day, Year, from URL
 
     Since we usually don't know the author (we scraped the pages),
-    we use the title and domain as available fields.
+    we use the title and domain as available fields. When the publication
+    year is unknown, APA uses "n.d." (no date) -- NOT the current year.
 
     Non-English sources get a language note: [In Japanese].
+
+    We read corpus.json (not sources_meta.json) so each reference number
+    is the same "idx" the evidence block uses for its [n] tags. deepen
+    appends new sources to corpus.json only, so numbering by the metadata
+    file would leave the new [n] tags pointing at missing references.
     """
 
-    meta_path = os.path.join(corpus_dir, "sources_meta.json")
+    corpus_path = os.path.join(corpus_dir, "corpus.json")
 
-    if not os.path.exists(meta_path):
+    if not os.path.exists(corpus_path):
         return ""
 
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)  # Load the source metadata
+    with open(corpus_path, encoding="utf-8") as f:
+        corpus = json.load(f)  # List of sources, each with its "idx"
 
     entries = []  # Will hold formatted APA entries
 
-    # enumerate(meta.items(), 1) gives us: (1, (url, data)), (2, (url, data)), ...
-    # Starting from 1 (not 0) because reference numbers start at [1].
-    for i, (url, s) in enumerate(meta.items(), 1):
+    for pos, s in enumerate(corpus, 1):
+        i = s.get("idx", pos)  # Same number the evidence block cites
+        url = s.get("url", "")
 
         # Check if this source is in a non-English language
-        sl = s.get("source_lang", "")
+        sl = s.get("lang", "")
         lang_note = ""
         if sl and sl not in ("en", "unknown"):
             # LANGUAGES.get(sl, {}).get("name", sl) means:
@@ -564,7 +577,7 @@ def _build_apa(corpus_dir):
         # *{domain}* makes the domain italic in Markdown.
         # datetime.now().strftime('%B %d, %Y') → "October 07, 2026"
         entries.append(
-            f"[{i}] {s.get('title', '')}. ({datetime.now().year}). "
+            f"[{i}] {s.get('title', '')}. ({s.get('year') or 'n.d.'}). "
             f"*{s.get('domain', '')}*.{lang_note} "
             f"Retrieved {datetime.now().strftime('%B %d, %Y')}, from {url}"
         )

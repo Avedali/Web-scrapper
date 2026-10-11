@@ -44,6 +44,7 @@ from core import (
     pad,                 # Save work to the scratchpad
     classify_source,     # Label a source's quality tier
     detect_lang,         # Detect what language a text is in
+    extract_quoted_queries,  # Pull "quoted" search queries out of AI text
     init_search,         # Set up search engine(s)
     print_capabilities,  # Show which libraries are installed
     LANGUAGES,           # The 9 languages we search in
@@ -184,11 +185,13 @@ def run_explore(args):
         # The AI usually returns numbered lines like "1. query here"
         # This list comprehension:
         #   1. Splits the response by newlines
-        #   2. Strips numbering (1., 2., •, *, - etc.) with re.sub
+        #   2. Strips numbering (1., 2), •, *, - etc.) with re.sub.
+        #      Digits are only stripped when followed by "." or ")" so a
+        #      query like "2025 developer survey" keeps its year.
         #   3. Removes leading/trailing whitespace and quotes
         #   4. Keeps only lines longer than 8 characters (filters junk)
         qs = [
-            re.sub(r"^[\d.)\-•*]+\s*", "", line)  # Remove "1." or "•" etc.
+            re.sub(r"^(?:\d+[.)]|[-•*])\s*", "", line.strip())  # Remove "1." or "•" etc.
             .strip()                               # Remove extra spaces
             .strip('"')                            # Remove wrapping quotes
             for line in resp.strip().split("\n")    # Split response into lines
@@ -306,6 +309,7 @@ def run_explore(args):
                     "content": p["snippet"],  # For papers, the snippet IS the abstract
                     "queries": [q],
                     "quality": "academic",     # Papers are always academic quality
+                    "year": p.get("year"),     # Publication year (for APA references)
                     "source_lang": "en",
                     "search_lang": "en",
                 }
@@ -398,10 +402,10 @@ def run_explore(args):
     pad("06_red_team", f"# Red Team\n\n{critique}")
 
     # Extract any search queries the red team suggested for fixing gaps.
-    # re.findall(r'"([^"]{10,})"', text) finds all quoted strings that are
-    # at least 10 characters long. The red team often suggests queries
+    # extract_quoted_queries finds all quoted strings that are at least
+    # 10 characters long. The red team often suggests queries
     # like "search for X to fill the gap."
-    fixes = re.findall(r'"([^"]{10,})"', critique)
+    fixes = extract_quoted_queries(critique)
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 6.5: BIAS CHECK
@@ -426,7 +430,7 @@ def run_explore(args):
 
     # Add the bias check's suggested fix queries to our list
     # += adds to the existing list (doesn't replace it)
-    fixes += re.findall(r'"([^"]{10,})"', bias)
+    fixes += extract_quoted_queries(bias)
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 7: GAP FILL
@@ -466,7 +470,8 @@ def run_explore(args):
     # BACKUP: Before overwriting, we copy the existing corpus to a
     # timestamped backup file. If explore runs twice and the second run
     # fails halfway, the first run's 80 good sources are preserved.
-    # Backup format: corpus-HH.MM.DD.MM.json (hour.minute.day.month)
+    # Backup format: corpus-YYYY.MM.DD.HH.MM.SS.json (seconds included so
+    # two runs in the same minute don't overwrite each other's backup)
     #
     # This also prevents two teammates from accidentally clobbering
     # each other's work if they run modes at the same time.
@@ -478,10 +483,10 @@ def run_explore(args):
     meta_path = os.path.join(SCRATCHPAD, "sources_meta.json")
 
     # Backup existing files before overwriting
-    timestamp = datetime.now().strftime("%H.%M.%d.%m")  # e.g., "14.30.07.10"
+    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")  # e.g., "2026.10.07.14.30.05"
     for existing_file in [corpus_path, meta_path]:
         if os.path.exists(existing_file):
-            # Build backup name: corpus.json → corpus-14.30.07.10.json
+            # Build backup name: corpus.json → corpus-2026.10.07.14.30.05.json
             name, ext = os.path.splitext(existing_file)
             backup = f"{name}-{timestamp}{ext}"
             shutil.copy2(existing_file, backup)  # copy2 preserves timestamps
@@ -500,6 +505,7 @@ def run_explore(args):
             "quality": s["quality"],
             "lang": s.get("source_lang", "?"),
             "url": url,
+            "year": s.get("year"),                 # Known for academic papers only
             "content": s["content"][:3000],        # Truncate content to 3000 chars
         }
         for i, (url, s) in enumerate(sources.items())

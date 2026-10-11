@@ -31,7 +31,6 @@ Only run AFTER synthesize (it reads synthesize's output).
 
 import json  # Read/write structured data files
 import os    # File/folder operations
-import re    # Pattern matching (extracting search queries from AI text)
 import time  # Pauses between web requests
 
 
@@ -44,6 +43,7 @@ from core import (
     pad,              # Save to scratchpad
     classify_source,  # Label source quality (academic? vendor? etc.)
     detect_lang,      # Detect what language a text is in
+    extract_quoted_queries,  # Pull "quoted" search queries out of AI text
     init_search,      # Set up search engines
     SCRATCHPAD,       # Path to the scratchpad folder
 )
@@ -154,14 +154,9 @@ def run_deepen(args):
     # The AI typically suggests queries in quotes: 'search for "junior developer
     # AI tool adoption rates 2025"'. We extract those quoted strings.
     #
-    # re.findall(r'"([^"]{10,})"', gaps) finds all text inside double quotes
-    # that's at least 10 characters long. The parentheses () mean "capture
-    # this part" -- so we get the text WITHOUT the quotes.
-    #
-    # The list comprehension [q for q in ...] just converts the result
-    # to a plain list (it's already a list from findall, but this pattern
-    # would let us add filtering if needed).
-    fix_queries = [q for q in re.findall(r'"([^"]{10,})"', gaps)]
+    # extract_quoted_queries finds all text inside double quotes that's at
+    # least 10 characters long, WITHOUT the quotes (see core.py).
+    fix_queries = extract_quoted_queries(gaps)
 
     print(f"\n   Found {len(fix_queries)} targeted queries")
 
@@ -228,6 +223,7 @@ def run_deepen(args):
                         "url": p["url"],
                         "content": p["snippet"][:3000],  # For papers, content = abstract
                         "quality": "academic",
+                        "year": p.get("year"),           # Publication year (for APA)
                         "lang": "en",
                     })
                     existing_urls.add(p["url"])

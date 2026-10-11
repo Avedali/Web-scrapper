@@ -218,11 +218,23 @@ def run_viz(args):
         fig.add_vline(x=0, line_dash="dash", line_color=GRAY, line_width=1)
 
         n_total = len(df)
+
+        # Slide title: THE FINDING itself -- computed from the data, so the
+        # slide can't claim a result the corpus doesn't show.
+        # (Plotly titles use <br> for line breaks, not \n.)
+        is_vendor = df["quality"].str.contains("vendor", case=False, na=False)
+        if is_vendor.any() and (~is_vendor).any():
+            v_mean = df.loc[is_vendor, "sentiment"].mean()
+            o_mean = df.loc[~is_vendor, "sentiment"].mean()
+            slide_title = (f"Vendor sources average {v_mean:+.2f} sentiment --<br>"
+                           f"other sources average {o_mean:+.2f}")
+        else:
+            slide_title = "Sentiment by source type"
+
         save(fig, "01_sentiment_by_type",
              # Paper title: descriptive, includes N
              f"Figure 1: Sentiment distribution by source quality tier (N={n_total})",
-             # Slide title: THE FINDING itself -- what the audience should remember
-             "Vendor sources are consistently positive --\nindependent sources tell a different story")
+             slide_title)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 2: Sentiment by language (LOLLIPOP CHART)
@@ -290,9 +302,12 @@ def run_viz(args):
             # Add a solid vertical line at x=0 (the neutral boundary)
             fig.add_vline(x=0, line_dash="solid", line_color=DARK, line_width=1)
 
+            # Slide title from the data: the most and least positive languages
+            lo, hi = data.iloc[0], data.iloc[-1]
             save(fig, "02_sentiment_by_lang",
                  "Figure 2: Mean sentiment by source language (lollipop chart)",
-                 "Non-English sources see the topic differently")
+                 f"Most positive: {hi['lang']} ({hi['m']:+.2f}) -- "
+                 f"least positive: {lo['lang']} ({lo['m']:+.2f})")
 
     # ════════════════════════════════════════════════════════════════
     # CHART 3: Language coverage (TREEMAP)
@@ -457,9 +472,17 @@ def run_viz(args):
                     points="all",  # Show each individual result as a dot
                 )
 
+                # Slide title from the data: senior vs layman median length
+                med = sim_df.groupby(level_col)["lines"].median()
+                if med.get("layman", 0) > 0 and "senior" in med:
+                    ratio = med["senior"] / med["layman"]
+                    slide_title = f"Senior prompts get {ratio:.1f}× more code than layman prompts"
+                else:
+                    slide_title = "Code output length by prompt skill level"
+
                 save(fig, "06_skill_vs_output",
                      "Figure 6: Code output length by prompt sophistication",
-                     "Senior prompts get 3-5× more code -- the tool amplifies skill")
+                     slide_title)
 
         # ── Chart 7: Guardrail behavior ─────────────────────────────
         # Shows which models handle security risks properly

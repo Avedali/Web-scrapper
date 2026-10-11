@@ -74,7 +74,7 @@ def _chunk_text(text, chunk_size=450, overlap=50):
 
     Example:
         _chunk_text("a" * 1000, chunk_size=400, overlap=50)
-        → ["a"*400, "a"*400, "a"*400]  (with 50-char overlaps)
+        → ["a"*400, "a"*400, "a"*300]  (with 50-char overlaps)
     """
     if not text or len(text) <= chunk_size:
         return [text] if text else [""]
@@ -84,6 +84,12 @@ def _chunk_text(text, chunk_size=450, overlap=50):
     while start < len(text):
         end = start + chunk_size
         chunks.append(text[start:end])
+
+        # Stop once this chunk reaches the end of the text. Without this,
+        # the loop would add one more tiny chunk that sits entirely inside
+        # the overlap of this one, double-counting it in averages/votes.
+        if end >= len(text):
+            break
 
         # Move forward by (chunk_size - overlap) so chunks overlap.
         # If chunk_size=450 and overlap=50, we advance 400 chars each step.
@@ -113,6 +119,10 @@ def run_analyze(args):
 
     with open(corpus_path, encoding="utf-8") as f:
         corpus = json.load(f)  # Load JSON → Python list of dictionaries
+
+    if not corpus:
+        print("Corpus is empty. Re-run 'python agent.py explore'.")
+        return
 
     print("=" * 60)
     print(f"MODE 2a: ANALYZE ({len(corpus)} documents)")
@@ -391,7 +401,7 @@ def run_analyze(args):
         # .shape = (number of rows, number of columns)
         # We need at least 2 rows (2 languages) for the table to be interesting
         if ct.shape[0] >= 2:
-            print(f"\n   Topic × Language cross-tab:")
+            print("\n   Topic × Language cross-tab:")
             print(ct.to_string())  # .to_string() renders the table as text
 
     except Exception as e:

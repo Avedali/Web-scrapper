@@ -262,7 +262,10 @@ def _corpus_stats(df, args):
         # Find all numeric columns in the DataFrame.
         # select_dtypes(include="number") keeps only columns with numeric data.
         # .columns.tolist() converts the column names to a plain list.
-        num_cols = df.select_dtypes(include="number").columns.tolist()
+        # "idx" (row number) and "bertopic" (topic ID -- a category label,
+        # not a quantity) are numeric-looking but meaningless to correlate.
+        num_cols = [c for c in df.select_dtypes(include="number").columns
+                    if c not in ("idx", "bertopic")]
 
         if len(num_cols) >= 2 and HAS_PG:
             # pingouin's pairwise_corr tests ALL pairs of numeric columns at once.
@@ -289,8 +292,10 @@ def _corpus_stats(df, args):
             # everything after the current item.
             for i, c1 in enumerate(num_cols):
                 for c2 in num_cols[i+1:]:  # Only pairs we haven't tested yet
-                    # .dropna() removes missing values (NaN) before testing
-                    rho, p = sp.spearmanr(df[c1].dropna(), df[c2].dropna())
+                    # .dropna() on BOTH columns together removes rows with a
+                    # missing value, so the two series stay paired row-by-row
+                    pair = df[[c1, c2]].dropna()
+                    rho, p = sp.spearmanr(pair[c1], pair[c2])
                     if p < 0.05:  # Only print significant correlations
                         print(f"   {c1} × {c2}: ρ={rho:.3f}, p={p:.4f}")
 
@@ -358,7 +363,7 @@ def _corpus_stats(df, args):
                     if ct.shape == (2, 2):
                         # 2×2 table → use Fisher's exact test
                         odds, p_fisher = sp.fisher_exact(ct)
-                        sig = "" if p_fisher < 0.05 else "  "
+                        sig = "*" if p_fisher < 0.05 else " "
                         print(f"   {sig} {c1} × {c2}: Fisher's exact p={p_fisher:.4f}, "
                               f"odds ratio={odds:.2f}")
                         print(f"      (used Fisher's: {pct_low:.0f}% of cells had expected freq < 5)")
@@ -366,7 +371,7 @@ def _corpus_stats(df, args):
                                    f"odds={odds:.2f}\n\n")
                     else:
                         # Larger table → report chi-squared with warning
-                        sig = "" if p < 0.05 else "  "
+                        sig = "*" if p < 0.05 else " "
                         print(f"   {sig} {c1} × {c2}: χ²={chi2:.1f}, p={p:.4f}, V={v:.3f}")
                         print(f"      CAUTION: {pct_low:.0f}% of cells have expected "
                               f"freq < 5 -- p-value may be unreliable")
@@ -374,7 +379,7 @@ def _corpus_stats(df, args):
                                    f"{pct_low:.0f}% cells < 5 expected -- interpret with caution\n\n")
                 else:
                     # Assumptions met → report normally
-                    sig = "" if p < 0.05 else "  "
+                    sig = "*" if p < 0.05 else " "
                     print(f"   {sig} {c1} × {c2}: χ²={chi2:.1f}, p={p:.4f}, V={v:.3f}")
                     report += f"## {c1} × {c2}\nχ²={chi2:.1f}, p={p:.4f}, Cramér's V={v:.3f}\n\n"
 
@@ -441,8 +446,10 @@ def _corpus_stats(df, args):
                 sem_df = pd.concat([sem_df, topic_dummies], axis=1)
 
             # Clean column names (semopy doesn't like spaces or special chars)
+            # (No other renaming: the q_/t_ prefixes must survive, because
+            # the q_cols / t_cols lookups below depend on them.)
             sem_df.columns = [c.replace(" ", "_").replace("/", "_").replace(".", "_")
-                              .replace("-", "_").replace("_", "flag_")
+                              .replace("-", "_")
                               for c in sem_df.columns]
 
             # Drop rows with any missing values (SEM needs complete cases)
@@ -500,12 +507,14 @@ def _corpus_stats(df, args):
                         rval = row.get("rval", "")
                         est = row.get("Estimate", 0)
                         pval = row.get("p-value", 1)
-                        sig = "" if pval < 0.05 else "  "
+                        sig = "*" if pval < 0.05 else " "
                         print(f"   {sig} {rval:30s} → {lval:15s}  β={est:+.3f}  p={pval:.4f}")
 
                     report += f"## SEM: {model_label}\n{paths.to_string()}\n\n"
                 else:
                     print("   No significant paths found")
+            elif not q_cols:
+                print("   Need 2+ source quality tiers for SEM")
             else:
                 print(f"   Need 30+ observations for SEM (have {len(sem_df)})")
 
@@ -604,10 +613,6 @@ def _survey_stats(df, args):
             try:
                 import statsmodels.api as sm
 
-                # Convert the yes/no column to 0/1 numbers.
-                # pd.Categorical(...).codes assigns 0 to one value and 1 to the other.
-                y = pd.Categorical(df[col]).codes
-
                 # Find all numeric columns to use as predictors.
                 # select_dtypes(include="number") keeps only numeric columns.
                 nums = df.select_dtypes(include="number").columns.tolist()
@@ -615,15 +620,19 @@ def _survey_stats(df, args):
                 # Use up to 5 numeric columns as predictors (exclude the target itself).
                 # More predictors need more data to be reliable.
                 preds = [c for c in nums if c != col][:5]
+                if not preds:
+                    print("   No numeric predictor columns -- skipping")
+                    continue
 
-                # Prepare the predictor data.
-                # .dropna() removes rows with missing values (logistic regression
-                # crashes on NaN values).
-                X = df[preds].dropna()
+                # Drop rows with a missing target OR predictor in one go
+                # (logistic regression crashes on NaN values, and a missing
+                # target would otherwise become code -1 below).
+                data = df[[col] + preds].dropna()
 
-                # Align y with X (only keep rows that survived dropna).
-                # X.index = the row numbers that survived.
-                y = y[X.index]
+                # Convert the yes/no column to 0/1 numbers.
+                # pd.Categorical(...).codes assigns 0 to one value and 1 to the other.
+                y = pd.Categorical(data[col]).codes
+                X = data[preds]
 
                 # sm.add_constant adds a column of 1's (the "intercept" term).
                 # Without it, the model is forced through the origin, which
