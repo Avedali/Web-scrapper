@@ -39,6 +39,21 @@ from core import (
 
 
 # ════════════════════════════════════════════════════════════════════════
+# HOW MUCH EVIDENCE THE AI SEES -- characters per prompt
+# ════════════════════════════════════════════════════════════════════════
+#
+# These used to be 8000 / 6000 characters with 5 sources per tier, so a
+# 2,500-word brief built from a 121-source corpus cited just 2 sources.
+# Current models read far more (the default reads ~1M tokens); a full
+# synthesize run at these sizes costs about a cent. Lower them if you pick
+# a model with a small context window.
+
+THESIS_CONTEXT_CHARS = 30000   # Findings + sources shown to the thesis step
+EVIDENCE_CHARS = 40000         # Tagged sources shown when writing each section
+SOURCES_PER_TIER = 15          # Max sources per quality tier in the evidence
+
+
+# ════════════════════════════════════════════════════════════════════════
 # MAIN FUNCTION
 # ════════════════════════════════════════════════════════════════════════
 
@@ -51,7 +66,7 @@ def run_synthesize(args):
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("--key required")
+        print("No API key found -- run install.py to add one (or pass --key KEY)")
         return
 
     model = args.model  # Which AI model to use
@@ -71,6 +86,12 @@ def run_synthesize(args):
 
     # len(context) = number of characters (letters) in the text
     print(f"   Loaded {len(context)} chars of evidence from scratchpad/")
+
+    # ── Build the evidence block ────────────────────────────────────
+    # This creates a formatted text block containing all our sources,
+    # tagged with numbers [1], [2], etc. so the AI can cite them.
+    # Built here so the thesis step can cite real sources too.
+    evidence = _build_evidence_block(args.corpus)
 
     # ════════════════════════════════════════════════════════════════
     # 1.b.i: THESIS GENERATION
@@ -94,8 +115,9 @@ def run_synthesize(args):
 
     # Build the prompt for thesis generation.
     # f"""...""" is a multi-line f-string (formatted string).
-    # {context[:8000]} inserts the first 8000 characters of evidence
-    # (we truncate because AI models have a maximum input length).
+    # The prompt gets the findings (context) plus the tagged sources,
+    # truncated to THESIS_CONTEXT_CHARS (AI models have a maximum input length).
+    thesis_evidence = (context + "\n" + evidence)[:THESIS_CONTEXT_CHARS]
     thesis_prompt = f"""You are a research advisor helping business students write a capstone paper.
 
 You have access to ALL the evidence they collected -- raw sources, sentiment
@@ -115,7 +137,7 @@ For each thesis, explain:
 - What the paper outline would look like if they chose this thesis
 
 EVIDENCE:
-{context[:8000]}
+{thesis_evidence}
 
 Do NOT propose generic theses like "AI is transforming software development."
 That's a topic, not a thesis. A thesis takes a position: "AI coding assistants
@@ -174,7 +196,7 @@ The paper is 8-10 pages, double-spaced, for a business school capstone.
 The audience is financial industry professionals, not technologists.
 
 THESES:
-{theses[:3000]}
+{theses[:8000]}
 
 RULES:
 - Every section must exist because the thesis NEEDS it, not because
@@ -255,10 +277,6 @@ Output a numbered outline with section titles and one-line argument summaries.""
             "Conclusion",
         ]
 
-    # ── Build the evidence block ────────────────────────────────────
-    # This creates a formatted text block containing all our sources,
-    # tagged with numbers [1], [2], etc. so the AI can cite them.
-    evidence = _build_evidence_block(args.corpus)
 
     # ── System prompt (rules the AI must follow) ────────────────────
     # The system prompt is like giving the AI its job description.
@@ -274,6 +292,9 @@ Output a numbered outline with section titles and one-line argument summaries.""
         "- ONLY facts from the evidence block. Tag every claim [n].\n"
         "- If evidence is thin, say so. NEVER fill from memory.\n"
         "- Note source language when relevant.\n"
+        "- Draw on a RANGE of sources: support each point with several\n"
+        "  different [n] sources where the evidence allows, and use the\n"
+        "  non-English sources -- the corpus is multilingual on purpose.\n"
         "- One idea per sentence. Concrete. No jargon without definition.\n"
         "- NEVER use: " + ", ".join(f'"{p}"' for p in BANNED_PHRASES[:10]) + "\n"
         "- You are ARGUING a thesis, not summarizing a topic. Every paragraph\n"
@@ -292,10 +313,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
         content = call_ai(
             f"Write this section of the paper.\n\n"
             f"THESIS: argue thesis #{thesis_num} from the analysis below.\n"
-            f"THESES:\n{theses[:3000]}\n\n"
+            f"THESES:\n{theses[:8000]}\n\n"
             f"SECTION: {title}\n"
-            f"OUTLINE:\n{outline[:1500]}\n\n"  # Include outline for context
-            f"EVIDENCE:\n{evidence[:6000]}\n\n" # Include sources to cite
+            f"OUTLINE:\n{outline[:6000]}\n\n"  # Include outline for context
+            f"EVIDENCE:\n{evidence[:EVIDENCE_CHARS]}\n\n"  # Sources to cite
             f"400-600 words. Tag every claim [n]. Argue, don't summarize.",
             api_key, model, temp=0.5, system=sys_prompt,
         )
@@ -522,8 +543,9 @@ def _build_evidence_block(corpus_dir):
 
         # by_q.get(quality, []) returns the list of sources for this tier,
         # or an empty list if there are none.
-        # [:5] limits to 5 sources per tier (to keep the prompt manageable).
-        for item in by_q.get(quality, [])[:5]:
+        # SOURCES_PER_TIER caps each tier so a huge "unclassified" tier
+        # can't crowd out the academic and institutional sources.
+        for item in by_q.get(quality, [])[:SOURCES_PER_TIER]:
             evidence += (
                 # [3][ja] means source #3, in Japanese
                 f"[{item.get('idx', '?')}][{item.get('lang', '?')}] "

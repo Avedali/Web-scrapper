@@ -44,7 +44,8 @@ from core import (
     pad,                 # Save work to the scratchpad
     classify_source,     # Label a source's quality tier
     detect_lang,         # Detect what language a text is in
-    extract_quoted_queries,  # Pull "quoted" search queries out of AI text
+    extract_search_queries,  # Pull "QUERY: ..." lines out of AI text
+    QUERY_FORMAT,            # How we ask the AI to mark its search queries
     init_search,         # Set up search engine(s)
     print_capabilities,  # Show which libraries are installed
     LANGUAGES,           # The 9 languages we search in
@@ -142,7 +143,7 @@ def run_explore(args):
     # if it's empty/None, use the second one.
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("--key required")
+        print("No API key found -- run install.py to add one (or pass --key KEY)")
         return  # Stop here -- can't do anything without a key
 
     model = args.model               # Which AI model to use
@@ -452,17 +453,16 @@ def run_explore(args):
             f"[{s['quality']}][{s.get('source_lang', '?')}] {s['title']}"
             for s in list(sources.values())[:25]
         )
-        + "\n\nFor each gap, suggest a specific fix query.",
+        + "\n\nFor each gap, suggest a specific fix query. " + QUERY_FORMAT,
         api_key, model, temp=0.4,
     )
 
     pad("06_red_team", f"# Red Team\n\n{critique}")
 
     # Extract any search queries the red team suggested for fixing gaps.
-    # extract_quoted_queries finds all quoted strings that are at least
-    # 10 characters long. The red team often suggests queries
-    # like "search for X to fill the gap."
-    fixes = extract_quoted_queries(critique)
+    # extract_search_queries reads the "QUERY: ..." lines we asked for
+    # (falling back to quoted strings if the model ignored the format).
+    fixes = extract_search_queries(critique)
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 6.5: BIAS CHECK
@@ -479,7 +479,7 @@ def run_explore(args):
     bias = call_ai(
         f"Bias audit. Check: geographic, optimism/pessimism, corporate, "
         f"demographic, temporal, linguistic.\nLANGS: {dict(lc)}\n"
-        f"Suggest fix queries (include non-English native script).",
+        f"Suggest fix queries (include non-English native script). " + QUERY_FORMAT,
         api_key, model, temp=0.4,
     )
 
@@ -487,7 +487,7 @@ def run_explore(args):
 
     # Add the bias check's suggested fix queries to our list
     # += adds to the existing list (doesn't replace it)
-    fixes += extract_quoted_queries(bias)
+    fixes += [q for q in extract_search_queries(bias) if q not in fixes]
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 7: GAP FILL

@@ -43,7 +43,8 @@ from core import (
     pad,              # Save to scratchpad
     classify_source,  # Label source quality (academic? vendor? etc.)
     detect_lang,      # Detect what language a text is in
-    extract_quoted_queries,  # Pull "quoted" search queries out of AI text
+    extract_search_queries,  # Pull "QUERY: ..." lines out of AI text
+    QUERY_FORMAT,            # How we ask the AI to mark its search queries
     init_search,      # Set up search engines
     SCRATCHPAD,       # Path to the scratchpad folder
 )
@@ -62,7 +63,7 @@ def run_deepen(args):
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("--key required")
+        print("No API key found -- run install.py to add one (or pass --key KEY)")
         return
 
     model = args.model
@@ -140,7 +141,7 @@ def run_deepen(args):
         f"3. Suggest 2-3 targeted search queries that would find that evidence\n"
         f"   (at least one in a non-English language if the gap is geographic)\n\n"
         f"Also flag: any claims tagged [n] where the source might not actually "
-        f"support the claim being made.",
+        f"support the claim being made.\n\n" + QUERY_FORMAT,
         api_key, model, temp=0.4,
     )
 
@@ -154,9 +155,9 @@ def run_deepen(args):
     # The AI typically suggests queries in quotes: 'search for "junior developer
     # AI tool adoption rates 2025"'. We extract those quoted strings.
     #
-    # extract_quoted_queries finds all text inside double quotes that's at
-    # least 10 characters long, WITHOUT the quotes (see core.py).
-    fix_queries = extract_quoted_queries(gaps)
+    # extract_search_queries reads the "QUERY: ..." lines we asked for
+    # (falling back to quoted strings if the model ignored the format).
+    fix_queries = extract_search_queries(gaps)
 
     print(f"\n   Found {len(fix_queries)} targeted queries")
 

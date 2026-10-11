@@ -821,3 +821,32 @@ def extract_quoted_queries(text, min_len=10):
     """
     quoted = re.findall(r'["\u201c]([^"\u201c\u201d\n]*)["\u201d]', text or "")
     return [q.strip() for q in quoted if len(q.strip()) >= min_len]
+
+
+# Ask the AI to mark its suggested searches this way (see QUERY_FORMAT use)
+QUERY_FORMAT = ("Put each suggested search query on its own line, "
+                "starting with 'QUERY: ' (no quotes around it).")
+
+
+def extract_search_queries(text, min_len=10):
+    """
+    Pull the suggested search queries out of an AI critique / gap analysis.
+
+    Prompts ask for lines like "QUERY: junior developer AI adoption 2025"
+    (see QUERY_FORMAT). Grabbing every quoted string instead also grabbed
+    quoted CLAIMS ("superficial", "cognitive load eroding,") and quoted
+    source TITLES, which then got searched as if they were queries. Quoted
+    text is only used as a fallback when the model ignored the format.
+    Near-duplicates ("cognitive load eroding," vs "...eroding.") are dropped.
+    """
+    marked = re.findall(r"^[\s>*\-•\d.)]*\**QUERY\**\s*[:：]\s*(.+)$", text or "",
+                        re.MULTILINE | re.IGNORECASE)
+    candidates = [q.strip(' *`"\u201c\u201d') for q in marked] or extract_quoted_queries(text, min_len)
+
+    queries, seen = [], set()
+    for q in candidates:
+        key = re.sub(r"\W+", " ", q.lower()).strip()
+        if len(q) >= min_len and key not in seen:
+            seen.add(key)
+            queries.append(q)
+    return queries

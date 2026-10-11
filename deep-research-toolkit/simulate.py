@@ -307,7 +307,7 @@ def run_simulate(args):
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("--key required")
+        print("No API key found -- run install.py to add one (or pass --key KEY)")
         return
 
     # ── Let the user choose which models to benchmark ───────────────

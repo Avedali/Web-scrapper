@@ -58,4 +58,4 @@ Opinion comes AFTER data, not before.
 - All search results are real -- no fallback to example data.
 - The toolkit combines web-sourced information with AI analysis. The AI writes from the scratchpad only, never from its training data.
 - Before submitting: run `launcher.py → option 9` to delete your API key from the `.env` file.
-- Cost: ~$0 with free models (Llama 4 Scout), ~$2-5 with paid models (GPT-4o-mini).
+- Cost (measured on a real run, default model `google/gemini-2.5-flash-lite`): about $0.10 for a full pipeline run, plus 1-2 cents per Ask question.

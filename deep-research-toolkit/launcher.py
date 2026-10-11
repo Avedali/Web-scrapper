@@ -129,8 +129,8 @@ def main():
         print("    9 → Clean up     Delete API key from .env (run before submitting!)")
         print("    0 → Quit")
         print()
-        print("  Cost estimate (with free-tier models like Llama 4 Scout): ~$0")
-        print("     With paid models (GPT-4o-mini): ~$2-5 for a full run")
+        print("  Cost (measured, default model Gemini 2.5 Flash Lite): ~$0.10 for a")
+        print("     full run of options 1-7, plus ~1-2 cents per Ask question")
         print()
 
         # ── Wait for the user to type something ────────────────────

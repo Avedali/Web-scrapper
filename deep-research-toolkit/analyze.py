@@ -469,10 +469,12 @@ def run_analyze(args):
                     for e in entities:
                         # Only keep organizations (ORG), not people or locations
                         # Only keep high-confidence predictions (score > 0.8)
-                        # (The model occasionally returns an empty "word" --
-                        # skip it, or "" would rank as a top organization.)
+                        # (The model occasionally returns an empty "word" or
+                        # bare punctuation like "’" or "。" -- skip those, or
+                        # they would rank as top organizations.)
                         word = e["word"].strip()
-                        if e["entity_group"] == "ORG" and e["score"] > 0.8 and word:
+                        is_name = any(ch.isalnum() for ch in word)
+                        if e["entity_group"] == "ORG" and e["score"] > 0.8 and is_name:
                             all_entities[word] += 1
             except Exception:
                 pass  # Skip sources that cause errors

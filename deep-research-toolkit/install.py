@@ -257,7 +257,15 @@ def main():
     # importlib.util.find_spec() looks for a package without loading it.
     # If it finds the package, it returns info about it. If not, it returns None.
     if importlib.util.find_spec("camoufox"):
-        print("   Camoufox already installed!")
+        # The Python package alone isn't enough -- the browser itself is a
+        # separate ~300MB download (e.g. when camoufox came in through
+        # requirements.txt). "fetch" is a no-op if it's already there.
+        print("   Camoufox package found -- making sure the browser is downloaded...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "camoufox", "fetch"])
+            print("   Camoufox ready!")
+        except Exception:
+            print("   Browser download failed -- not a problem, toolkit works without it.")
     else:
         # None means the package isn't installed
         print("   Camoufox is a stealth browser for hard-to-scrape sites.")
@@ -302,7 +310,7 @@ def main():
         "pandas": "pandas",
         "trafilatura": "trafilatura",
         "ddgs": "ddgs",
-        "multi_search_engine": "multi_engine_search",  # Note: install ≠ import name!
+        "multi_search_engine": "multi_search",  # Note: install ≠ import name!
         "HF transformers": "transformers",
         "sentencepiece": "sentencepiece",
         "BERTopic": "bertopic",

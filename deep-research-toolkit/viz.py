@@ -125,12 +125,16 @@ def run_viz(args):
                 width=900,
                 height=550,
             )
-        except Exception:
-            # kaleido not installed or broken -- save HTML fallback for paper too
+        except Exception as e:
+            # PNG export failed -- save HTML fallback for paper too
             fig.write_html(os.path.join(paper_dir, f"{name}.html"))
             if not hasattr(save, "_warned"):
-                print("   kaleido not installed -- saving HTML instead of PNG")
-                print("      pip install kaleido  (for static PNG export)")
+                print(f"   PNG export failed -- saving HTML instead ({type(e).__name__})")
+                if "chrome" in str(e).lower():
+                    # kaleido 1.x renders through Google Chrome
+                    print("      Install Google Chrome, or run: plotly_get_chrome")
+                else:
+                    print("      pip install kaleido  (for static PNG export)")
                 save._warned = True  # Only warn once, not for every chart
 
         # ── Slide version ───────────────────────────────────────────

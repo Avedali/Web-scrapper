@@ -275,13 +275,16 @@ def _corpus_stats(df, args):
             corr = pg.pairwise_corr(df[num_cols], method="spearman")
 
             # Filter to only significant correlations (p < 0.05).
-            # "p-unc" = uncorrected p-value.
-            sig = corr[corr["p-unc"] < 0.05]
+            # "p-unc" = uncorrected p-value. pingouin 0.7 renamed it to
+            # "p_unc", so accept either spelling.
+            pcol = "p-unc" if "p-unc" in corr.columns else "p_unc"
+            sig = corr[corr[pcol] < 0.05]
 
             if not sig.empty:  # .empty is True if the DataFrame has no rows
-                # Show only the most useful columns
-                print(sig[["X", "Y", "r", "p-unc", "power"]].to_string(index=False))
-                report += f"## Spearman Correlations\n{sig[['X','Y','r','p-unc']].to_string()}\n\n"
+                # Show only the most useful columns (that this version has)
+                show = [c for c in ["X", "Y", "r", pcol, "power"] if c in sig.columns]
+                print(sig[show].to_string(index=False))
+                report += f"## Spearman Correlations\n{sig[show].to_string()}\n\n"
             else:
                 print("   No significant correlations found")
 
@@ -467,8 +470,19 @@ def _corpus_stats(df, args):
             # If adding topics reduces the quality→sentiment path,
             # that's evidence of mediation.
 
-            q_cols = [c for c in sem_df.columns if c.startswith("q_")]
-            t_cols = [c for c in sem_df.columns if c.startswith("t_")]
+            # Which dummies go into the model (we use at most 4 of each to
+            # avoid overfitting). Skip categories with fewer than 3 sources --
+            # a path estimated from 1 source is noise -- then take the biggest,
+            # always keeping vendor first since vendor bias is the hypothesis.
+            # (Taking the first 4 alphabetically used to pick n=1 tiers like
+            # "consulting" and leave vendor out entirely.)
+            def pick(prefix):
+                cols = [c for c in sem_df.columns
+                        if c.startswith(prefix) and sem_df[c].sum() >= 3]
+                return sorted(cols, key=lambda c: ("vendor" not in c, -sem_df[c].sum()))
+
+            q_cols = pick("q_")
+            t_cols = pick("t_")
 
             if q_cols and len(sem_df) >= 30:
                 q_predictors = " + ".join(q_cols[:4])  # Limit to 4 to avoid overfit
