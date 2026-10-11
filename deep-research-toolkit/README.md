@@ -24,7 +24,7 @@ A multilingual, multi-phase Python research pipeline for the Sciences Po capston
 ## Quick Start (for teammates)
 
 1. Download [Thonny](https://thonny.org) (comes with Python)
-2. Open `setup.py` → click ▶ Run → wait → paste API key when asked
+2. Open `install.py` → click ▶ Run → wait → paste API key when asked
 3. Open `launcher.py` → click ▶ Run → type a number
 
 ## Recommended Pipeline
@@ -39,7 +39,7 @@ Opinion comes AFTER data, not before.
 
 | File | What it does |
 |---|---|
-| `setup.py` | Run once. Installs everything. |
+| `install.py` | Run once. Installs everything. |
 | `launcher.py` | Menu interface. Run every time. |
 | `agent.py` | CLI router (for terminal users) |
 | `core.py` | Shared tools (search, AI, scratchpad) |

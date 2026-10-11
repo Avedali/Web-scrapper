@@ -47,7 +47,7 @@ from pathlib import Path  # A nicer way to work with file paths than raw strings
 # LIBRARY LOADING -- try to import each optional library
 # ════════════════════════════════════════════════════════════════════════
 #
-# Each library below was installed by setup.py. But some might have failed
+# Each library below was installed by install.py. But some might have failed
 # to install (bad internet, wrong OS, etc.). So we use try/except:
 #   try:    → try to load the library
 #   except: → if it fails, note that it's missing and move on

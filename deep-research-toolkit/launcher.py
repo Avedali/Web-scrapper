@@ -16,7 +16,7 @@ import subprocess  # Run other scripts/commands from inside this one
 
 def load_key():
     """
-    Load the API key from the .env file that setup.py created.
+    Load the API key from the .env file that install.py created.
 
     An API key is like a password that lets our code talk to AI services.
     We saved it to a file called ".env" during setup so you don't have
@@ -238,14 +238,14 @@ def main():
         elif choice == "9":
             print("\n  This removes your API key from the .env file so you")
             print("  don't accidentally submit it with your assignment.")
-            print("  You can always re-run setup.py to add a new key later.\n")
+            print("  You can always re-run install.py to add a new key later.\n")
             confirm = input("  Delete your API key? (y/n) → ").strip().lower()
             if confirm == "y":
                 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
                 if os.path.exists(env_path):
                     # Read the file, remove the API key line, keep everything else.
                     # We drop the line entirely rather than writing a placeholder
-                    # value: load_key() and setup.py would read a placeholder as a
+                    # value: load_key() and install.py would read a placeholder as a
                     # real key and send it to the API.
                     with open(env_path) as f:
                         lines = f.readlines()
@@ -253,7 +253,7 @@ def main():
                         for line in lines:
                             if not line.startswith("OPENROUTER_API_KEY="):
                                 f.write(line)
-                        f.write("# OPENROUTER_API_KEY deleted before submission -- re-run setup.py\n")
+                        f.write("# OPENROUTER_API_KEY deleted before submission -- re-run install.py\n")
                     # Also forget it for the rest of this launcher session
                     os.environ.pop("OPENROUTER_API_KEY", None)
                     print("  API key removed from .env")
@@ -281,14 +281,14 @@ if __name__ == "__main__":
 
     # Before showing the menu, check if setup has been done.
     # We do this by looking for the .env file -- if it doesn't exist,
-    # setup.py hasn't been run yet (because setup.py creates .env).
+    # install.py hasn't been run yet (because install.py creates .env).
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
     if not os.path.exists(env_path):
         # No .env file → setup hasn't been run
         print()
-        print("   First time? Run setup.py first!")
-        print("  Open setup.py in Thonny and click Run.\n")
+        print("   First time? Run install.py first!")
+        print("  Open install.py in Thonny and click Run.\n")
 
         try:
             answer = input("  Or run setup now? (y/n) → ").strip().lower()
@@ -296,10 +296,10 @@ if __name__ == "__main__":
             answer = "n"
 
         if answer == "y":
-            # Run setup.py as a subprocess (just like run_mode does).
+            # Run install.py as a subprocess (just like run_mode does).
             # This installs packages, asks for the API key, etc.
             subprocess.run(
-                [sys.executable, "setup.py"],
+                [sys.executable, "install.py"],
                 cwd=os.path.dirname(os.path.abspath(__file__)),
                 check=False,
             )

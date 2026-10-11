@@ -23,10 +23,19 @@ TWO MODES:
 
 HOW IT WORKS:
   1. Load ALL scratchpad files (research, analysis, stats, synthesis)
-  2. Feed them to the AI as "context" (background knowledge)
+     IN FULL, plus the raw source texts from corpus.json
+  2. If it all fits in one AI call, send it as "context" directly.
+     Otherwise BATCH it: split the research into batches, ask the AI to
+     pull out what's relevant to the question from each batch (several
+     batches at once), then answer from those combined notes.
   3. The AI answers the question using ONLY that context
   4. It doesn't make stuff up -- if the research doesn't cover something,
      it says so
+
+Batching means nothing gets cut off: the old version truncated the
+research to the first 8000 characters, so the bias audit, red team and
+raw sources never reached the AI. The cost is more AI calls per question
+(one per batch, plus one to answer).
 
 This is like having a research assistant who read all your notes
 and can summarize any part of them on demand.
@@ -39,9 +48,20 @@ and can summarize any part of them on demand.
 import os    # File/folder operations and environment variables
 import json  # For loading JSON analysis results
 
+from concurrent.futures import ThreadPoolExecutor  # Read several batches at once
 from pathlib import Path  # Nice file path handling
 
 from core import call_ai  # AI calls
+
+
+# ════════════════════════════════════════════════════════════════════════
+# BATCHING SETTINGS -- tune these if answers are slow or hit rate limits
+# ════════════════════════════════════════════════════════════════════════
+
+BATCH_CHARS = 12000      # Characters of research per AI call (~3000 tokens)
+NOTES_CHARS = 24000      # Max characters of combined notes for the final answer
+MAX_WORKERS = 4          # Batches read at the same time (lower if rate-limited)
+INCLUDE_SOURCES = True   # Also search the raw source texts in corpus.json
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -71,29 +91,27 @@ def run_ask(args):
     # data, which prevents hallucination.
     #
     # args.corpus is the path to the scratchpad folder (default: "scratchpad")
-    context = _load_context(args.corpus)
+    parts = _load_context(args.corpus)
 
-    if not context:
+    if not parts:
         print("No research found. Run 'python agent.py explore' first.")
         return
 
-    # len(context) = number of characters. A typical research corpus
-    # produces 10,000-30,000 characters of context.
-    print(f"   Loaded {len(context)} chars of context from scratchpad.")
+    # Pack the research into batches of up to BATCH_CHARS characters
+    batches = _make_batches(parts)
+
+    total = sum(len(b) for b in batches)
+    print(f"   Loaded {total} chars of context from scratchpad "
+          f"({len(batches)} batch{'es' if len(batches) != 1 else ''}).")
 
     # ── Build the system prompt ─────────────────────────────────────
     # The system prompt tells the AI WHO it is and HOW to behave.
     # It's like giving instructions to a human assistant:
     # "You're helping business students, speak plainly, cite the research."
     #
-    # CRITICAL: We append the entire research context to the system
-    # prompt. This means every question the user asks gets answered
-    # with the full research as background knowledge.
-    #
-    # context[:8000] = first 8000 characters of context. We truncate
-    # because AI models have a maximum input size. 8000 characters
-    # is roughly 2000 words -- enough to cover the key findings.
-    system = (
+    # The research itself is added per question by _answer() -- either
+    # the whole thing (one batch) or the notes pulled from every batch.
+    rules = (
         "You are a research assistant helping a team of business students "
         "understand their capstone research. The team researched how AI coding "
         "assistants are transforming software development.\n\n"
@@ -105,11 +123,6 @@ def run_ask(args):
         "- If asked to explain a statistical test, explain what it tested, "
         "what the result was, and what it means in plain English.\n"
         "- If the research doesn't cover something, say so.\n\n"
-
-        # Here's where the research context is injected.
-        # Everything after this line is the actual research data
-        # that the AI will reference when answering.
-        "RESEARCH CONTEXT:\n" + context[:8000]
     )
 
     # ── Decide which mode to use ────────────────────────────────────
@@ -124,7 +137,7 @@ def run_ask(args):
         #
         # temp=0.4 is slightly creative but mostly factual.
         # Lower temperature = more predictable/factual answers.
-        answer = call_ai(args.question, api_key, args.model, temp=0.4, system=system)
+        answer = _answer(args.question, batches, rules, api_key, args.model)
         print(f"\n{answer}")
 
     else:
@@ -180,7 +193,7 @@ def run_ask(args):
                 full_prompt = q
 
             # Send to the AI
-            answer = call_ai(full_prompt, api_key, args.model, temp=0.4, system=system)
+            answer = _answer(full_prompt, batches, rules, api_key, args.model)
 
             # Print the answer
             print(f"\n{answer}\n")
@@ -194,107 +207,174 @@ def run_ask(args):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CONTEXT LOADER -- reads all scratchpad files into one string
+# ANSWERING -- one call if the research fits, map-then-answer if not
+# ════════════════════════════════════════════════════════════════════════
+
+def _answer(prompt, batches, rules, api_key, model):
+    """
+    Answer one question (prompt may include the conversation history).
+
+    One batch → send it all as context, exactly like a normal question.
+    Several batches → two steps:
+      1. EXTRACT: for each batch, ask the AI to copy out only what's
+         relevant to the question (or say NONE). Batches run in parallel.
+      2. ANSWER: send the combined notes as the context and answer.
+    """
+    if len(batches) == 1:
+        return call_ai(prompt, api_key, model, temp=0.4,
+                       system=rules + "RESEARCH CONTEXT:\n" + batches[0])
+
+    print(f"   Reading {len(batches)} batches of research...")
+
+    def extract(batch):
+        return call_ai(
+            "Below is one part of a research team's notes and sources.\n"
+            "Copy out every finding, number, quote, or source detail that "
+            "helps answer the question. Keep the file labels and [n] source "
+            "tags. Be brief but don't drop specifics. If nothing in this "
+            "part is relevant, reply with exactly: NONE\n\n"
+            f"QUESTION:\n{prompt}\n\n"
+            f"RESEARCH (one part):\n{batch}",
+            api_key, model, temp=0.2,
+        )
+
+    # pool.map keeps the results in batch order (priority files first)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        notes = list(pool.map(extract, batches))
+
+    # call_ai returns "" when a call fails -- warn, but answer with the rest
+    failed = sum(1 for n in notes if not n)
+    if failed:
+        print(f"   {failed}/{len(batches)} batches failed -- answer may be incomplete")
+
+    relevant = [n.strip() for n in notes
+                if n and n.strip().strip(".").upper() != "NONE"]
+    context = "\n\n".join(relevant)[:NOTES_CHARS] or "(Nothing relevant was found.)"
+
+    return call_ai(prompt, api_key, model, temp=0.4,
+                   system=rules + "RELEVANT NOTES FROM THE RESEARCH:\n" + context)
+
+
+def _make_batches(parts, batch_chars=BATCH_CHARS):
+    """
+    Pack labelled text parts into batches of at most batch_chars characters.
+
+    Parts stay in order (priority files first). A part longer than one
+    batch is split into pieces, and each piece keeps its label
+    ("── name (part 2) ──") so the AI still knows where it came from.
+    """
+    batches = []
+    current = ""
+
+    for label, text in parts:
+        room = batch_chars - len(label) - 30  # Leave space for the header
+        pieces = [text[i:i + room] for i in range(0, len(text), room)] or [""]
+
+        for k, piece in enumerate(pieces, 1):
+            name = label if len(pieces) == 1 else f"{label} (part {k})"
+            block = f"── {name} ──\n{piece}\n"
+
+            # Start a new batch if this block doesn't fit in the current one
+            if current and len(current) + len(block) > batch_chars:
+                batches.append(current)
+                current = ""
+            current += block
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+# ════════════════════════════════════════════════════════════════════════
+# CONTEXT LOADER -- reads all research into labelled parts
 # ════════════════════════════════════════════════════════════════════════
 
 def _load_context(corpus_dir):
     """
-    Load all scratchpad files into one big text string for the AI.
+    Load all research as a list of (label, text) parts for the AI.
 
     Files are loaded in PRIORITY ORDER -- the most important files
-    first, because the AI pays more attention to text at the beginning
-    of its context. If we have to truncate (the context is too long
-    for the AI's input limit), the most important stuff survives.
+    first. When everything fits in one batch, the AI pays more attention
+    to text at the beginning; when batching, the first batches hold the
+    core findings.
 
     Priority order:
       1. Synthesis (the thesis and written sections -- the core findings)
       2. Analysis report (sentiment, topics, NER results)
       3. Stats report (statistical test results)
-      4. Bias audit (what's skewed in the research)
-      5. Red team critique (what's wrong with the research)
-      6. Definitions (key terms)
-      7. Decomposition (research questions)
-      8. Everything else (remaining scratchpad files)
-      9. Analysis results JSON (raw numbers)
+      4. Simulation report
+      5. Bias audit (what's skewed in the research)
+      6. Red team critique (what's wrong with the research)
+      7. Definitions (key terms)
+      8. Decomposition (research questions)
+      9. Everything else (remaining scratchpad files)
+     10. Analysis results JSON (raw numbers)
+     11. Raw source texts from corpus.json (if INCLUDE_SOURCES)
 
-    Returns one big string, or "" if the scratchpad is empty.
+    Nothing is truncated here -- batching handles the size.
+    Returns [] if the scratchpad is empty.
     """
 
-    parts = []  # Will hold text chunks from each file
+    parts = []  # Will hold (label, text) pairs
 
     pad_dir = Path(corpus_dir)  # Convert string to Path object
 
     # If the scratchpad folder doesn't exist, nothing to load
     if not pad_dir.exists():
-        return ""
+        return []
 
     # ── Load priority files first ───────────────────────────────────
-    # These are the most important files -- they contain the actual
-    # findings, not raw data. If space is limited, these survive.
     priority = [
-        "synthesis_01_theses", # The proposed theses
+        "synthesis_01_theses",     # The proposed theses
         "synthesis_03_brief_raw",  # Raw brief sections
-        "analyze_report",     # NLP analysis summary
-        "stats_report",       # Statistical test results
-        "simulation_report",  # Simulation findings
-        "065_bias",           # Bias audit
-        "06_red_team",        # Red team critique
-        "01_definitions",     # Key term definitions
-        "02_decomposition",   # Research questions by language
+        "analyze_report",          # NLP analysis summary
+        "stats_report",            # Statistical test results
+        "simulation_report",       # Simulation findings
+        "065_bias",                # Bias audit
+        "06_red_team",             # Red team critique
+        "01_definitions",          # Key term definitions
+        "02_decomposition",        # Research questions by language
     ]
 
     # Track which files we've already loaded (to avoid duplicates later)
-    loaded = set()  # A set of filenames we've already read
+    loaded = set()
 
     for name in priority:
-        p = pad_dir / f"{name}.md"  # Build the full path
-
+        p = pad_dir / f"{name}.md"
         if p.exists():
-            # Read the file and take the first 2000 characters.
-            # We label each chunk with its filename so the AI knows
-            # which file each piece of information came from.
-            # This helps it give answers like "according to the
-            # bias audit, ..."
-            parts.append(
-                f"── {name} ──\n"                             # Label header
-                f"{p.read_text(encoding='utf-8')[:2000]}\n"   # Content (truncated)
-            )
-            # Mark this file as loaded.
-            # We use p.name (just the filename, like "01_definitions.md")
-            # rather than the full path, for simpler comparison later.
+            # Label each part with its filename so the AI can say
+            # "according to the bias audit, ..."
+            parts.append((name, p.read_text(encoding="utf-8")))
             loaded.add(p.name)
 
     # ── Load remaining scratchpad files ─────────────────────────────
-    # Any .md file we haven't loaded yet gets a shorter excerpt (1000 chars).
-    # These might include deepen reports, gap analyses, etc.
-    #
-    # sorted() puts them in alphabetical order (which, because of the
-    # numbered prefixes, is also chronological order).
-    for p in sorted(pad_dir.glob("*.md")):  # Find all .md files
-        if p.name not in loaded:             # Skip ones we already loaded
-            parts.append(
-                f"── {p.stem} ──\n"                             # p.stem = filename without .md
-                f"{p.read_text(encoding='utf-8')[:1000]}\n"     # Shorter excerpt
-            )
+    # deepen reports, gap analyses, etc. sorted() = alphabetical, which
+    # (because of the numbered prefixes) is also chronological order.
+    for p in sorted(pad_dir.glob("*.md")):
+        if p.name not in loaded:
+            parts.append((p.stem, p.read_text(encoding="utf-8")))
 
     # ── Load analysis results JSON (raw numbers) ────────────────────
-    # This file contains the actual sentiment scores, topic counts, etc.
-    # as structured data. The AI can read numbers from it to give
-    # specific answers like "the average sentiment of vendor sources
-    # was +0.34."
+    # The AI can read numbers from it to give specific answers like
+    # "the average sentiment of vendor sources was +0.34."
     results_path = pad_dir / "analysis_results.json"
-
     if results_path.exists():
-        with open(results_path) as f:
-            # json.load reads the file → Python dictionary
-            # json.dumps converts it back to a formatted string (for the AI to read)
-            # indent=2 makes it human-readable (and AI-readable)
-            # [:2000] truncates to 2000 characters
+        with open(results_path, encoding="utf-8") as f:
             data = json.load(f)
-            parts.append(
-                f"── analysis_results ──\n"
-                f"{json.dumps(data, indent=2)[:2000]}\n"
-            )
+        parts.append(("analysis_results", json.dumps(data, indent=2)))
 
-    # Join all parts into one big string, separated by newlines
-    return "\n".join(parts)
+    # ── Load the raw sources (what the findings are based on) ───────
+    # With batching these fit too, so the agent can answer "what did
+    # source [12] actually say?" -- not just what the summaries say.
+    corpus_path = pad_dir / "corpus.json"
+    if INCLUDE_SOURCES and corpus_path.exists():
+        with open(corpus_path, encoding="utf-8") as f:
+            corpus = json.load(f)
+        for item in corpus:
+            parts.append((
+                f"source [{item.get('idx', '?')}][{item.get('lang', '?')}]",
+                f"{item.get('title', '')} ({item.get('domain', '')}) {item.get('url', '')}\n"
+                f"{item.get('content', '')}",
+            ))
+
+    return parts

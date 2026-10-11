@@ -3,10 +3,10 @@
 #   You don't need to worry about it -- it's just a standard header.
 
 """
-setup.py -- Run this ONCE. It does everything.
+install.py -- Run this ONCE. It does everything.
 =============================================
 Open this file in Thonny and click the green Run button.
-Or double-click it. Or type: python setup.py
+Or double-click it. Or type: python install.py
 
 It will:
   1. Install all dependencies (takes 2-5 minutes)
@@ -14,6 +14,10 @@ It will:
   3. Download the Camoufox browser (if you want it)
   4. Test that everything works
   5. Tell you what to do next
+
+(Why not "setup.py"? Python packaging tools treat any file with that name
+as a package build script and may run it -- e.g. "pip install ." would
+execute this installer and hang waiting for input.)
 """
 
 # These are built-in Python tools we need. They come with Python, no install needed.
@@ -183,7 +187,7 @@ def main():
     print("━" * 50)
 
     # Figure out where to save the .env file (same folder as this script)
-    # os.path.abspath(__file__) = the full path to THIS file (setup.py)
+    # os.path.abspath(__file__) = the full path to THIS file (install.py)
     # os.path.dirname(...) = the folder containing this file
     # os.path.join(..., ".env") = add ".env" to that folder path
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
