@@ -63,7 +63,7 @@ def main():
 
     # --- Group 2: Web searching and reading web pages ---
     search = [
-        "duckduckgo-search",    # Searches DuckDuckGo (primary search engine)
+        "ddgs",                 # Multi-engine web search (primary search engine)
         "multi_search_engine",  # Google fallback for non-English queries where DDG returns empty
         "trafilatura",          # Extracts the article text from a web page (ignores ads, menus, etc.)
     ]
@@ -98,6 +98,8 @@ def main():
         nlp = [
             "transformers",  # Hugging Face: pretrained AI models for text analysis
             "torch",         # PyTorch: the engine that runs those AI models (~2GB!)
+            "sentencepiece", # Tokenizer the multilingual zero-shot + NER models need
+            "protobuf",      # Needed by sentencepiece-based tokenizers
             "bertopic",      # Neural topic modeling (discovers themes in texts)
         ]
         print("   → Full install selected (this will take a few minutes)")
@@ -294,14 +296,15 @@ def main():
 
     # Dictionary mapping friendly names to the actual Python module names
     # (sometimes the package name you install differs from the name you import)
-    # For example: you install "duckduckgo-search" but import "duckduckgo_search"
+    # For example: you install "multi_search_engine" but import "multi_search"
     tests = {
         "requests": "requests",
         "pandas": "pandas",
         "trafilatura": "trafilatura",
-        "duckduckgo-search": "duckduckgo_search",    # Note: dash → underscore
+        "ddgs": "ddgs",
         "multi_search_engine": "multi_engine_search",  # Note: install ≠ import name!
         "HF transformers": "transformers",
+        "sentencepiece": "sentencepiece",
         "BERTopic": "bertopic",
         "pingouin": "pingouin",
         "plotly": "plotly",

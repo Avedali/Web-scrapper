@@ -58,13 +58,21 @@ from pathlib import Path  # A nicer way to work with file paths than raw strings
 # We use "flag variables" (like _TRAF = True/False) so other parts of
 # the code can check "is trafilatura available?" before trying to use it.
 
-# --- Web search (DuckDuckGo primary, Google fallback) ---
-# duckduckgo-search is the primary search engine: free, no API key, reliable.
+# --- Web search (ddgs multi-engine primary, Google fallback) ---
+# ddgs is the primary search engine: free, no API key. Despite the name it
+# queries several engines (Bing, Brave, DuckDuckGo, Google, Yandex, ...) and
+# merges the results. It replaces the old "duckduckgo-search" package, which
+# was renamed to ddgs and now returns zero results (DuckDuckGo blocks it)
+# without raising any error. We still accept the old package as a fallback.
 try:
-    from duckduckgo_search import DDGS  # DDGS = DuckDuckGo Search
+    from ddgs import DDGS  # DDGS = Dux Distributed Global Search
     _SEARCH_DDG = True
 except ImportError:
-    _SEARCH_DDG = False
+    try:
+        from duckduckgo_search import DDGS  # Old name -- likely returns nothing
+        _SEARCH_DDG = True
+    except ImportError:
+        _SEARCH_DDG = False
 
 # multi_search_engine is the fallback: if DDG returns nothing (which happens
 # with some non-English queries), we try Google via this package.
@@ -82,7 +90,7 @@ except ImportError:
 if _SEARCH_DDG or _SEARCH_GOOGLE:
     _SEARCH = "available"
 else:
-    _SEARCH = "none"  # No search at all -- install: pip install duckduckgo-search
+    _SEARCH = "none"  # No search at all -- install: pip install ddgs
 
 # --- Trafilatura (article text extraction from web pages) ---
 try:
@@ -159,16 +167,21 @@ SCRATCHPAD = "scratchpad"
 #
 # "why" explains why this language adds a perspective English misses.
 # This isn't decoration -- developer culture is genuinely different in each.
+#
+# "region" tells the search engines which country's results to favor.
+# Without it every search runs as US-English, and e.g. Chinese queries
+# came back as mostly English pages (github.com, lexology.com) instead of
+# Zhihu, CSDN or Toutiao.
 LANGUAGES = {
-    "en": {"name": "English",         "why": "Primary global tech language"},
-    "fr": {"name": "French",          "why": "EU AI Act, Sciences Po context"},
-    "de": {"name": "German",          "why": "Engineering culture, privacy-first, EU voice"},
-    "ja": {"name": "Japanese",        "why": "Corporate dev culture, engineer shortage framing"},
-    "ko": {"name": "Korean",          "why": "Samsung/Naver, own AI tools"},
-    "zh": {"name": "Chinese",         "why": "Different AI ecosystem (Tongyi Lingma, CodeGeeX)"},
-    "pt": {"name": "Portuguese (BR)", "why": "Brazil #2 on GitHub"},
-    "es": {"name": "Spanish",         "why": "LatAm dev context"},
-    "ru": {"name": "Russian",         "why": "JetBrains origin, strong dev tradition"},
+    "en": {"name": "English",         "region": "us-en", "why": "Primary global tech language"},
+    "fr": {"name": "French",          "region": "fr-fr", "why": "EU AI Act, Sciences Po context"},
+    "de": {"name": "German",          "region": "de-de", "why": "Engineering culture, privacy-first, EU voice"},
+    "ja": {"name": "Japanese",        "region": "jp-jp", "why": "Corporate dev culture, engineer shortage framing"},
+    "ko": {"name": "Korean",          "region": "kr-kr", "why": "Samsung/Naver, own AI tools"},
+    "zh": {"name": "Chinese",         "region": "cn-zh", "why": "Different AI ecosystem (Tongyi Lingma, CodeGeeX)"},
+    "pt": {"name": "Portuguese (BR)", "region": "br-pt", "why": "Brazil #2 on GitHub"},
+    "es": {"name": "Spanish",         "region": "xl-es", "why": "LatAm dev context"},  # xl = Latin America
+    "ru": {"name": "Russian",         "region": "ru-ru", "why": "JetBrains origin, strong dev tradition"},
 }
 
 # Phrases the voice cleaner will strip from AI-generated text.
@@ -236,16 +249,17 @@ BANNED_PHRASES = [
 def init_search(serper_key=None, brave_key=None):
     """
     Set up the search engine. Called once at the start of explore/deepen.
-    Currently uses DuckDuckGo (free, no key needed).
+    Currently uses ddgs (free, no key needed).
     The serper_key/brave_key parameters are kept for future expansion
     but are not used with the current DDG-only setup.
     """
-    pass  # DuckDuckGo needs no setup -- it just works
+    pass  # ddgs needs no setup -- it just works
 
 
-def search_web(query, n=5):
+def search_web(query, n=5, region="us-en"):
     """
     Search the web for a query and return up to n results.
+    region (e.g. "jp-jp", see LANGUAGES) favors results from that country.
 
     Each result is a dictionary with keys:
       - "title":   the page title
@@ -254,7 +268,7 @@ def search_web(query, n=5):
       - "domain":  just the domain name (e.g., "bbc.com")
 
     Two-tier search:
-      1. DuckDuckGo (primary -- free, no API key, privacy-respecting)
+      1. ddgs (primary -- free, no API key, queries several engines)
       2. Google via multi_search_engine (fallback -- used when DDG returns
          empty, which happens with some non-English queries. Google's index
          is deeper for Japanese, Chinese, Korean content.)
@@ -263,23 +277,24 @@ def search_web(query, n=5):
     """
     results = []  # Will hold our results
 
-    # ── Tier 1: DuckDuckGo (primary) ────────────────────────────────
-    if _SEARCH_DDG:
+    # ── Tier 1: ddgs multi-engine search (primary) ──────────────────
+    # Two attempts: ddgs picks engines at random, so a query that hit only
+    # slow/blocked engines (it raises a timeout) often works on a retry.
+    for attempt in range(2):
+        if not _SEARCH_DDG or results:
+            break
         try:
-            # "with DDGS() as ddgs" creates a search session.
-            # "with" ensures it's properly closed when done (like
-            # closing a browser tab after you're done searching).
-            with DDGS() as ddgs:
-                # .text() searches for text results
-                for r in ddgs.text(query, max_results=n):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", r.get("link", "")),  # DDG uses "href"
-                        "snippet": r.get("body", ""),              # DDG uses "body"
-                    })
+            # .text() searches for text results
+            for r in DDGS().text(query, region=region, max_results=n):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", r.get("link", "")),  # DDG uses "href"
+                    "snippet": r.get("body", ""),              # DDG uses "body"
+                })
         except Exception as e:
             # Log the error instead of silently swallowing it.
-            print(f"      DDG search error: {type(e).__name__}: {e}")
+            if attempt == 1:
+                print(f"      Web search error: {type(e).__name__}: {e}")
 
     # ── Tier 2: Google fallback (when DDG returns empty) ────────────
     # DDG sometimes returns nothing for non-English queries or very
@@ -323,7 +338,9 @@ def search_web(query, n=5):
     for r in results:
         r["domain"] = urlparse(r.get("url", "")).netloc
 
-    return results
+    # Drop results without a usable web address (some engines occasionally
+    # return an empty or relative link -- there's nothing to fetch there)
+    return [r for r in results if r["domain"] and r["url"].startswith("http")]
 
 
 def search_academic(query, n=5):
@@ -521,7 +538,7 @@ def call_ai(prompt, api_key, model, temp=0.6, system=""):
     Parameters:
         prompt   -- what you want the AI to do (the question/instruction)
         api_key  -- your OpenRouter API key (the password)
-        model    -- which AI model to use (e.g., "meta-llama/llama-4-scout")
+        model    -- which AI model to use (e.g., "google/gemini-2.5-flash-lite")
         temp     -- "temperature" -- controls randomness. 0 = very predictable,
                    1 = very creative. 0.6 is a good middle ground for research.
         system   -- optional "system prompt" that tells the AI how to behave
@@ -702,22 +719,43 @@ def classify_source(domain):
     """
     d = domain.lower()  # Lowercase so "ArXiv.org" and "arxiv.org" both match
 
-    if any(x in d for x in ["arxiv", "ieee", "acm.org", "nature.com", "semanticscholar"]):
+    # Country-style endings (".edu", ".go.jp") are checked as SUFFIXES --
+    # "edu" as a plain substring would also match e.g. "education-news.com".
+    def ends(*suffixes):
+        return d.endswith(suffixes)
+
+    if (any(x in d for x in ["arxiv", "ieee", "acm.org", "nature.com", "semanticscholar",
+                             "ssrn.com", "researchgate", "sciencedirect", "springer"])
+            or ends(".edu", ".ac.jp", ".ac.kr", ".ac.uk", ".edu.cn")):
         return "academic"
 
     if any(x in d for x in ["oecd", "ilo.org", "weforum", "europa.eu", "worldbank"]):
         return "intl institution"
 
-    if any(x in d for x in ["capgemini", "rolandberger", "nomura", "deloitte", "kpmg", "mckinsey"]):
+    if ends(".gov", ".gouv.fr", ".go.jp", ".go.kr", ".gov.cn", ".gov.uk", ".gob.mx", ".gov.br"):
+        return "government"
+
+    if any(x in d for x in ["capgemini", "rolandberger", "nomura", "deloitte", "kpmg", "mckinsey",
+                            "pwc", "accenture", "bcg.com", "bain.com", "gartner"]):
         return "consulting"  # Note: consulting firms have their own biases
 
-    if any(x in d for x in ["github.blog", "microsoft.com", "openai.com", "jetbrains", "stackoverflow.blog"]):
+    # Companies that SELL AI coding tools. Plain github.com is NOT here:
+    # most of it is user repositories, not GitHub's own publications.
+    if any(x in d for x in ["github.blog", "docs.github.com", "microsoft.com", "openai.com",
+                            "jetbrains", "stackoverflow.blog", "anthropic.com", "cursor.com",
+                            "ibm.com", "tabnine", "codeium", "windsurf", "replit.com",
+                            "sourcegraph", "kimi.ai", "aliyun.com"]):
         return "vendor/primary"  # These companies SELL the tools being studied
 
-    if any(x in d for x in ["news.ycombinator", "dev.to", "lobste.rs"]):
+    if any(x in d for x in ["news.ycombinator", "dev.to", "lobste.rs", "reddit.com", "qiita.com",
+                            "zenn.dev", "note.com", "tistory.com", "brunch.co.kr", "velog.io",
+                            "habr.com"]):
         return "experiential/forum"  # Real developer discussions
 
-    if any(x in d for x in ["reuters", "ft.com", "nytimes", "bloomberg", "techcrunch", "wired", "lemonde"]):
+    if any(x in d for x in ["reuters", "ft.com", "nytimes", "bloomberg", "techcrunch", "wired",
+                            "lemonde", "lesechos", "heise.de", "golem.de", "zdnet", "theverge",
+                            "arstechnica", "cio.com", "infoq", "itmedia", "nikkei", "sedaily",
+                            "inews24", "vc.ru"]):
         return "journalism"
 
     if any(x in d for x in ["medium.com", "towardsdatascience", "analyticsvidhya"]):

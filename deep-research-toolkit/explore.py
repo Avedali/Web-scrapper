@@ -63,6 +63,67 @@ DEFAULT_TOPIC = (
 
 
 # ════════════════════════════════════════════════════════════════════════
+# QUERY PARSING -- turn the AI's answer into a clean list of search queries
+# ════════════════════════════════════════════════════════════════════════
+#
+# Models rarely return bare queries. Real output looks like:
+#   Here are 5 search queries in Spanish:            ← preamble
+#   **"¿Revolución o reemplazo?"** (Translation: ...) ← query + translation
+#   This query reflects concerns about jobs.          ← commentary
+#   (The future of programming in Russia)             ← translation line
+# Every one of those lines used to become a "query".
+
+# Characters that MUST appear in a real query for non-Latin languages.
+# A Korean "query" with no Hangul is English commentary (or a model that
+# dropped the native script -- some providers do).
+NATIVE_SCRIPT = {
+    "ja": r"[\u3040-\u30ff\u4e00-\u9fff]",  # Hiragana, Katakana, Kanji
+    "ko": r"[\uac00-\ud7a3]",                # Hangul
+    "zh": r"[\u4e00-\u9fff]",                # Chinese characters
+    "ru": r"[\u0400-\u04ff]",                # Cyrillic
+}
+
+# A query the model marked up: **bold**, "quoted", “curly” or 「Japanese」
+_MARKED = re.compile(r'\*\*(.+?)\*\*|"([^"]{4,})"|\u201c([^\u201d]{4,})\u201d|\u300c([^\u300d]{4,})\u300d')
+
+
+def _parse_queries(resp, n, lang=None):
+    """Extract at most n search queries from an AI response."""
+    lines = []
+    for raw_line in (resp or "").splitlines():
+        # Strip list markers: "1." "2)" "-" "•" "* " -- but not a leading year,
+        # and not the "**" of bold text (a marker needs a space after it)
+        line = re.sub(r"^\s*(?:\d+[.)]|[-•*])\s+", "", raw_line).strip()
+        # Only markup at the START of a line marks a query: a commentary
+        # line that merely quotes a term ('such as "автокодирование"') or a
+        # translation line ('(Translation: "...")') is not a query.
+        m = _MARKED.match(line)
+        lines.append((line, next(g for g in m.groups() if g) if m else None))
+
+    # If the model marked its queries, ONLY marked text counts -- the
+    # unmarked lines around them are explanations.
+    if any(marked for _, marked in lines):
+        lines = [(marked, marked) for _, marked in lines if marked]
+
+    queries = []
+    for line, _ in lines:
+        q = line.strip(' *"\u201c\u201d\u300c\u300d')
+        if len(q) <= 8:
+            continue
+        if re.fullmatch(r"[(\uff08].*[)\uff09]", q):        # "(translation)"
+            continue
+        if q.endswith((":", "\uff1a")):                     # "Here are 5 queries:"
+            continue
+        if q.lower().startswith(("translation", "here are", "these ", "this query", "note")):
+            continue
+        if lang in NATIVE_SCRIPT and not re.search(NATIVE_SCRIPT[lang], q):
+            continue
+        queries.append(q)
+
+    return queries[:n]
+
+
+# ════════════════════════════════════════════════════════════════════════
 # MAIN FUNCTION -- this is what runs when you choose "Explore" in the launcher
 # ════════════════════════════════════════════════════════════════════════
 
@@ -163,7 +224,8 @@ def run_explore(args):
                 f"Do NOT steer toward a conclusion. Each question should be "
                 f"genuinely exploratory -- 'what does the evidence show about X' "
                 f"not 'how is X improving Y.'\n\nTOPIC: {topic}\n\n"
-                f"Output {n_queries} search queries. No numbering."
+                f"Output exactly {n_queries} search queries, one per line. "
+                f"No numbering, no commentary."
             )
         else:
             # Non-English: same number of queries, in NATIVE SCRIPT.
@@ -175,28 +237,21 @@ def run_explore(args):
                 f"framing are native to {info['name']}-language discourse?\n\n"
                 f"TOPIC: {topic}\nWhy {info['name']}: {info['why']}\n\n"
                 f"Generate {n_queries} search queries in {info['name'].upper()} "
-                f"using native framing. Native script only."
+                f"using native framing. Native script only.\n\n"
+                f"Output exactly {n_queries} lines, one search query per line. "
+                f"No numbering, no translations, no explanations."
             )
 
-        # Send the prompt to the AI and get back the response
+        # Send the prompt to the AI and get back the response, then parse
+        # it into clean queries (see _parse_queries above for the rules).
         resp = call_ai(prompt, api_key, model, temp=0.5)
+        qs = _parse_queries(resp, n_queries, lc)
 
-        # Parse the response into individual queries.
-        # The AI usually returns numbered lines like "1. query here"
-        # This list comprehension:
-        #   1. Splits the response by newlines
-        #   2. Strips numbering (1., 2), •, *, - etc.) with re.sub.
-        #      Digits are only stripped when followed by "." or ")" so a
-        #      query like "2025 developer survey" keeps its year.
-        #   3. Removes leading/trailing whitespace and quotes
-        #   4. Keeps only lines longer than 8 characters (filters junk)
-        qs = [
-            re.sub(r"^(?:\d+[.)]|[-•*])\s*", "", line.strip())  # Remove "1." or "•" etc.
-            .strip()                               # Remove extra spaces
-            .strip('"')                            # Remove wrapping quotes
-            for line in resp.strip().split("\n")    # Split response into lines
-            if line.strip() and len(line.strip()) > 8  # Keep non-empty, long-enough lines
-        ]
+        # Nothing usable (e.g. the model dropped the native script)?
+        # Try once more -- a second sample usually comes back fine.
+        if not qs:
+            resp = call_ai(prompt, api_key, model, temp=0.7)
+            qs = _parse_queries(resp, n_queries, lc)
 
         all_queries[lc] = qs  # Store the queries for this language
         print(f"   {info['name']}: {len(qs)} queries")
@@ -224,8 +279,9 @@ def run_explore(args):
         for q in queries:
             print(f"      {q[:55]}...")  # Show first 55 chars of query
 
-            # Search the web for this query, get up to 3 results
-            for r in search_web(q, n=3):
+            # Search the web for this query, get up to 3 results,
+            # favoring pages from that language's region
+            for r in search_web(q, n=3, region=LANGUAGES[lc]["region"]):
 
                 # Skip if we already have this URL (avoid duplicates)
                 # "continue" means "skip the rest of this loop iteration
@@ -271,16 +327,17 @@ def run_explore(args):
     print(f"\n{'─'*50}\n AUTHORITATIVE\n{'─'*50}")
 
     # Targeted web searches for known high-quality sources
-    for q in [
-        "Stack Overflow developer survey AI tools 2025 2026",
-        "JetBrains developer ecosystem survey AI",
-        "OECD AI software workers report",
-        "EU AI Act software development",
-        "GitHub Copilot productivity Microsoft study",
-        "AIコーディングアシスタント 調査 日本",    # Japanese: AI coding assistant survey Japan
-        "中国AI编程工具 开发者 报告",              # Chinese: China AI programming tools developer report
+    # (query, search region) -- see LANGUAGES in core.py for the regions
+    for q, region in [
+        ("Stack Overflow developer survey AI tools 2025 2026", "us-en"),
+        ("JetBrains developer ecosystem survey AI", "us-en"),
+        ("OECD AI software workers report", "us-en"),
+        ("EU AI Act software development", "us-en"),
+        ("GitHub Copilot productivity Microsoft study", "us-en"),
+        ("AIコーディングアシスタント 調査 日本", "jp-jp"),  # Japanese: AI coding assistant survey Japan
+        ("中国AI编程工具 开发者 报告", "cn-zh"),            # Chinese: China AI programming tools developer report
     ]:
-        for r in search_web(q, n=2):  # Only top 2 results per query
+        for r in search_web(q, n=2, region=region):  # Only top 2 results per query
             if r["url"] not in sources:
                 content = fetch_page(r["url"])
                 if content:
@@ -340,12 +397,12 @@ def run_explore(args):
                 }
 
     # Search for blog posts and non-English developer experiences
-    for q in [
-        "site:dev.to Copilot review developer",         # Dev.to (developer blog platform)
-        '"mon expérience avec Copilot" développeur',     # French: "my experience with Copilot"
-        "Copilot 使ってみた エンジニア",                   # Japanese: "tried Copilot, engineer"
+    for q, region in [
+        ("site:dev.to Copilot review developer", "us-en"),        # Dev.to (developer blog platform)
+        ('"mon expérience avec Copilot" développeur', "fr-fr"),   # French: "my experience with Copilot"
+        ("Copilot 使ってみた エンジニア", "jp-jp"),                 # Japanese: "tried Copilot, engineer"
     ]:
-        for r in search_web(q, n=3):
+        for r in search_web(q, n=3, region=region):
             if r["url"] not in sources:
                 content = fetch_page(r["url"])
                 if content:

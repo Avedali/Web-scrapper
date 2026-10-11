@@ -547,6 +547,11 @@ def _corpus_stats(df, args):
 
     except ImportError:
         pass  # researchpy not installed -- skip silently
+    except Exception as e:
+        # researchpy 0.3.7.3 fails to IMPORT on Python 3.10+ (a TypeError in
+        # its own type hints), and its summary can break on newer pandas.
+        # It's a bonus table -- never let it crash the stats run.
+        print(f"   researchpy unavailable ({type(e).__name__}) -- skipped")
 
     # ── Save everything to scratchpad ───────────────────────────────
     pad("stats_report", report)

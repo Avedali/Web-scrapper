@@ -24,7 +24,10 @@ def main():
         "analyze", "stats", "viz", "ask", "simulate",
     ])
     ap.add_argument("--key", default=None)
-    ap.add_argument("--model", default="meta-llama/llama-4-scout")
+    # Default model: cheap, 1M-token context, and reliable in all 9 languages.
+    # (meta-llama/llama-4-scout was the old default; via OpenRouter it often
+    # returned Chinese/Korean queries with the native characters missing.)
+    ap.add_argument("--model", default="google/gemini-2.5-flash-lite")
     ap.add_argument("--serper", default=None)
     ap.add_argument("--brave", default=None)
     ap.add_argument("--topic", default=None)

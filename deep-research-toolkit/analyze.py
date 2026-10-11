@@ -281,7 +281,7 @@ def run_analyze(args):
         # We catch Exception (not just ImportError) because pipeline()
         # DOWNLOADS the model on first run, and that can fail in ways
         # that aren't import errors.
-        print(f"   HF sentiment unavailable ({type(e).__name__}) -- pip install transformers torch")
+        print(f"   HF sentiment unavailable ({type(e).__name__}: {str(e)[:150]})")
         print("   Falling back to TextBlob...")
         try:
             from textblob import TextBlob
@@ -406,7 +406,9 @@ def run_analyze(args):
 
     except Exception as e:
         # Covers both missing install AND model-download failures
-        print(f"   zero-shot unavailable ({type(e).__name__}) -- pip install transformers torch")
+        # Show the real reason -- it's often a missing helper package
+        # (e.g. sentencepiece), not transformers itself.
+        print(f"   zero-shot unavailable ({type(e).__name__}: {str(e)[:150]})")
 
     # ════════════════════════════════════════════════════════════════
     # ANALYSIS 3: NAMED ENTITY RECOGNITION (NER)
@@ -444,7 +446,8 @@ def run_analyze(args):
             "ner",
             aggregation_strategy="simple",
             model="Davlan/xlm-roberta-large-ner-hrl",  # Multilingual NER
-            truncation=True,
+            # No truncation=True here: the NER pipeline rejects that argument
+            # (TypeError). Our 450-character chunks already fit in 512 tokens.
         )
 
         # Count how many times each organization appears across all sources
@@ -466,8 +469,11 @@ def run_analyze(args):
                     for e in entities:
                         # Only keep organizations (ORG), not people or locations
                         # Only keep high-confidence predictions (score > 0.8)
-                        if e["entity_group"] == "ORG" and e["score"] > 0.8:
-                            all_entities[e["word"]] += 1
+                        # (The model occasionally returns an empty "word" --
+                        # skip it, or "" would rank as a top organization.)
+                        word = e["word"].strip()
+                        if e["entity_group"] == "ORG" and e["score"] > 0.8 and word:
+                            all_entities[word] += 1
             except Exception:
                 pass  # Skip sources that cause errors
 
@@ -482,7 +488,7 @@ def run_analyze(args):
 
     except Exception as e:
         # Covers both missing install AND model-download failures
-        print(f"   NER unavailable ({type(e).__name__}) -- requires transformers + torch")
+        print(f"   NER unavailable ({type(e).__name__}: {str(e)[:150]})")
 
     # ════════════════════════════════════════════════════════════════
     # ANALYSIS 4: TOPIC MODELING (BERTopic)
@@ -592,7 +598,7 @@ def run_analyze(args):
     except Exception as e:
         # BERTopic not installed OR its embedding-model download failed
         # → fall back to LDA (older, simpler, no downloads needed)
-        print(f"   BERTopic unavailable ({type(e).__name__}) -- pip install bertopic")
+        print(f"   BERTopic unavailable ({type(e).__name__}: {str(e)[:150]})")
         print("   Falling back to sklearn LDA...")
 
         try:

@@ -511,9 +511,14 @@ def _build_evidence_block(corpus_dir):
     # Add sources to the evidence block, organized by quality.
     # We process quality tiers in a specific order: academic first
     # (most authoritative), then down to unclassified.
-    for quality in ["academic", "intl institution", "vendor/primary",
-                    "consulting", "journalism", "experiential/forum",
-                    "experiential/blog", "unclassified"]:
+    # Tiers not in this list (e.g. "SEO risk", "government") come after
+    # it instead of being silently left out of the evidence.
+    order = ["academic", "intl institution", "government", "vendor/primary",
+             "consulting", "journalism", "experiential/forum",
+             "experiential/blog", "unclassified"]
+    order += sorted(q for q in by_q if q not in order)
+
+    for quality in order:
 
         # by_q.get(quality, []) returns the list of sources for this tier,
         # or an empty list if there are none.

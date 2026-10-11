@@ -5,7 +5,7 @@
 requests
 
 # --- Search ---
-duckduckgo-search            # Primary: web search via DuckDuckGo (free, no API key)
+ddgs                         # Primary: multi-engine web search (free, no API key)
 multi_search_engine          # Fallback: Google search when DDG returns empty (non-English queries)
 
 # --- Content extraction ---
@@ -29,6 +29,8 @@ citationlib
 pandas
 transformers                 # Hugging Face: sentiment, zero-shot, NER, summarization
 torch                        # Backend for transformers (CPU-only is fine)
+sentencepiece                # Tokenizer for the XLM-RoBERTa zero-shot + NER models
+protobuf                     # Needed by sentencepiece-based tokenizers
 bertopic                     # Neural topic modeling, multilingual, built-in viz
 datasets                     # HF datasets: load StackEval, CodeInsight for benchmarks
 
