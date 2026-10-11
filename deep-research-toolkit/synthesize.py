@@ -1,0 +1,573 @@
+"""
+synthesize.py -- Mode 1.b: Thesis generation + outline + brief.
+================================================================
+Run: python agent.py synthesize
+Or:  launcher.py → option 4
+
+This is where the opinion forms -- BUT only from evidence.
+It reads EVERYTHING the previous modes produced (sources, NLP analysis,
+statistical tests, red team critiques, bias audits) and:
+
+  1.b.i:   Proposes 3 defensible theses ranked by evidence strength
+  1.b.ii:  Generates a paper outline shaped by the chosen thesis
+  1.b.iii: Writes each section (grounded in evidence, not memory)
+  1.b.iv:  Formats references (APA) and cleans voice (strips LLM-speak)
+
+ONLY run this AFTER explore + analyze + stats.
+The thesis comes from the data, not from the researcher's gut.
+"""
+
+# ════════════════════════════════════════════════════════════════════════
+# IMPORTS
+# ════════════════════════════════════════════════════════════════════════
+
+import json  # Read/write structured data files
+import os    # File/folder operations
+import re    # Pattern matching (used to parse outlines and clean text)
+
+from datetime import datetime       # Timestamps for the final report
+from collections import defaultdict # Auto-initializing dictionary
+from pathlib import Path            # Nice file path handling
+
+# From our shared toolbox:
+from core import (
+    call_ai,         # Send prompts to the AI model
+    pad,             # Save work to the scratchpad
+    LANGUAGES,       # The 9-language config (for APA language notes)
+    BANNED_PHRASES,  # LLM-speak phrases to strip (for voice cleaning)
+)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MAIN FUNCTION
+# ════════════════════════════════════════════════════════════════════════
+
+def run_synthesize(args):
+    """
+    Run the full synthesis pipeline:
+    thesis → outline → write sections → APA references → voice clean → save.
+    """
+
+    # ── Setup ───────────────────────────────────────────────────────
+    api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("--key required")
+        return
+
+    model = args.model  # Which AI model to use
+
+    print("=" * 60)
+    print("MODE 1.b: SYNTHESIZE (thesis from evidence)")
+    print("=" * 60)
+
+    # ── Load all evidence from the scratchpad ───────────────────────
+    # This reads every file that explore, analyze, and stats produced.
+    # The AI will use this as its ONLY source of information.
+    context = _load_all_evidence(args.corpus)
+
+    if not context:
+        print("No evidence found. Run explore → analyze → stats first.")
+        return
+
+    # len(context) = number of characters (letters) in the text
+    print(f"   Loaded {len(context)} chars of evidence from scratchpad/")
+
+    # ════════════════════════════════════════════════════════════════
+    # 1.b.i: THESIS GENERATION
+    # ════════════════════════════════════════════════════════════════
+    # This is the critical step. Instead of the researcher deciding
+    # what to argue BEFORE looking at data (which creates confirmation
+    # bias), we ask the AI to read ALL the evidence and propose
+    # the strongest defensible positions.
+    #
+    # The AI proposes 3 theses, ranked by evidence strength.
+    # The user picks which one to use for the paper.
+    #
+    # A thesis is NOT a topic. "AI is changing software development"
+    # is a topic (no one disagrees). "AI coding assistants increase
+    # individual productivity but create systemic risks to code quality
+    # that organizations are not yet equipped to manage" is a thesis
+    # (someone could argue the opposite).
+
+    print(f"\n{'─'*50}\n1.b.i: THESIS GENERATION\n{'─'*50}")
+    print("   Reading all evidence and proposing defensible theses...\n")
+
+    # Build the prompt for thesis generation.
+    # f"""...""" is a multi-line f-string (formatted string).
+    # {context[:8000]} inserts the first 8000 characters of evidence
+    # (we truncate because AI models have a maximum input length).
+    thesis_prompt = f"""You are a research advisor helping business students write a capstone paper.
+
+You have access to ALL the evidence they collected -- raw sources, sentiment
+analysis, statistical tests, topic modeling, bias audits, and red team critiques.
+
+YOUR TASK: Based ONLY on this evidence, propose 3 possible thesis statements
+that are:
+1. Defensible with the evidence that exists (not aspirational)
+2. Arguable (someone could disagree)
+3. Specific enough to structure a paper around
+4. Relevant to a business audience (not just technical)
+
+For each thesis, explain:
+- What evidence supports it (cite specific findings)
+- What evidence complicates it (the strongest counterargument)
+- How strong the evidence base is (strong / moderate / thin)
+- What the paper outline would look like if they chose this thesis
+
+EVIDENCE:
+{context[:8000]}
+
+Do NOT propose generic theses like "AI is transforming software development."
+That's a topic, not a thesis. A thesis takes a position: "AI coding assistants
+increase individual productivity but create systemic risks to code quality
+that organizations are not yet equipped to manage."
+
+Output 3 theses, ranked by strength of evidence."""
+
+    # Send the prompt to the AI
+    theses = call_ai(thesis_prompt, api_key, model, temp=0.5)
+
+    # Save to scratchpad so other modes (and teammates via ask) can read it
+    pad("synthesis_01_theses", f"# Proposed Theses\n\n{theses}")
+
+    # Show the first 2000 characters to the user so they can review
+    print(theses[:2000])
+
+    # ── Ask the user which thesis to use ────────────────────────────
+    # This is an interactive step: the script pauses and waits for
+    # the user to type 1, 2, or 3 (or just press Enter for #1).
+    print(f"\n{'─'*50}")
+    print("   Review the theses above. Which one?")
+    print("   Press Enter to use thesis #1 (strongest evidence),")
+    print("   or type 2 or 3 to pick a different one.")
+
+    try:
+        choice = input("   > ").strip()  # Wait for user input
+    except (EOFError, KeyboardInterrupt):
+        choice = ""  # If they hit Ctrl+C, default to thesis #1
+
+    # Convert their choice to an integer.
+    # int(choice) converts "2" → 2, but would crash on "" or "abc".
+    # So we only do it if choice is "1", "2", or "3".
+    thesis_num = int(choice) if choice in ("1", "2", "3") else 1
+
+    print(f"   → Using thesis #{thesis_num}\n")
+
+    # ════════════════════════════════════════════════════════════════
+    # 1.b.ii: OUTLINE GENERATION
+    # ════════════════════════════════════════════════════════════════
+    # Now that we have a thesis, we generate the paper outline.
+    # The outline is shaped BY the thesis -- each section exists
+    # because the thesis needs it, not because it's a standard section.
+    #
+    # Key rule: "No 'Background' section unless background is genuinely
+    # necessary for the argument." Standard academic papers often have
+    # Background, Literature Review, Methodology, Findings, Discussion,
+    # Conclusion -- but that structure is for a topic, not a thesis.
+    # A thesis-driven paper has sections that each advance the argument.
+
+    print(f"{'─'*50}\n1.b.ii: OUTLINE FROM THESIS\n{'─'*50}")
+
+    outline_prompt = f"""Based on thesis #{thesis_num} from this analysis, generate a paper outline.
+
+The paper is 8-10 pages, double-spaced, for a business school capstone.
+The audience is financial industry professionals, not technologists.
+
+THESES:
+{theses[:3000]}
+
+RULES:
+- Every section must exist because the thesis NEEDS it, not because
+  it's a standard section. No "Background" section unless background
+  is genuinely necessary for the argument.
+- Each section should have a one-sentence summary of what it argues
+  (not what it covers -- what it ARGUES).
+- Note which evidence from the scratchpad supports each section.
+- Include a "Limitations and counterarguments" section -- this is what
+  makes it credible, not weak.
+
+Output a numbered outline with section titles and one-line argument summaries."""
+
+    outline = call_ai(outline_prompt, api_key, model, temp=0.4)
+
+    pad("synthesis_02_outline", f"# Outline (thesis #{thesis_num})\n\n{outline}")
+    print(outline[:1500])
+
+    # ════════════════════════════════════════════════════════════════
+    # 1.b.iii: WRITE THE BRIEF (section by section)
+    # ════════════════════════════════════════════════════════════════
+    # Now we write each section of the paper. The AI gets:
+    #   - The chosen thesis
+    #   - The full outline (so it knows where this section fits)
+    #   - The evidence block (raw sources it can cite)
+    #   - A system prompt with strict rules (no memory, no buzzwords)
+
+    print(f"\n{'─'*50}\n1.b.iii: WRITE BRIEF\n{'─'*50}")
+
+    # ── Parse section titles from the outline ───────────────────────
+    # The outline looks like:
+    #   1. Introduction: The productivity paradox of AI coding tools
+    #   2. Evidence for productivity gains -- but from whom?
+    #   3. The code quality gap: what the studies don't measure
+    #   ...
+    # We need to extract just the titles ("Introduction: The productivity
+    # paradox of AI coding tools", etc.) from this numbered list.
+
+    section_titles = []  # Will hold the extracted titles
+
+    for line in outline.split("\n"):  # Go through the outline line by line
+        line = line.strip()
+
+        # re.match tries to match a pattern at the START of the string.
+        # This pattern matches lines that start with a number or Roman numeral,
+        # followed by a period or parenthesis, followed by text.
+        #
+        # r'^[\dIVXivx]+[\.\)]\s*(.+)' means:
+        #   ^        = start of string
+        #   [\dIVXivx]+  = one or more digits or Roman numeral characters
+        #   [\.\)]   = a period or closing parenthesis
+        #   \s*      = optional whitespace
+        #   (.+)     = capture everything else (this is the title)
+        m = re.match(r'^[\dIVXivx]+[\.\)]\s*(.+)', line)
+
+        if m:
+            # m.group(1) is the captured text (the title after the number)
+            # .split("--")[0] takes only the part before an em-dash
+            # .split(":")[0] takes only the part before a colon
+            # This strips sub-descriptions: "Introduction: The paradox" → "Introduction"
+            title = m.group(1).split("--")[0].split(":")[0].strip()
+
+            # Only keep titles that are reasonable length (not too short, not too long)
+            if len(title) > 5 and len(title) < 80:
+                section_titles.append(title)
+
+    # Fallback: if parsing didn't find any titles, use generic ones
+    # (this happens if the AI formatted the outline differently than expected)
+    if not section_titles:
+        section_titles = [
+            "Introduction and Thesis",
+            "Evidence Section 1",
+            "Evidence Section 2",
+            "Evidence Section 3",
+            "Counterarguments and Limitations",
+            "Conclusion",
+        ]
+
+    # ── Build the evidence block ────────────────────────────────────
+    # This creates a formatted text block containing all our sources,
+    # tagged with numbers [1], [2], etc. so the AI can cite them.
+    evidence = _build_evidence_block(args.corpus)
+
+    # ── System prompt (rules the AI must follow) ────────────────────
+    # The system prompt is like giving the AI its job description.
+    # It runs before every section-writing call, setting the ground rules.
+    #
+    # ", ".join(...) creates a comma-separated string from a list:
+    # ["a", "b", "c"] → "a, b, c"
+    #
+    # BANNED_PHRASES[:10] takes the first 10 banned phrases (to keep
+    # the system prompt from getting too long).
+    sys_prompt = (
+        "You write academic research. STRICT RULES:\n"
+        "- ONLY facts from the evidence block. Tag every claim [n].\n"
+        "- If evidence is thin, say so. NEVER fill from memory.\n"
+        "- Note source language when relevant.\n"
+        "- One idea per sentence. Concrete. No jargon without definition.\n"
+        "- NEVER use: " + ", ".join(f'"{p}"' for p in BANNED_PHRASES[:10]) + "\n"
+        "- You are ARGUING a thesis, not summarizing a topic. Every paragraph\n"
+        "  should advance the argument, not just present information."
+    )
+
+    # ── Write each section ──────────────────────────────────────────
+    sections = []  # Will hold (title, content) pairs
+
+    for title in section_titles:
+        print(f"    {title}")
+
+        # Ask the AI to write this specific section
+        content = call_ai(
+            f"Write this section of the paper.\n\n"
+            f"THESIS: #{thesis_num} from the thesis analysis\n"
+            f"SECTION: {title}\n"
+            f"OUTLINE:\n{outline[:1500]}\n\n"  # Include outline for context
+            f"EVIDENCE:\n{evidence[:6000]}\n\n" # Include sources to cite
+            f"400-600 words. Tag every claim [n]. Argue, don't summarize.",
+            api_key, model, temp=0.5, system=sys_prompt,
+        )
+
+        # Store the section. If the AI call failed, use a placeholder.
+        # "content or '*[Failed]*'" means: use content if it's not empty,
+        # otherwise use the placeholder string.
+        sections.append((title, content or "*[Failed]*"))
+
+    # Save the raw (pre-cleaned) sections to the scratchpad
+    # "\n\n---\n\n".join(...) puts "---" dividers between sections
+    pad("synthesis_03_brief_raw",
+        "\n\n---\n\n".join(f"## {t}\n\n{c}" for t, c in sections))
+
+    # ════════════════════════════════════════════════════════════════
+    # 1.b.iv: APA REFERENCES + VOICE CLEANING
+    # ════════════════════════════════════════════════════════════════
+    # Two final cleanup steps:
+    #   1. Format all sources as APA 7th edition references
+    #   2. Strip LLM-speak from the written sections
+
+    print(f"\n{'─'*50}\nAPA + VOICE CLEAN\n{'─'*50}")
+
+    # ── APA references ──────────────────────────────────────────────
+    # Build a properly formatted reference list from our source metadata
+    apa_text = _build_apa(args.corpus)
+    pad("synthesis_04_apa", f"# References (APA 7th)\n\n{apa_text}")
+
+    # ── Voice cleaning ──────────────────────────────────────────────
+    # Scan each section for banned phrases (LLM-speak, buzzwords,
+    # metaphors, hollow transitions) and remove them.
+    #
+    # Two-pass cleaning:
+    #   Pass 1: Regex find-and-delete of known bad phrases
+    #   Pass 2: If any phrases were found, ask the AI to rewrite
+    #           the section cleanly (the regex leaves awkward gaps)
+
+    cleaned = []  # Will hold the cleaned (title, content) pairs
+
+    for title, content in sections:
+        c = content   # Working copy (we'll modify this, not the original)
+        flags = 0     # Count how many bad phrases we found
+
+        # Check each banned phrase
+        for phrase in BANNED_PHRASES:
+            # re.compile creates a reusable pattern object.
+            # re.escape makes sure special characters in the phrase
+            # (like parentheses) are treated as literal text, not regex syntax.
+            # re.IGNORECASE means "game-changer" matches "Game-Changer" too.
+            pat = re.compile(re.escape(phrase), re.IGNORECASE)
+
+            # Count how many times this phrase appears
+            hits = len(pat.findall(c))
+
+            if hits:
+                flags += hits           # Add to total count
+                c = pat.sub("", c)      # Remove all occurrences (replace with nothing)
+
+        # Clean up the mess left behind (double spaces, orphaned punctuation)
+        # r"\s{2,}" matches 2 or more whitespace characters in a row
+        c = re.sub(r"\s{2,}", " ", c).strip()
+
+        # If we found and removed phrases, the text probably reads awkwardly.
+        # Ask the AI to rewrite it smoothly while keeping facts and citations.
+        if flags > 0:
+            rw = call_ai(
+                f"Rewrite: remove buzzwords, keep facts and [n] tags. "
+                f"Direct, concrete, argues a position.\n\n{c}",
+                api_key, model, temp=0.3,  # Low temp = stay close to original
+            )
+            if rw:
+                c = rw  # Use the rewritten version
+
+            print(f"   {title}: {flags} phrases cleaned")
+
+        cleaned.append((title, c))
+
+    # ════════════════════════════════════════════════════════════════
+    # ASSEMBLE THE FINAL REPORT
+    # ════════════════════════════════════════════════════════════════
+    # Combine all cleaned sections, metadata, and references into
+    # one Markdown file.
+
+    lines = []  # Will hold all lines of the final report
+
+    # Header
+    lines.append("# Research Brief\n")
+    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("**Pipeline:** explore → analyze → stats → synthesize")
+    lines.append(f"**Thesis:** #{thesis_num} (evidence-derived)\n")
+    lines.append("---\n")
+
+    # Sections
+    for t, c in cleaned:
+        lines.append(f"## {t}\n\n{c}\n\n---\n")
+
+    # References
+    lines.append(f"## References\n\n{apa_text}")
+
+    # Save to file
+    # args.output is the user-specified filename, or None for auto-generated
+    fn = args.output or f"brief_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))  # Join all lines with newlines
+
+    # ── Done! ───────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print("SYNTHESIS COMPLETE")
+    print(f"   {fn}")
+    print("   Thesis was derived from evidence, not assumed.")
+    print("   Run 'deepen' to find targeted support for weak areas.")
+    print(f"{'='*60}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS (used internally by run_synthesize)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Functions whose names start with _ are "private by convention" --
+# they're meant to be used only inside this file, not called from
+# outside. Python doesn't enforce this (unlike some other languages),
+# but the underscore signals "internal use."
+
+def _load_all_evidence(corpus_dir):
+    """
+    Load EVERYTHING from the scratchpad into one big text string.
+
+    This is what the thesis generation AI reads. It includes:
+      - Analysis results (sentiment scores, topic distributions)
+      - Statistical test results (chi-squared, Mann-Whitney, etc.)
+      - Red team critique (what's wrong with the research)
+      - Bias audit (what's skewed)
+      - Definitions and decomposition
+      - Simulation results (if available)
+
+    Each file is labeled with its name so the AI knows what it's reading.
+    Files are truncated to keep the total under the AI's input limit.
+    """
+    parts = []  # Will hold text chunks from each file
+
+    pad_dir = Path(corpus_dir)  # Convert string path to Path object
+
+    # If the scratchpad folder doesn't exist, there's nothing to load
+    if not pad_dir.exists():
+        return ""
+
+    # ── Analysis results (highest priority -- these ARE the findings) ──
+    for fn in ["analysis_results.json", "corpus_analyzed.csv"]:
+        p = pad_dir / fn  # Path / "filename" joins them (like os.path.join)
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                # f"── {fn} ──\n" creates a label header so the AI knows
+                # which file this text came from
+                parts.append(f"── {fn} ──\n{f.read()[:3000]}\n")
+
+    # ── Statistical reports ──────────────────────────────────────────
+    # .glob("stats_*.md") finds all files matching "stats_*.md"
+    for fn in sorted(pad_dir.glob("stats_*.md")):
+        # fn.stem is the filename without extension: "stats_report.md" → "stats_report"
+        # fn.read_text() reads the whole file as a string
+        parts.append(f"── {fn.stem} ──\n{fn.read_text(encoding='utf-8')[:2000]}\n")
+
+    # ── Red team and bias audit ──────────────────────────────────────
+    for name in ["06_red_team", "065_bias", "01_definitions", "02_decomposition"]:
+        p = pad_dir / f"{name}.md"
+        if p.exists():
+            parts.append(f"── {name} ──\n{p.read_text(encoding='utf-8')[:2000]}\n")
+
+    # ── Simulation results (if the user ran simulate mode) ───────────
+    sim = pad_dir / "simulation_results.json"
+    if sim.exists():
+        with open(sim) as f:
+            parts.append(f"── simulation ──\n{f.read()[:2000]}\n")
+
+    # Join all parts into one big string
+    return "\n".join(parts)
+
+
+def _build_evidence_block(corpus_dir):
+    """
+    Build a tagged evidence block from the corpus for section writing.
+
+    This creates a formatted text where each source has a number tag [1],
+    [2], etc. When the AI writes a section, it cites sources using these
+    numbers: "According to a Microsoft study [4], productivity increased..."
+
+    Sources are organized by quality tier so the AI can see which are
+    academic, which are vendor-published, which are from forums, etc.
+    """
+
+    corpus_path = os.path.join(corpus_dir, "corpus.json")
+
+    # If the corpus doesn't exist, return empty string
+    if not os.path.exists(corpus_path):
+        return ""
+
+    # Load the corpus (list of sources with their content)
+    with open(corpus_path, encoding="utf-8") as f:
+        corpus = json.load(f)  # JSON → Python list of dictionaries
+
+    evidence = "# EVIDENCE -- tag claims [n]\n\n"
+
+    # Group sources by quality tier using defaultdict(list).
+    # After this loop, by_q["academic"] is a list of all academic sources,
+    # by_q["journalism"] is all journalism sources, etc.
+    by_q = defaultdict(list)
+    for item in corpus:
+        by_q[item.get("quality", "unclassified")].append(item)
+
+    # Add sources to the evidence block, organized by quality.
+    # We process quality tiers in a specific order: academic first
+    # (most authoritative), then down to unclassified.
+    for quality in ["academic", "intl institution", "vendor/primary",
+                    "consulting", "journalism", "experiential/forum",
+                    "experiential/blog", "unclassified"]:
+
+        # by_q.get(quality, []) returns the list of sources for this tier,
+        # or an empty list if there are none.
+        # [:5] limits to 5 sources per tier (to keep the prompt manageable).
+        for item in by_q.get(quality, [])[:5]:
+            evidence += (
+                # [3][ja] means source #3, in Japanese
+                f"[{item.get('idx', '?')}][{item.get('lang', '?')}] "
+                f"{item['title']} ({item['domain']})\n"
+                # Indent the content preview for readability
+                f"    {item['content'][:500]}\n\n"
+            )
+
+    return evidence
+
+
+def _build_apa(corpus_dir):
+    """
+    Generate APA 7th edition references from source metadata.
+
+    APA format for a web source looks like:
+    Author. (Year). Title. Site Name. Retrieved Month Day, Year, from URL
+
+    Since we usually don't know the author (we scraped the pages),
+    we use the title and domain as available fields.
+
+    Non-English sources get a language note: [In Japanese].
+    """
+
+    meta_path = os.path.join(corpus_dir, "sources_meta.json")
+
+    if not os.path.exists(meta_path):
+        return ""
+
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)  # Load the source metadata
+
+    entries = []  # Will hold formatted APA entries
+
+    # enumerate(meta.items(), 1) gives us: (1, (url, data)), (2, (url, data)), ...
+    # Starting from 1 (not 0) because reference numbers start at [1].
+    for i, (url, s) in enumerate(meta.items(), 1):
+
+        # Check if this source is in a non-English language
+        sl = s.get("source_lang", "")
+        lang_note = ""
+        if sl and sl not in ("en", "unknown"):
+            # LANGUAGES.get(sl, {}).get("name", sl) means:
+            # Look up the language code in our LANGUAGES dictionary.
+            # If found, get its "name" field.
+            # If not found, just use the code itself (e.g., "ja").
+            lang_note = f" [In {LANGUAGES.get(sl, {}).get('name', sl)}]."
+
+        # Build the APA entry.
+        # *{domain}* makes the domain italic in Markdown.
+        # datetime.now().strftime('%B %d, %Y') → "October 07, 2026"
+        entries.append(
+            f"[{i}] {s.get('title', '')}. ({datetime.now().year}). "
+            f"*{s.get('domain', '')}*.{lang_note} "
+            f"Retrieved {datetime.now().strftime('%B %d, %Y')}, from {url}"
+        )
+
+    # Join all entries with double newlines between them
+    return "\n\n".join(entries)

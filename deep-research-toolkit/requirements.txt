@@ -1,0 +1,51 @@
+# Deep Research Toolkit — dependencies
+# Install: pip install -r requirements.txt
+
+# --- Core ---
+requests
+
+# --- Search ---
+duckduckgo-search            # Primary: web search via DuckDuckGo (free, no API key)
+multi_search_engine          # Fallback: Google search when DDG returns empty (non-English queries)
+
+# --- Content extraction ---
+trafilatura
+camoufox[geoip]
+
+# --- Academic search ---
+semanticscholar
+arxiv
+
+# --- Developer forums ---
+python-hn
+
+# --- Language detection ---
+langdetect
+
+# --- Citations ---
+citationlib
+
+# --- NLP / Analysis (Mode 2a) ---
+pandas
+transformers                 # Hugging Face: sentiment, zero-shot, NER, summarization
+torch                        # Backend for transformers (CPU-only is fine)
+bertopic                     # Neural topic modeling, multilingual, built-in viz
+datasets                     # HF datasets: load StackEval, CodeInsight for benchmarks
+
+# --- Statistics (Mode 2b) ---
+scipy
+pingouin                     # Effect sizes, power, Bayes Factor — all in one call
+researchpy                   # Research-formatted stat output (APA-ready DataFrames)
+statsmodels                  # Logistic regression, diagnostics
+semopy                       # Structural Equation Modeling (causal path analysis)
+
+# --- Visualization (Mode 3) ---
+matplotlib
+seaborn
+plotly                       # Interactive charts for presentations
+kaleido                      # Plotly static image export (for PNG slides)
+
+# --- Code quality analysis (Mode 5: Simulate) ---
+bandit                       # AST-based security vulnerability scanner
+radon                        # Cyclomatic complexity + maintainability index
+pylint                       # Code quality score (0-10)
