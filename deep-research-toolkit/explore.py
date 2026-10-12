@@ -452,6 +452,7 @@ def run_explore(args):
         )
         + "\n\nFor each gap, suggest a specific fix query. " + QUERY_FORMAT,
         api_key, model, temp=0.4,
+        max_tokens=3000,   # Stops a model stuck repeating itself
     )
 
     pad("06_red_team", f"# Red Team\n\n{critique}")
@@ -476,8 +477,9 @@ def run_explore(args):
     bias = call_ai(
         f"Bias audit. Check: geographic, optimism/pessimism, corporate, "
         f"demographic, temporal, linguistic.\nLANGS: {dict(lc)}\n"
-        f"Suggest fix queries (include non-English native script). " + QUERY_FORMAT,
+        f"Suggest up to 12 fix queries (include non-English native script). " + QUERY_FORMAT,
         api_key, model, temp=0.4,
+        max_tokens=3000,   # A real audit is ~1,000 tokens; a model once looped to 70,000
     )
 
     pad("065_bias", f"# Bias Audit\n\n{bias}")

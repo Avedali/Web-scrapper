@@ -176,7 +176,10 @@ def _corpus_stats(df, args):
                 #   U-val, p-val, effect size (r), and more
                 result = pg.mwu(vendor, non_vendor)
                 print(result.to_string())
-                report += f"## Mann-Whitney U\n{result.to_string()}\n\n"
+                # The p-value column is "p-val" in older pingouin, "p_val" in newer
+                p = float(result[[c for c in result.columns if c.replace("-", "_") == "p_val"][0]].iloc[0])
+                report += (f"## Mann-Whitney U\n{result.to_string()}\n"
+                           + _mwu_in_words(vendor, non_vendor, p) + "\n")
             else:
                 # scipy's mannwhitneyu returns just the U statistic and p-value
                 # alternative="two-sided" means we're testing "is there ANY
@@ -189,7 +192,8 @@ def _corpus_stats(df, args):
                     print("   Significant")
                 else:
                     print("   Not significant")
-                report += f"## Mann-Whitney U\nU={u:.1f}, p={p:.4f}\n\n"
+                report += (f"## Mann-Whitney U\nU={u:.1f}, p={p:.4f}\n"
+                           + _mwu_in_words(vendor, non_vendor, p) + "\n")
 
     # ════════════════════════════════════════════════════════════════
     # TEST 2: KRUSKAL-WALLIS (sentiment across 3+ languages)
@@ -230,13 +234,17 @@ def _corpus_stats(df, args):
                 # between = "grouping variable" (what we're comparing across: language)
                 result = pg.kruskal(data=subset, dv="sentiment", between="lang")
                 print(result.to_string())
-                report += f"## Kruskal-Wallis\n{result.to_string()}\n\n"
+                p = float(result[[c for c in result.columns if c.replace("-", "_") == "p_unc"][0]].iloc[0])
+                report += (f"## Kruskal-Wallis\n{result.to_string()}\n"
+                           + _kruskal_in_words(groups, p) + "\n")
             else:
                 # scipy's kruskal takes the groups as separate arguments.
                 # *groups.values() "unpacks" the dictionary values:
                 # kruskal(group1_scores, group2_scores, group3_scores, ...)
                 h, p = sp.kruskal(*groups.values())
                 print(f"   H = {h:.2f}, p = {p:.4f}")
+                report += (f"## Kruskal-Wallis\nH={h:.2f}, p={p:.4f}\n"
+                           + _kruskal_in_words(groups, p) + "\n")
 
     # ════════════════════════════════════════════════════════════════
     # TEST 3: SPEARMAN CORRELATIONS (between numeric variables)
@@ -680,3 +688,40 @@ def _survey_stats(df, args):
     # Save to scratchpad
     pad("stats_survey", report)
     print(f"\n{'='*60}\nSURVEY STATS COMPLETE\n{'='*60}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PLAIN-WORDS SUMMARIES -- what each test compared and what it found
+# ════════════════════════════════════════════════════════════════════════
+# The brief's writer reads this report. Given only a table of numbers, it
+# once described the vendor-vs-other sentiment test as proof that AI tools
+# have "a significant positive impact" -- so each test says what it means.
+
+def _p(p):
+    """A p-value as text: 'p=0.0037', or 'p<0.0001' rather than 'p=0.0000'."""
+    return "p<0.0001" if p < 0.0001 else f"p={p:.4f}"
+
+
+def _mwu_in_words(vendor, non_vendor, p):
+    """One sentence saying what the Mann-Whitney test compared and found."""
+    if p >= 0.05:
+        finding = "No significant difference in sentiment between them"
+    elif vendor.mean() > non_vendor.mean():
+        finding = "Vendor/primary sources are significantly MORE positive than the rest"
+    else:
+        finding = "Vendor/primary sources are significantly LESS positive than the rest"
+    return (f"In words: compares the sentiment of sources classified as vendor/primary "
+            f"(n={len(vendor)}, mean {vendor.mean():+.3f}) with all other sources "
+            f"(n={len(non_vendor)}, mean {non_vendor.mean():+.3f}). {finding} ({_p(p)}). "
+            f"This is about how sources talk, not about whether AI tools work.\n")
+
+
+def _kruskal_in_words(groups, p):
+    """One sentence saying what the Kruskal-Wallis test compared and found."""
+    means = sorted(((sum(v) / len(v), lang) for lang, v in groups.items()), reverse=True)
+    finding = ("Sentiment differs significantly between languages" if p < 0.05
+               else "No significant difference in sentiment between languages")
+    return (f"In words: compares the sentiment of sources across {len(groups)} languages. "
+            f"{finding} ({_p(p)}). Most positive: {means[0][1]} ({means[0][0]:+.2f}); "
+            f"least positive: {means[-1][1]} ({means[-1][0]:+.2f}).\n")
+

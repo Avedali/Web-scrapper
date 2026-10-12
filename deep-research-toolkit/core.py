@@ -724,7 +724,7 @@ def search_many(jobs, workers=3):
 # AI -- talking to AI models via the OpenRouter API
 # ════════════════════════════════════════════════════════════════════════
 
-def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=None):
+def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
     """
     Send a prompt to an AI model and get back its response.
 
@@ -740,8 +740,10 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=None):
                    1 = very creative. 0.6 is a good middle ground for research.
         system   -- optional "system prompt" that tells the AI how to behave
                    (e.g., "you are an academic researcher, be precise")
-        max_tokens -- optional cap on the length of the reply (stops a model
-                   that gets stuck repeating itself from running on)
+        max_tokens -- cap on the length of the reply. The default (16,000
+                   tokens, ~12,000 words) is far above any real answer, but
+                   stops a model stuck in a loop: one once wrote 270 KB of
+                   made-up search queries into the bias audit.
 
     Returns the AI's response as a text string, or "" if something went wrong.
 
@@ -764,48 +766,61 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=None):
     # The "user" message is your actual question/instruction
     msgs.append({"role": "user", "content": prompt})
 
-    try:
-        # Send the request to OpenRouter's API endpoint.
-        # requests.post() sends an "HTTP POST request" -- the standard way
-        # to send data to a web server.
-        r = requests.post(
-            # The URL of OpenRouter's chat completions endpoint
-            "https://openrouter.ai/api/v1/chat/completions",
+    import time
 
-            # Headers tell the server who we are and what format we're using
-            headers={
-                # "Bearer" + API key is the standard authentication format
-                "Authorization": f"Bearer {api_key}",
-                # Tell the server we're sending JSON (structured data)
-                "Content-Type": "application/json",
-            },
+    # Temporary failures -- "too many requests" (429), a busy or timed-out
+    # server (5xx), a dropped connection -- are retried after a growing wait:
+    # an unattended run shouldn't lose a step to a 20-second hiccup.
+    # Permanent ones (bad key, no credit left, bad request) fail at once.
+    waits = [5, 20, 60]
+    for attempt in range(len(waits) + 1):
+        try:
+            # requests.post sends data to a web server -- here, OpenRouter's
+            # chat endpoint, with our key and the conversation as JSON
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",   # Standard key format
+                    "Content-Type": "application/json",     # We're sending JSON
+                },
+                json={
+                    "model": model,           # Which AI model to use
+                    "messages": msgs,         # The conversation so far
+                    "temperature": temp,      # How random/creative to be
+                    **({"max_tokens": max_tokens} if max_tokens else {}),
+                },
+                timeout=180,  # Wait up to 3 minutes for a response (AI can be slow)
+            )
 
-            # The actual data we're sending (as JSON)
-            json={
-                "model": model,           # Which AI model to use
-                "messages": msgs,         # The conversation so far
-                "temperature": temp,      # How random/creative to be
-                **({"max_tokens": max_tokens} if max_tokens else {}),
-            },
+            temporary = r.status_code == 429 or r.status_code >= 500
+            if temporary and attempt < len(waits):
+                wait = waits[attempt]
+                if r.headers.get("Retry-After", "").isdigit():   # The server says how long
+                    wait = min(int(r.headers["Retry-After"]), 120)
+                print(f"   AI busy ({r.status_code}) -- retrying in {wait}s", flush=True)
+                time.sleep(wait)
+                continue
 
-            timeout=180,  # Wait up to 3 minutes for a response (AI can be slow)
-        )
+            # An error reply (400, 401, 402...) raises here and goes to "except"
+            r.raise_for_status()
 
-        # If the server returned an error (400, 401, 500, etc.), crash here
-        # so we go to the "except" block below. "raise_for_status" means
-        # "if the response was an error, raise an exception."
-        r.raise_for_status()
+            # The AI's text is nested inside: choices -> [first] -> message -> content
+            # (a model can return an empty reply as null -- treat it as "")
+            return r.json()["choices"][0]["message"]["content"] or ""
 
-        # Parse the JSON response. The AI's text is nested inside:
-        # response → choices → [first item] → message → content
-        # It's structured this way because the API can return multiple
-        # "choices" (alternative responses), but we just want the first one.
-        return r.json()["choices"][0]["message"]["content"]
-
-    except Exception as e:
-        # Something went wrong (no internet, bad API key, model overloaded, etc.)
-        print(f"   AI error: {e}")
-        return ""  # Return empty string so the calling code doesn't crash
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if attempt < len(waits):
+                print(f"   AI connection problem ({type(e).__name__}) -- retrying in "
+                      f"{waits[attempt]}s", flush=True)
+                time.sleep(waits[attempt])
+                continue
+            print(f"   AI error: {e}")
+            return ""
+        except Exception as e:
+            # Something went wrong (bad API key, no credit, bad request, etc.)
+            print(f"   AI error: {e}")
+            return ""  # Return empty string so the calling code doesn't crash
+    return ""
 
 
 # ════════════════════════════════════════════════════════════════════════

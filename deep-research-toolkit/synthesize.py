@@ -62,6 +62,7 @@ SOURCE_CHARS = CONTENT_CHARS   # Text per source given to the writer: all of it
 FACT_CHECK_CHARS = 400000      # Room for the full text of every source a section
                                # cites (~100k tokens), so the checker sees it all
 MAX_SOURCES_PER_SECTION = 15   # Sources the evidence map assigns per section
+FINDINGS_FILE_CHARS = 20000     # Longest findings file kept (normal ones: 2-10k)
 SOURCES_PER_PART = 5           # Long sections are written in passes of ~5 sources
 
 # Banned phrases that only open a sentence ("Moreover, X") -- removed in code
@@ -386,7 +387,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
         if not assignment.get(k):
             targets[k] = 350
 
-    sections = []  # Will hold (title, content) pairs
+    sections = []    # Will hold (title, content) pairs
+    unfiltered = []  # Every writing pass as the model wrote it (saved for review)
 
     for k, title in enumerate(section_titles, 1):
         mine = assignment.get(k, [])
@@ -400,6 +402,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
         parts = [mine[p::n_parts] for p in range(n_parts)] if mine else [[]]
         part_words = max(300, targets[k] // n_parts)
         content = ""
+        # Earlier sections' text -- only for dropping repeated sentences in code.
+        # (Putting it in the prompt made the model copy it back, and the
+        # sections shrank to almost nothing.)
+        earlier = "\n\n".join(f"## {t}\n{c}" for t, c in sections)
 
         for p, part_sources in enumerate(parts, 1):
             # Full text of the sources for THIS pass
@@ -427,7 +433,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
                    if assigned_text else "")
                 + f"ALL EVIDENCE CARDS (one per source; you may cite any of these too):\n"
                 f"{evidence[:CARDS_CHARS]}\n\n"
-                f"RESEARCH FINDINGS (this study's own analysis and statistics):\n{context}\n\n"
+                f"RESEARCH FINDINGS (this study's own analysis and statistics -- use only "
+                f"the ones that bear on THIS section's point, with no [n]):\n{context}\n\n"
                 f"Length: about {part_words} words -- but ONLY as long as the evidence "
                 f"supports. Use the specific numbers, findings and examples in the "
                 f"sources. If the evidence runs out first, stop: shorter is better "
@@ -445,11 +452,18 @@ Output a numbered outline with section titles and one-line argument summaries.""
                 part = call_ai(*part_args, **part_kwargs)
             if not part:
                 print(f"      part {p} of {n_parts} FAILED -- this section is incomplete")
-            if part and content:
-                # Drop paragraphs a pass repeated from the text so far
-                seen = {re.sub(r"\s+", " ", x).strip() for x in content.split("\n\n")}
-                part = "\n\n".join(x for x in part.split("\n\n")
-                                     if re.sub(r"\s+", " ", x).strip() not in seen)
+            if part:
+                unfiltered.append(f"## {title} -- pass {p} of {n_parts}\n\n{part}")
+                written = _words(part)
+                # Citation brackets listing 6+ sources (the writer once tagged
+                # this study's own statistics with 309 of them) say nothing
+                # about which source supports what -- drop them; the fact
+                # check then re-cites the sentence properly or removes it
+                part = _drop_citation_dumps(part)
+                # Drop sentences already written in this or an earlier section
+                part = _drop_repeated_sentences(part, earlier + "\n\n" + content)
+                print(f"      pass {p} of {n_parts}: {written} words written, "
+                      f"{_words(part)} kept", flush=True)
             content = (content + "\n\n" + part).strip() if part else content
 
         # Store the section. If the AI call failed, use a placeholder.
@@ -459,6 +473,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
 
     # Save the raw (pre-cleaned) sections to the scratchpad
     # "\n\n---\n\n".join(...) puts "---" dividers between sections
+    pad("synthesis_03a_passes_unfiltered", "\n\n---\n\n".join(unfiltered))
     pad("synthesis_03_brief_raw",
         "\n\n---\n\n".join(f"## {t}\n\n{c}" for t, c in sections))
 
@@ -637,7 +652,6 @@ def _load_all_evidence(corpus_dir):
       - Simulation results (if available)
 
     Each file is labeled with its name so the AI knows what it's reading.
-    Files are truncated to keep the total under the AI's input limit.
     """
     parts = []  # Will hold text chunks from each file
 
@@ -681,6 +695,11 @@ def _load_all_evidence(corpus_dir):
         parts.append(f"── Coding-assistant simulation results ──\n{p.read_text(encoding='utf-8')}\n")
 
     # Join all parts into one big string
+    # A findings file is a few KB. One that's far bigger is a model that got
+    # stuck repeating itself (a 270 KB bias audit once filled every prompt)
+    parts = [x if len(x) <= FINDINGS_FILE_CHARS else
+             x[:FINDINGS_FILE_CHARS] + "\n[... cut: the rest of this file repeats itself]\n"
+             for x in parts]
     return "\n".join(parts)
 
 
@@ -761,6 +780,9 @@ def _fact_check(text, by_idx, cards, api_key, model, findings=""):
         "ORIGINAL: <the sentence, copied exactly from the section>\n"
         "FIX: <the sentence corrected to say only what the source says, with the "
         "right [n] -- or the single word DELETE if no source supports it>\n"
+        "Prefer correcting to deleting: fix the wrong number, word or scope, or cite "
+        "the source that does say it. DELETE only if nothing in the sources or the "
+        "research findings supports any version of the sentence. "
         "Never add new claims.\n\n"
         f"<sources>\n{sources}\n</sources>\n\n"
         f"<research_findings>\n{findings}\n</research_findings>\n\n"
@@ -822,6 +844,31 @@ def _keeps_facts(original, fix, phrases):
         return sorted(re.findall(r"\[[\d,\s]+\]|\d+(?:[.,]\d+)?", t))
     return (len(fix) > 0.4 * len(original) and facts(fix) == facts(original)
             and not any(_banned_pattern(p).search(fix) for p in phrases))
+
+
+def _drop_citation_dumps(text, most=5):
+    """Remove [n, n, ...] brackets that list more than `most` sources."""
+    return re.sub(r"\s*\[\d+(?:\s*,\s*\d+){%d,}\]" % most, "", text)
+
+
+def _drop_repeated_sentences(text, earlier):
+    """
+    Remove sentences of `text` that already appear in `earlier` (ignoring
+    [n] tags, case and punctuation) -- writing passes sometimes restate the
+    thesis and headline numbers at the start of every section.
+    """
+    def key(sentence):
+        no_tags = re.sub(r"\[[\d,\s]+\]", "", sentence)
+        return re.sub(r"\W+", " ", no_tags).strip().lower()
+
+    seen = {key(x) for x in re.split(r"(?<=[.!?])\s+", earlier) if len(key(x)) > 40}
+    lines = []
+    for line in text.split("\n"):   # Line by line, so lists and headings keep their shape
+        kept = [x for x in re.split(r"(?<=[.!?])[ \t]+", line)
+                if len(key(x)) <= 40 or key(x) not in seen]
+        if kept or not line.strip():
+            lines.append(" ".join(kept))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def _strip_file_refs(text):

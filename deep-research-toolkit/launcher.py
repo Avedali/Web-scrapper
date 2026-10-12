@@ -132,9 +132,10 @@ def run_mode(mode, extra_args=None, log=None):
     return proc.wait()
 
 
-# The modes "Run everything" runs, in order. Deepen is left out: what it
-# adds only reaches the brief after another Analyze + Synthesize.
-FULL_RUN = ["explore", "analyze", "stats", "synthesize", "viz", "simulate"]
+# The modes "Run everything" runs, in order. Simulate comes before the
+# charts, which include its scores. Deepen is left out: what it adds only
+# reaches the brief after another Analyze + Synthesize.
+FULL_RUN = ["explore", "analyze", "stats", "synthesize", "simulate", "viz"]
 
 
 def run_everything():
@@ -204,7 +205,7 @@ def main():
         print("  TEAM")
         print("    8 → Ask          Ask a question about the research")
         print()
-        print("    R → Run everything  1, 2, 3, 4, 6, 7 in a row, no questions (~2.5 hours)")
+        print("    R → Run everything  1, 2, 3, 4, 7, 6 in a row, no questions (~2.5 hours)")
         print()
         print("    9 → Clean up     Delete API key from .env (run before submitting!)")
         print("    0 → Quit")
@@ -317,7 +318,7 @@ def main():
 
         # --- Option R: everything, unattended ---
         elif choice.lower() == "r":
-            print("\n  Runs Explore, Analyze, Stats, Synthesize, Charts and Simulate")
+            print("\n  Runs Explore, Analyze, Stats, Synthesize, Simulate and Charts")
             print("  one after another -- about 2.5 hours and $0.40 -- with no more")
             print("  questions (each step takes its default). You can walk away.")
             if sys.platform == "darwin":

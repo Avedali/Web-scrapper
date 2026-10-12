@@ -304,6 +304,11 @@ def run_viz(args):
             # Add a solid vertical line at x=0 (the neutral boundary)
             fig.add_vline(x=0, line_dash="solid", line_color=DARK, line_width=1)
 
+            # Leave room right of the dots for the "+0.44 (n=12)" labels
+            lo_x, hi_x = min(0, data["m"].min()), max(0, data["m"].max())
+            span = (hi_x - lo_x) or 1
+            fig.update_xaxes(range=[lo_x - 0.05 * span, hi_x + 0.3 * span])
+
             # Slide title from the data: the most and least positive languages
             lo, hi = data.iloc[0], data.iloc[-1]
             save(fig, "02_sentiment_by_lang",
@@ -429,6 +434,7 @@ def run_viz(args):
                 showlegend=False,
             ))
 
+        fig.update_xaxes(range=[0, counts.max() * 1.15])   # Room for the count labels
         save(fig, "05_source_quality",
              f"Figure 5: Source inventory by quality tier (N={len(df)})",
              f"{len(df)} sources -- where did the evidence come from?")
