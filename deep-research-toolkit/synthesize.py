@@ -351,7 +351,12 @@ Output a numbered outline with section titles and one-line argument summaries.""
             f"- {{{f['id']}}} {f['claim']} [sources: {', '.join(str(x) for x in f['sources'])}]"
             for f in assignment.get(t, [])) for t in section_titles))
 
-    blocks = claims.outline_blocks(outline, section_titles)
+    # The thesis and outline cite sources as [n] (they were made from the
+    # evidence cards); shown that, the writer copied source numbers in place
+    # of finding IDs. It gets them without.
+    no_cites = r"\s*\[\d+(?:\s*,\s*\d+)*\]"
+    theses_text, outline_text = re.sub(no_cites, "", theses), re.sub(no_cites, "", outline)
+    blocks = claims.outline_blocks(outline_text, section_titles)
     study_results = _study_results(args.corpus)
     findings_by_id = {f["id"]: f for f in findings}
 
@@ -404,8 +409,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
         def write(group, instruction, p_label):
             """One writing call: prose from `group`; returns the text with SKIP lines removed."""
             prompt = (
-                f"THESIS: argue thesis #{thesis_num} from this analysis:\n{theses}\n\n"
-                f"OUTLINE OF THE PAPER:\n{outline}\n\n"
+                f"THESIS: argue thesis #{thesis_num} from this analysis:\n{theses_text}\n\n"
+                f"OUTLINE OF THE PAPER:\n{outline_text}\n\n"
                 f"SECTION: {title}\nWHAT THIS SECTION ARGUES:\n{blocks.get(title, title)}\n\n"
                 f"{instruction}\n\n"
                 f"FINDINGS TO USE (cite each with its ID in braces, e.g. {{C12}}):\n"

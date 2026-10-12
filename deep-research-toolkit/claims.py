@@ -34,7 +34,11 @@ CLAIMS_FILE = "claims.json"
 CLAIMS_PER_SOURCE = 10       # Most a source contributes (a long report has more facts)
 MERGE_SIMILARITY = 0.85      # How alike two claims must be (by meaning) to be one finding
 MIN_RELEVANCE = 0.20         # A claim less related than this to every section is left out
-MAX_CLAIMS_PER_SECTION = 45  # Scope, not length: ~45 findings is a long section already
+CLAIMS_IN_BRIEF = 360        # Scope of the whole brief: its most relevant findings,
+                             # shared between however many sections the outline has
+                             # (a fixed number per section made an 8-section brief
+                             # a third longer than a 6-section one)
+MAX_CLAIMS_PER_SECTION = 60  # ...but no section takes more than this
 MAX_PER_SOURCE_IN_SECTION = 4  # Keeps one prolific source from filling a section
 
 
@@ -275,8 +279,9 @@ def assign_claims(findings, titles, outline):
     """
     {title: [finding...]} -- each finding in the ONE section it's most related
     to (by meaning, against the section's outline text). Findings unrelated to
-    every section are left out; a section keeps its MAX_CLAIMS_PER_SECTION most
-    related findings, at most MAX_PER_SOURCE_IN_SECTION led by one source.
+    every section are left out; each section keeps its most related findings
+    -- its share of CLAIMS_IN_BRIEF, at most MAX_CLAIMS_PER_SECTION, and at
+    most MAX_PER_SOURCE_IN_SECTION led by one source.
     Returns (assignment, number of related findings left unused).
     """
     blocks = outline_blocks(outline, titles)
@@ -295,12 +300,14 @@ def assign_claims(findings, titles, outline):
             if row[best] >= MIN_RELEVANCE:
                 assignment[titles[best]].append((row[best], f))
 
+    import math
+    room = min(MAX_CLAIMS_PER_SECTION, math.ceil(CLAIMS_IN_BRIEF / max(1, len(titles))))
     unused, out = 0, {}
     for t, items in assignment.items():
         kept, per_source = [], {}
         for score, f in sorted(items, key=lambda x: -x[0]):
             lead = f["sources"][0]
-            if len(kept) < MAX_CLAIMS_PER_SECTION and per_source.get(lead, 0) < MAX_PER_SOURCE_IN_SECTION:
+            if len(kept) < room and per_source.get(lead, 0) < MAX_PER_SOURCE_IN_SECTION:
                 kept.append(f)
                 per_source[lead] = per_source.get(lead, 0) + 1
             else:
