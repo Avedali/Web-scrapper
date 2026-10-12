@@ -34,10 +34,11 @@ CLAIMS_FILE = "claims.json"
 CLAIMS_PER_SOURCE = 10       # Most a source contributes (a long report has more facts)
 MERGE_SIMILARITY = 0.85      # How alike two claims must be (by meaning) to be one finding
 MIN_RELEVANCE = 0.20         # A claim less related than this to every section is left out
-CLAIMS_IN_BRIEF = 360        # Scope of the whole brief: its most relevant findings,
-                             # shared between however many sections the outline has
-                             # (a fixed number per section made an 8-section brief
-                             # a third longer than a 6-section one)
+CLAIMS_IN_BRIEF = 260        # Findings the theme sections use in total: the most
+                             # relevant ones, shared between however many themes there
+                             # are. (A fixed number per theme made an 8-theme brief a
+                             # third longer than a 6-theme one.) About 20 words each,
+                             # so ~5,000 words of themes in a ~6,500-word brief.
 MAX_CLAIMS_PER_SECTION = 60  # ...but no section takes more than this
 MAX_PER_SOURCE_IN_SECTION = 4  # Keeps one prolific source from filling a section
 
@@ -314,3 +315,52 @@ def assign_claims(findings, titles, outline):
                 unused += 1
         out[t] = kept
     return out, unused
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 5. FINDINGS THAT CONTRADICT EACH OTHER
+# ════════════════════════════════════════════════════════════════════════
+
+DISAGREE_TOPIC = 0.55     # Findings at least this alike are about the same subject
+DISAGREE_SURE = 0.7       # How sure the local judge must be that they contradict
+MAX_DISAGREEMENTS = 8     # Pairs shown in the brief's "disagrees" section
+MAX_PAIRS_JUDGED = 300    # Most alike pairs sent to the local judge (it takes ~0.1s each)
+
+
+def find_disagreements(findings, most=MAX_DISAGREEMENTS):
+    """
+    Pairs of findings from different sources that are about the same subject
+    and contradict each other, most certain first: [(finding, finding)].
+    Example: developers report feeling 20% faster / a controlled trial found
+    them 19% slower. Each finding appears in at most one pair. Returns [] if
+    the matching model or the local judge isn't installed.
+    """
+    model = verify._match_model()
+    if model is None or not verify.judge_available() or len(findings) < 2:
+        return []
+    from sentence_transformers import util
+    sims = util.cos_sim(*(2 * [model.encode([f["claim"] for f in findings], convert_to_tensor=True)]))
+    candidates = []
+    for i in range(len(findings)):
+        for j in range(i + 1, len(findings)):
+            if sims[i][j] >= DISAGREE_TOPIC and not set(findings[i]["sources"]) & set(findings[j]["sources"]):
+                candidates.append((float(sims[i][j]), i, j))
+    candidates = sorted(candidates, reverse=True)[:MAX_PAIRS_JUDGED]
+    if not candidates:
+        return []
+    # Judge both directions (A against B, B against A) and keep the stronger
+    probs = verify.judge_support_many(
+        [(findings[i]["claim"], findings[j]["claim"]) for _, i, j in candidates]
+        + [(findings[j]["claim"], findings[i]["claim"]) for _, i, j in candidates])
+    n = len(candidates)
+    scored = sorted(((max(probs[k]["contradiction"], probs[k + n]["contradiction"]), i, j)
+                     for k, (_, i, j) in enumerate(candidates)), reverse=True)
+    pairs, used = [], set()
+    for score, i, j in scored:
+        if score < DISAGREE_SURE or len(pairs) >= most:
+            break
+        if i not in used and j not in used:
+            pairs.append((findings[i], findings[j]))
+            used.update((i, j))
+    return pairs
+

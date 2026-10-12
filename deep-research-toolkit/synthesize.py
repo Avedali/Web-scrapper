@@ -1,20 +1,23 @@
 """
-synthesize.py -- Mode 1.b: Thesis generation + outline + brief.
-================================================================
+synthesize.py: Mode 1.b, the research brief.
+=============================================
 Run: python agent.py synthesize
 Or:  launcher.py → option 4
 
-This is where the opinion forms -- BUT only from evidence.
-It reads EVERYTHING the previous modes produced (sources, NLP analysis,
-statistical tests, red team critiques, bias audits) and:
+Reads everything explore, analyze and stats saved, and writes a research
+brief organized by finding, not by argument:
 
-  1.b.i:   Proposes 3 defensible theses ranked by evidence strength
-  1.b.ii:  Generates a paper outline shaped by the chosen thesis
-  1.b.iii: Writes each section (grounded in evidence, not memory)
-  1.b.iv:  Formats references (APA) and cleans voice (strips LLM-speak)
+  Bottom line       3-5 sentences that answer the research question
+  Key findings      one per theme, each with its evidence counted in code
+  Findings by theme most of the brief: what was measured, by whom, on whom,
+                    where sources agree and where they conflict
+  Disagreements     findings that contradict each other, and why
+  Gaps              what this evidence cannot tell the reader
+  Implications      what it means for the reader
+  Method            how the brief was made (written in code, not by the AI)
 
-ONLY run this AFTER explore + analyze + stats.
-The thesis comes from the data, not from the researcher's gut.
+Every fact comes from the claim ledger (claims.py) and every sentence goes
+through the fact-check gate (verify.py). Run this AFTER explore + analyze + stats.
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -30,6 +33,7 @@ from datetime import datetime       # Timestamps for the final report
 from collections import defaultdict # Auto-initializing dictionary
 from pathlib import Path            # Nice file path handling
 
+from explore import DEFAULT_TOPIC   # The research topic, if none was given
 import claims   # The claim ledger: checked findings the brief is written from
 import verify   # The fact-check gate
 
@@ -48,30 +52,31 @@ from core import (
 # HOW THE BRIEF IS WRITTEN
 # ════════════════════════════════════════════════════════════════════════
 #
-# Every source is read (as an evidence card) to find the thesis and outline.
-# The brief itself is written from the CLAIM LEDGER (claims.py): every
-# source's claims, each checked against a quote from the source, merged when
-# several sources report the same finding, and given to ONE section each --
-# so a finding is written once, and a number can't land on the wrong source.
+# The framing step reads one evidence card per source to pick the research
+# question and the themes. The brief itself is written from the claim ledger
+# (claims.py): each source's claims, each checked against a quote from that
+# source. When several sources report the same finding they become one
+# finding, and each finding goes to one theme. So a finding is written once,
+# and a number stays with the source that reported it.
 #
-# Length isn't set in advance: a section is as long as its findings need. The
-# writer explains a hard finding fully and states a simple one briefly; it
-# never pads. A longer brief needs more evidence (deepen), not more words.
-# Everything written then goes through the fact-check gate (verify.py).
+# No word count is set. A section is as long as its findings need: the writer
+# explains a hard finding in full and states a simple one in a sentence. To
+# get a longer brief, collect more evidence (deepen), don't ask for more words.
+# Everything written goes through the fact-check gate (verify.py).
 
-BRIEF_WORDS = 6000             # Only tells the outline how big the paper is
-THESIS_CONTEXT_CHARS = 120000  # Findings + ALL evidence cards for the thesis step
+AUDIENCE = "financial industry professionals"   # Who the implications are written for
+FRAMING_CONTEXT_CHARS = 120000  # Findings + all evidence cards shown to the framing step
 UNCITED_MATCH = 0.75          # An uncited sentence this close to a finding gets its sources
 NEAR_REPEAT = 0.92            # Sentences this alike in meaning count as a repeat
-CLAIMS_PER_PASS = 12           # Findings one writing call turns into prose. Long
-                               # sections take several passes, each from DIFFERENT
-                               # findings -- no pass sees another's text (shown the
-                               # text so far, the model copied it)
+CLAIMS_PER_PASS = 12           # Findings per writing call. A long section takes
+                               # several calls, each with different findings. No call
+                               # sees another call's text: when it did, the model
+                               # copied it.
 FINDINGS_FILE_CHARS = 20000    # Longest findings file kept (normal ones: 2-10k)
 EVIDENCE_CHARS = 40000         # Fallback evidence block (if cards fail)
 SOURCES_PER_TIER = 15          # Max sources per quality tier in that fallback
 
-# Banned phrases that only open a sentence ("Moreover, X") -- removed in code
+# Banned phrases that only start a sentence ("Moreover, X"). Code removes them.
 TRANSITIONS = [
     "it's important to note that", "it is important to note that",
     "it's worth noting that", "it is worth noting that",
@@ -88,345 +93,143 @@ TRANSITIONS = [
 
 def run_synthesize(args):
     """
-    Run the full synthesis pipeline:
-    thesis → outline → write sections → APA references → voice clean → save.
+    Write the research brief. Steps:
+    framing (question and themes) → claim ledger → theme sections →
+    disagreements → gaps → fact-check gate → bottom line, key findings and
+    implications (checked too) → method → save.
     """
 
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")
+        sys.exit("No API key found. Run install.py to add one (or pass --key KEY)")
+    model = args.model  # Which AI model writes the brief
+    topic = getattr(args, "topic", None) or DEFAULT_TOPIC
 
-    model = args.model  # Which AI model to use
-
-    # A verdict from an earlier run must never stand for this one
+    # Delete the verdict of an earlier run, so it can't be mistaken for this one's
     stale = os.path.join(args.corpus, "brief_verdict.json")
     if os.path.exists(stale):
         os.remove(stale)
 
     print("=" * 60)
-    print("MODE 1.b: SYNTHESIZE (thesis from evidence)")
+    print("MODE 1.b: SYNTHESIZE (research brief from the evidence)")
     print("=" * 60)
 
-    # ── Load all evidence from the scratchpad ───────────────────────
-    # This reads every file that explore, analyze, and stats produced.
-    # The AI will use this as its ONLY source of information.
+    # ── Load what explore, analyze and stats saved ──────────────────
     context = _load_all_evidence(args.corpus)
-
     if not context:
         sys.exit("No evidence found. Run explore → analyze → stats first.")
-
-    # len(context) = number of characters (letters) in the text
     print(f"   Loaded {len(context)} chars of evidence from scratchpad/")
 
-    # ── Read EVERY source: one evidence card each ───────────────────
-    # A card is a 1-2 sentence English summary of a source's findings,
-    # tagged [n] (see core.build_evidence_cards). ~150 cards fit in one
-    # prompt, so the AI can see the whole corpus -- including the
-    # Japanese, Korean, Chinese... sources -- not just the first few.
-    # Cards are cached: if analyze already built them, this is free.
+    # ── One evidence card per source ────────────────────────────────
+    # A card is a 1-2 sentence English summary of one source (see
+    # core.build_evidence_cards). All cards fit in one prompt, so the
+    # framing step sees every source, in every language. Analyze already
+    # built them, so this step reads them from the cache for free.
     corpus = _load_corpus(args.corpus)
     by_idx = {s["idx"]: s for s in corpus}
     cards = build_evidence_cards(corpus, api_key, model, args.corpus) if corpus else {}
     usable = {i: c for i, c in cards.items() if not c.startswith(NO_EVIDENCE)}
-
     if usable:
         evidence = "\n".join(
             f"[{i}][{by_idx[i].get('lang', '?')}][{by_idx[i].get('quality', '?')}] {c}"
             for i, c in sorted(usable.items()) if i in by_idx)
-        print(f"   Read all {len(corpus)} sources -> {len(usable)} evidence cards "
-              f"({len(cards) - len(usable)} had no usable evidence)")
+        print(f"   Read all {len(corpus)} sources: {len(usable)} evidence cards "
+              f"({len(cards) - len(usable)} sources had nothing usable)")
     else:
-        # No cards (AI calls failed)? Fall back to source snippets
+        # No cards (the AI calls failed): use the first lines of each source
         evidence = _build_evidence_block(args.corpus)[:EVIDENCE_CHARS]
-        print("   Evidence cards unavailable -- using source snippets instead")
-
+        print("   Evidence cards unavailable, using source snippets instead")
     pad("synthesis_00_evidence_cards",
         f"# Evidence cards (one per source, cite as [n])\n\n{evidence}")
 
     # ════════════════════════════════════════════════════════════════
-    # 1.b.i: THESIS GENERATION
+    # 1. FRAMING: the research question and the themes that answer it
     # ════════════════════════════════════════════════════════════════
-    # This is the critical step. Instead of the researcher deciding
-    # what to argue BEFORE looking at data (which creates confirmation
-    # bias), we ask the AI to read ALL the evidence and propose
-    # the strongest defensible positions.
-    #
-    # The AI proposes 3 theses, ranked by evidence strength.
-    # The user picks which one to use for the paper.
-    #
-    # A thesis is NOT a topic. "AI is changing software development"
-    # is a topic (no one disagrees). "AI coding assistants increase
-    # individual productivity but create systemic risks to code quality
-    # that organizations are not yet equipped to manage" is a thesis
-    # (someone could argue the opposite).
-
-    print(f"\n{'─'*50}\n1.b.i: THESIS GENERATION\n{'─'*50}")
-    print("   Reading all evidence and proposing defensible theses...\n")
-
-    # Build the prompt for thesis generation.
-    # f"""...""" is a multi-line f-string (formatted string).
-    # The prompt gets the findings (context) plus the tagged sources,
-    # truncated to THESIS_CONTEXT_CHARS (AI models have a maximum input length).
-    thesis_evidence = (context + "\n\nEVIDENCE CARDS (one per source, cite as [n]):\n"
-                       + evidence)[:THESIS_CONTEXT_CHARS]
-    thesis_prompt = f"""You are a research advisor helping business students write a capstone paper.
-
-You have access to ALL the evidence they collected -- raw sources, sentiment
-analysis, statistical tests, topic modeling, bias audits, and red team critiques.
-
-YOUR TASK: Based ONLY on this evidence, propose 3 possible thesis statements
-that are:
-1. Defensible with the evidence that exists (not aspirational)
-2. Arguable (someone could disagree)
-3. Specific enough to structure a paper around
-4. Relevant to a business audience (not just technical)
-
-For each thesis, explain:
-- What evidence supports it (cite specific findings)
-- What evidence complicates it (the strongest counterargument)
-- How strong the evidence base is (strong / moderate / thin)
-- What the paper outline would look like if they chose this thesis
-
-EVIDENCE:
-{thesis_evidence}
-
-Do NOT propose generic theses like "AI is transforming software development."
-That's a topic, not a thesis. A thesis takes a position: "AI coding assistants
-increase individual productivity but create systemic risks to code quality
-that organizations are not yet equipped to manage."
-
-Output 3 theses, ranked by strength of evidence."""
-
-    # Send the prompt to the AI
-    theses = call_ai(thesis_prompt, api_key, model, temp=0.5)
-
-    # Save to scratchpad so other modes (and teammates via ask) can read it
-    pad("synthesis_01_theses", f"# Proposed Theses\n\n{theses}")
-
-    # Show the first 2000 characters to the user so they can review
-    print(theses[:2000])
-
-    # ── Ask the user which thesis to use ────────────────────────────
-    # This is an interactive step: the script pauses and waits for
-    # the user to type 1, 2, or 3 (or just press Enter for #1).
-    print(f"\n{'─'*50}")
-    print("   Review the theses above. Which one?")
-    print("   Press Enter to use thesis #1 (strongest evidence),")
-    print("   or type 2 or 3 to pick a different one.")
-
-    try:
-        choice = input("   > ").strip()  # Wait for user input
-    except (EOFError, KeyboardInterrupt):
-        choice = ""  # If they hit Ctrl+C, default to thesis #1
-
-    # Convert their choice to an integer.
-    # int(choice) converts "2" → 2, but would crash on "" or "abc".
-    # So we only do it if choice is "1", "2", or "3".
-    thesis_num = int(choice) if choice in ("1", "2", "3") else 1
-
-    print(f"   → Using thesis #{thesis_num}\n")
+    # The brief is organized by theme: each theme is a sub-question the
+    # evidence can answer ("Does AI make developers faster?"), not a
+    # position to argue. The AI picks 5-7 themes after reading every card
+    # and the study's own results.
+    print(f"\n{'─'*50}\n1. FRAMING (research question and themes)\n{'─'*50}")
+    question, themes, framing = _frame_brief(topic, context, evidence, api_key, model)
+    titles = [t for t, _ in themes]
+    pad("synthesis_01_framing", f"# Research question and themes\n\n{framing}")
+    print(f"   Question: {question}")
+    for t, q in themes:
+        print(f"   - {t}: {q}")
 
     # ════════════════════════════════════════════════════════════════
-    # 1.b.ii: OUTLINE GENERATION
+    # 2. THE CLAIM LEDGER (claims.py)
     # ════════════════════════════════════════════════════════════════
-    # Now that we have a thesis, we generate the paper outline.
-    # The outline is shaped BY the thesis -- each section exists
-    # because the thesis needs it, not because it's a standard section.
-    #
-    # Key rule: "No 'Background' section unless background is genuinely
-    # necessary for the argument." Standard academic papers often have
-    # Background, Literature Review, Methodology, Findings, Discussion,
-    # Conclusion -- but that structure is for a topic, not a thesis.
-    # A thesis-driven paper has sections that each advance the argument.
-
-    print(f"{'─'*50}\n1.b.ii: OUTLINE FROM THESIS\n{'─'*50}")
-
-    outline_prompt = f"""Based on thesis #{thesis_num} from this analysis, generate a paper outline.
-
-The paper is about {BRIEF_WORDS} words (~{BRIEF_WORDS // 275} double-spaced pages), for a business school capstone.
-The audience is financial industry professionals, not technologists.
-
-THESES:
-{theses}
-
-RULES:
-- Every section must exist because the thesis NEEDS it, not because
-  it's a standard section. No "Background" section unless background
-  is genuinely necessary for the argument.
-- Each section should have a one-sentence summary of what it argues
-  (not what it covers -- what it ARGUES).
-- Note which evidence from the scratchpad supports each section.
-- Include a "Limitations and counterarguments" section -- this is what
-  makes it credible, not weak.
-
-Output a numbered outline with section titles and one-line argument summaries."""
-
-    outline = call_ai(outline_prompt, api_key, model, temp=0.4)
-
-    pad("synthesis_02_outline", f"# Outline (thesis #{thesis_num})\n\n{outline}")
-    print(outline[:1500])
-
-    # ════════════════════════════════════════════════════════════════
-    # 1.b.iii: WRITE THE BRIEF (section by section)
-    # ════════════════════════════════════════════════════════════════
-    # Now we write each section of the paper. The AI gets:
-    #   - The chosen thesis
-    #   - The full outline (so it knows where this section fits)
-    #   - The evidence block (raw sources it can cite)
-    #   - A system prompt with strict rules (no memory, no buzzwords)
-
-    print(f"\n{'─'*50}\n1.b.iii: WRITE BRIEF\n{'─'*50}")
-
-    # ── Parse section titles from the outline ───────────────────────
-    # The outline looks like:
-    #   1. Introduction: The productivity paradox of AI coding tools
-    #   2. Evidence for productivity gains -- but from whom?
-    #   3. The code quality gap: what the studies don't measure
-    #   ...
-    # We need to extract just the titles ("Introduction: The productivity
-    # paradox of AI coding tools", etc.) from this numbered list.
-
-    section_titles = []  # Will hold the extracted titles
-
-    for raw_line in outline.split("\n"):  # Go through the outline line by line
-        # Also strip Markdown heading/bold markers ("### 1. ...", "**1. ...**")
-        # which models often add -- otherwise the pattern below never matches.
-        line = raw_line.strip().lstrip("#* ")
-
-        # re.match tries to match a pattern at the START of the string.
-        # This pattern matches lines that start with a number or Roman numeral,
-        # followed by a period or parenthesis, followed by text.
-        #
-        # r'^[\dIVXivx]+[\.\)]\s*(.+)' means:
-        #   ^        = start of string
-        #   [\dIVXivx]+  = one or more digits or Roman numeral characters
-        #   [\.\)]   = a period or closing parenthesis
-        #   \s*      = optional whitespace
-        #   (.+)     = capture everything else (this is the title)
-        m = re.match(r'^[\dIVXivx]+[\.\)]\s*(.+)', line)
-
-        if m:
-            # m.group(1) is the captured text (the title after the number)
-            # .split("--")[0] takes only the part before an em-dash
-            # .split(":")[0] takes only the part before a colon
-            # This strips sub-descriptions: "Introduction: The paradox" → "Introduction"
-            title = m.group(1).split("--")[0].split(":")[0].strip(" *")
-
-            # Only keep titles that are reasonable length (not too short, not too long)
-            if len(title) > 5 and len(title) < 80:
-                section_titles.append(title)
-
-    # Fallback: if parsing didn't find any titles, use generic ones
-    # (this happens if the AI formatted the outline differently than expected)
-    if not section_titles:
-        section_titles = [
-            "Introduction and Thesis",
-            "Evidence Section 1",
-            "Evidence Section 2",
-            "Evidence Section 3",
-            "Counterarguments and Limitations",
-            "Conclusion",
-        ]
-
-
-    # ── The claim ledger (claims.py) ────────────────────────────────
-    print(f"\n{'─'*50}\nCLAIM LEDGER (every source's claims, checked)\n{'─'*50}")
+    print(f"\n{'─'*50}\n2. CLAIM LEDGER (every source's claims, checked)\n{'─'*50}")
     ledger_corpus = [src for src in corpus if src["idx"] in usable] or corpus
     cache = claims.extract_claims(ledger_corpus, api_key, model, args.corpus)
     stats = claims.check_claims(cache, by_idx, api_key, corpus_dir=args.corpus)
     findings = claims.merge_claims(cache, by_idx)
-    assignment, unused = claims.assign_claims(findings, section_titles, outline)
+    theme_text = "\n".join(f"{t}\n{q}" for t, q in themes)
+    assignment, unused = claims.assign_claims(findings, titles, theme_text)
     n_assigned = sum(len(v) for v in assignment.values())
     print(f"   {stats['ok']} claims confirmed by their quotes, {stats['corrected']} corrected "
           f"to match them, {stats['dropped']} dropped")
     print(f"   {len(findings)} distinct findings ({sum(len(f['sources']) > 1 for f in findings)} "
-          f"backed by 2+ sources); {n_assigned} given to sections"
-          + (f", {unused} more related than room" if unused else ""))
+          f"backed by 2+ sources); {n_assigned} given to themes"
+          + (f", {unused} more were related but over the limit" if unused else ""))
     if not n_assigned:
-        sys.exit("No checked claims to write from -- the claim ledger is empty "
+        sys.exit("No checked claims to write from: the claim ledger is empty "
                  "(see scratchpad/claims.json). Re-run synthesize.")
-    pad("synthesis_02b_ledger", "# Claim ledger: findings per section\n\n" + "\n\n".join(
+    pad("synthesis_02b_ledger", "# Claim ledger: findings per theme\n\n" + "\n\n".join(
         f"## {t}\n\n" + "\n".join(
             f"- {{{f['id']}}} {f['claim']} [sources: {', '.join(str(x) for x in f['sources'])}]"
-            for f in assignment.get(t, [])) for t in section_titles))
+            for f in assignment.get(t, [])) for t in titles))
 
-    # The thesis and outline cite sources as [n] (they were made from the
-    # evidence cards); shown that, the writer copied source numbers in place
-    # of finding IDs. It gets them without.
-    no_cites = r"\s*\[\d+(?:\s*,\s*\d+)*\]"
-    theses_text, outline_text = re.sub(no_cites, "", theses), re.sub(no_cites, "", outline)
-    blocks = claims.outline_blocks(outline_text, section_titles)
     study_results = _study_results(args.corpus)
+    profile = _corpus_profile(corpus, usable, by_idx)
     findings_by_id = {f["id"]: f for f in findings}
-
-    # ── System prompt (rules the writer must follow) ────────────────
-    sys_prompt = (
-        "You write academic research from a ledger of checked findings. RULES:\n"
-        "- Every sentence that states a fact carries the ID of the finding it comes\n"
-        "  from, in braces: {C12} -- one ID per brace, {C3}{C9} for two. Use ONLY the\n"
-        "  findings given -- never facts from memory.\n"
-        "- One finding per sentence, or say clearly which source says what ('GitHub\n"
-        "  reports X {C3}, while a Veracode study found Y {C9}').\n"
-        "- Say 'studies' or 'several sources' only for a finding with 2+ sources.\n"
-        "- Keep each finding's numbers, hedges (up to, often, may) and scope (which\n"
-        "  study, sample, company, country, year) exactly. Never widen one study's\n"
-        "  sample into 'developers' or 'companies' in general.\n"
-        "- Attribute vendors' claims about their own products ('GitHub reports ...').\n"
-        "- This study's own results (THIS STUDY'S RESULTS below) carry no ID: say\n"
-        "  'our analysis of the corpus found ...', and never mention file names.\n"
-        "- Your own reasoning -- topic sentences, transitions, conclusions drawn from\n"
-        "  the findings -- carries no ID and reads as reasoning ('This suggests ...').\n"
-        "- Length follows the ideas: explain a hard finding fully (what was measured,\n"
-        "  on whom, why it matters for the argument); state a simple one in a\n"
-        "  sentence. No padding, and never make the same point twice.\n"
-        "- Note a finding's source language when it matters: the corpus is\n"
-        "  multilingual on purpose.\n"
-        "- NEVER use: " + ", ".join(f'"{p}"' for p in BANNED_PHRASES[:10]) + "\n"
-        "- You are ARGUING the thesis, not summarizing: every paragraph advances it."
-    )
+    sys_prompt = _writer_rules()
 
     def finding_lines(group):
-        """The findings of one pass, as the writer sees them."""
+        """The findings of one writing call, as the writer sees them."""
         out = []
         for f in group:
             srcs = [by_idx[x] for x in f["sources"][:3] if x in by_idx]
             who = "; ".join(f"{x.get('quality', '?')}, {x.get('lang', '?')}: "
                             f"\"{x.get('title', '')[:70]}\" ({x.get('domain', '')})" for x in srcs)
             quote = next(iter(f["quotes"].values()), "")
-            out.append(f"{{{f['id']}}} {f['claim']}\n    [{len(f['sources'])} source(s) -- {who}]"
+            out.append(f"{{{f['id']}}} {f['claim']}\n    [{len(f['sources'])} source(s): {who}]"
                        f"\n    quote: \"{quote[:300]}\"")
         return "\n".join(out)
 
-    # ── Write each section, pass by pass ────────────────────────────
-    sections, unfiltered, coverage_log = [], [], []
-    for k, title in enumerate(section_titles, 1):
-        mine = assignment.get(title, [])
+    unfiltered, coverage_log = [], []
+
+    def write_section(title, purpose, mine, passes, written_so_far):
+        """
+        Write one section from its findings, in passes of CLAIMS_PER_PASS.
+        `purpose` says what the section is for. `passes(p, n)` gives the
+        instruction for pass p of n. Returns the text with [n] citations.
+        """
         groups = _claim_groups(mine, CLAIMS_PER_PASS)
-        print(f"    {title}  ({len(mine)} findings, {len(groups)} pass(es))")
         pieces, used, skipped = [], set(), {}
 
-        def write(group, instruction, p_label):
-            """One writing call: prose from `group`; returns the text with SKIP lines removed."""
+        def write(group, instruction, label):
+            """One writing call. Returns its text without the SKIP lines."""
             prompt = (
-                f"THESIS: argue thesis #{thesis_num} from this analysis:\n{theses_text}\n\n"
-                f"OUTLINE OF THE PAPER:\n{outline_text}\n\n"
-                f"SECTION: {title}\nWHAT THIS SECTION ARGUES:\n{blocks.get(title, title)}\n\n"
+                f"RESEARCH QUESTION OF THE BRIEF: {question}\n\n"
+                f"SECTION: {title}\nWHAT THIS SECTION IS FOR: {purpose}\n\n"
                 f"{instruction}\n\n"
                 f"FINDINGS TO USE (cite each with its ID in braces, e.g. {{C12}}):\n"
                 f"{finding_lines(group)}\n\n"
-                f"THIS STUDY'S RESULTS (no ID; use only what bears on this section):\n"
+                f"THIS STUDY'S OWN RESULTS (no ID; use only what bears on this section):\n"
                 f"{study_results}\n\n"
                 "Write the prose now (no heading). Then, on separate lines at the very end, "
-                "list any finding you could not fit as: SKIP: C12 -- reason"
+                "list any finding you could not fit as: SKIP: C12 - reason"
             )
             text = call_ai(prompt, api_key, model, temp=0.3, system=sys_prompt)
-            if not text:   # Failed call (e.g. network or credit) -- retry once
+            if not text:   # The call failed (network or credit): try once more
                 text = call_ai(prompt, api_key, model, temp=0.3, system=sys_prompt)
             if not text:
-                print(f"      {p_label} FAILED -- this section is incomplete")
+                print(f"      {label} FAILED: this section is incomplete")
                 return ""
-            unfiltered.append(f"## {title} -- {p_label}\n\n{text}")
+            unfiltered.append(f"## {title} ({label})\n\n{text}")
             for m in re.finditer(r"^\W*SKIP\W*\{?C\s*(\d+)\}?\s*[-–—:]*\s*(.*)$", text, re.M | re.I):
                 skipped["C" + m.group(1)] = m.group(2).strip() or "no reason given"
             text = re.sub(r"^\W*SKIP\W*\{?C\d+.*$", "", text, flags=re.M | re.I).strip()
@@ -434,25 +237,18 @@ Output a numbered outline with section titles and one-line argument summaries.""
             return text
 
         for p, group in enumerate(groups, 1):
-            instruction = (f"This is part {p} of {len(groups)} of the section; the other parts "
-                           f"use other findings. " if len(groups) > 1 else "")
-            instruction += ("Open the section by stating its point in a sentence or two. " if p == 1
-                            else "Don't introduce the section again or restate the thesis: continue "
-                                 "its argument with these findings. ")
-            if p == len(groups):
-                instruction += "You may close with a short conclusion drawn from the section."
-            piece = write(group, instruction, f"pass {p} of {len(groups)}")
+            piece = write(group, passes(p, len(groups)), f"pass {p} of {len(groups)}")
             if piece:
                 pieces.append(piece)
 
-        # Coverage: a finding the writer neither used nor skipped (with a
-        # reason) gets one more pass -- nothing is silently dropped
+        # A finding the writer neither used nor skipped with a reason gets
+        # one more pass, so no finding disappears without a note in the log
         missing = [f for f in mine if f["id"] not in used and f["id"] not in skipped]
         if missing and pieces:
-            piece = write(missing, "These findings belong in this section but weren't used yet. "
-                          "Write one or two paragraphs that work them into its argument; they "
-                          "come at the end of the section, so don't introduce the section "
-                          "again.", "coverage pass")
+            piece = write(missing, "These findings belong in this section but were not used "
+                          "yet. Write one or two paragraphs that add them. They come at the "
+                          "end of the section, so don't introduce the section again.",
+                          "coverage pass")
             if piece:
                 pieces.append(piece)
         missing = [f["id"] for f in mine if f["id"] not in used and f["id"] not in skipped]
@@ -460,155 +256,192 @@ Output a numbered outline with section titles and one-line argument summaries.""
         content = _ids_to_citations("\n\n".join(pieces), findings_by_id)
         content, recited = _recite_numbers(content, mine, findings, by_idx)
         if recited:
-            coverage_log.append(f"## {title} -- re-cited\n\n" + "\n".join(f"- {r}" for r in recited))
-        content = _drop_repeated_sentences(content, "\n\n".join(c for _, c in sections))
+            coverage_log.append(f"## {title} (re-cited)\n\n" + "\n".join(f"- {r}" for r in recited))
+        content = _drop_repeated_sentences(content, written_so_far)
         print(f"      used {len(used)} of {len(mine)} findings"
               + (f", {len(skipped)} skipped with a reason" if skipped else "")
               + (f", {len(missing)} not used" if missing else "")
               + (f", {len(recited)} re-cited" if recited else "")
-              + f" -- {_words(content)} words")
+              + f": {_words(content)} words")
         coverage_log.append(
             f"## {title}\n\nUsed {len(used)} of {len(mine)} findings.\n"
             + "".join(f"- SKIPPED {{{i}}}: {why}\n" for i, why in skipped.items())
             + "".join(f"- NOT USED {{{i}}}\n" for i in missing))
-        sections.append((title, content or "*[Failed]*"))
+        return content
+
+    # ════════════════════════════════════════════════════════════════
+    # 3. FINDINGS BY THEME (most of the brief)
+    # ════════════════════════════════════════════════════════════════
+    print(f"\n{'─'*50}\n3. FINDINGS BY THEME\n{'─'*50}")
+
+    def theme_pass(p, n):
+        """The instruction for pass p of n of a theme section."""
+        text = (f"This is part {p} of {n} of the section; the other parts use other "
+                f"findings. " if n > 1 else "")
+        text += ("Open with one or two sentences on what the evidence on this question "
+                 "shows overall. " if p == 1 else
+                 "Continue the analysis with these findings. Don't introduce the section "
+                 "again. ")
+        if p == n:
+            text += "End with what stays uncertain on this question, if the findings show it."
+        return text
+
+    theme_sections = []
+    for title, sub_question in themes:
+        mine = assignment.get(title, [])
+        print(f"    {title}  ({len(mine)} findings)")
+        written = "\n\n".join(c for _, c in theme_sections)
+        content = write_section(title, f"answer the question: {sub_question}", mine,
+                                theme_pass, written)
+        theme_sections.append((title, content or "*[Failed]*"))
+
+    # ════════════════════════════════════════════════════════════════
+    # 4. WHERE THE EVIDENCE DISAGREES
+    # ════════════════════════════════════════════════════════════════
+    # Pairs of findings on the same subject that contradict each other,
+    # found by the local judge (claims.find_disagreements). An essay hides
+    # these in a counterarguments section; a brief shows them.
+    print(f"\n{'─'*50}\n4. WHERE THE EVIDENCE DISAGREES\n{'─'*50}")
+    in_brief = [f for t in titles for f in assignment.get(t, [])]
+    pairs = claims.find_disagreements(in_brief)
+    print(f"   {len(pairs)} pairs of findings that contradict each other")
+    disagreements = ""
+    if pairs:
+        pair_findings = list({f["id"]: f for a, b in pairs for f in (a, b)}.values())
+        pair_list = "\n".join(f"- {{{a['id']}}} versus {{{b['id']}}}" for a, b in pairs)
+        disagreements = write_section(
+            "Where the evidence disagrees",
+            "show where findings contradict each other and explain each disagreement. "
+            "These are the pairs that disagree:\n" + pair_list,
+            pair_findings,
+            lambda p, n: ("For each pair, say what each side found, who measured it, how "
+                          "and on whom. Explain a difference only from what the findings say "
+                          "(different measures, samples, vendors versus independent "
+                          "researchers); if they don't say why, say the reason is not known."),
+            "\n\n".join(c for _, c in theme_sections))
+
+    # ════════════════════════════════════════════════════════════════
+    # 5. GAPS IN THE EVIDENCE
+    # ════════════════════════════════════════════════════════════════
+    # Written from explore's red-team critique and bias audit plus the
+    # corpus profile counted in code (languages, source types).
+    print(f"\n{'─'*50}\n5. GAPS IN THE EVIDENCE\n{'─'*50}")
+    critique = _scratch_file(args.corpus, "06_red_team") + "\n\n" + _scratch_file(args.corpus, "065_bias")
+    gaps = call_ai(
+        f"RESEARCH QUESTION: {question}\n\n"
+        f"CORPUS PROFILE (counted in code):\n{profile}\n\n"
+        f"CRITIQUE OF THE CORPUS (from this study's red team and bias audit):\n"
+        f"{critique[:FINDINGS_FILE_CHARS]}\n\n"
+        "Write the section 'Gaps in the evidence' of a research brief: what this body of "
+        "evidence cannot tell the reader, and why (missing populations, regions, methods, "
+        "time periods, source types; over-reliance on vendors or on one language). Use only "
+        "the profile and critique above, and take every number from them. 2-4 paragraphs, "
+        "plain words, no dashes as punctuation, no headings, no citations.",
+        api_key, model, temp=0.3) or ""
+    gaps = _strip_file_refs(gaps.strip())
+    print(f"   {_words(gaps)} words")
 
     pad("synthesis_03a_passes_unfiltered", "\n\n---\n\n".join(unfiltered))
     pad("synthesis_03b_coverage", "# Findings used per section\n\n" + "\n".join(coverage_log))
-    pad("synthesis_03_brief_raw",
-        "\n\n---\n\n".join(f"## {t}\n\n{c}" for t, c in sections))
 
     # ════════════════════════════════════════════════════════════════
-    # 1.b.iv: APA REFERENCES + VOICE CLEANING
+    # 6. REFERENCES AND PLAIN WORDS
     # ════════════════════════════════════════════════════════════════
-    # Two final cleanup steps:
-    #   1. Format all sources as APA 7th edition references
-    #   2. Strip LLM-speak from the written sections
-
-    print(f"\n{'─'*50}\nAPA + VOICE CLEAN\n{'─'*50}")
-
-    # ── APA references ──────────────────────────────────────────────
-    # Build a properly formatted reference list from our source metadata
+    print(f"\n{'─'*50}\n6. REFERENCES AND PLAIN WORDS\n{'─'*50}")
     apa_text = _build_apa(args.corpus)
     pad("synthesis_04_apa", f"# References (APA 7th)\n\n{apa_text}")
-
-    # ── Voice cleaning ──────────────────────────────────────────────
-    # Scan each section for banned phrases (LLM-speak, buzzwords,
-    # metaphors, hollow transitions) and remove them.
-    #
-    # Deleting a phrase from the middle of a sentence leaves broken grammar
-    # ("Furthermore, a paradigm shift looms." -> ", a looms."), so:
-    #   1. Sentence-opening transitions ("Moreover,") are removed in code --
-    #      the sentence still reads fine without them.
-    #   2. Each sentence containing any other banned phrase is rewritten by
-    #      the AI, and the rewrite is applied only if it kept every number
-    #      and [n] tag and dropped the phrase. Otherwise the sentence stays
-    #      as written: a buzzword is better than a broken sentence.
-
-    cleaned = []  # Will hold the cleaned (title, content) pairs
-
-    for title, content in sections:
-        c, n_trans = _drop_transitions(content)
-        bad = _sentences_with_banned(c)
-        n_fixed = 0
-        if bad:
-            reply = call_ai(
-                "Rewrite each sentence below without the phrase(s) in brackets. "
-                "Keep its meaning, every fact, number and [n] tag. For EACH one, "
-                "output exactly two lines:\nORIGINAL: <the sentence, copied exactly>\n"
-                "FIX: <the rewritten sentence>\n\n"
-                + "\n".join(f"{sent}   [{', '.join(ph)}]" for sent, ph in bad),
-                api_key, model, temp=0.3, max_tokens=4000,
-            )
-            wanted = {sent: ph for sent, ph in bad}
-            for original, fix in re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or ""):
-                original, fix = original.strip().strip('"'), fix.strip().strip('"')
-                if original in wanted and _keeps_facts(original, fix, wanted[original]):
-                    c = c.replace(original, fix)
-                    n_fixed += 1
-        if n_trans or bad:
-            print(f"   {title}: {n_trans} transitions removed, "
-                  f"{n_fixed} of {len(bad)} sentences with buzzwords rewritten")
-        cleaned.append((title, c))
+    body = theme_sections + [("Where the evidence disagrees", disagreements),
+                             ("Gaps in the evidence", gaps)]
+    body = [(t, _plain_words(c, t, api_key, model)) for t, c in body if c]
+    body = [(t, _strip_file_refs(c)) for t, c in body]
+    pad("synthesis_03_brief_raw", "\n\n---\n\n".join(f"## {t}\n\n{c}" for t, c in body))
 
     # ════════════════════════════════════════════════════════════════
-    # 1.b.v: FACT CHECK (every claim against the sources it cites)
+    # 7. FACT-CHECK GATE (verify.py) on everything written so far
     # ════════════════════════════════════════════════════════════════
-    # The last step before saving, so nothing rewrites the text after it.
-    # For each section, one AI call compares every factual sentence with
-    # the full text of the sources it cites and lists the ones that aren't
-    # supported (or cite nothing); a second call fixes only those sentences
-    # -- correct, re-cite or delete, never add. The log is saved so a human
-    # can review exactly what was changed.
+    # The gate checks numbers against the study's own results too, so it
+    # gets the corpus profile and the critique the gaps section used.
+    print(f"\n{'─'*50}\n7. FACT-CHECK GATE (verify.py)\n{'─'*50}")
+    gate_facts = study_results + "\n\n" + profile + "\n\n" + critique[:FINDINGS_FILE_CHARS]
+    checked, gate_log, verdict = verify.gate(body, by_idx, gate_facts, api_key)
+    body = _drop_repeats_between(checked)
+    checked_text = dict(body)
 
-    # Remove file names the writer may still cite as if they were sources
-    # ("[analysis_results.json]", "(stats_report.md)") -- [n] is for sources
-    cleaned = [(t, _strip_file_refs(c)) for t, c in cleaned]
+    # ════════════════════════════════════════════════════════════════
+    # 8. BOTTOM LINE, KEY FINDINGS, IMPLICATIONS (from the checked text)
+    # ════════════════════════════════════════════════════════════════
+    # Written last, from sections the gate already checked, so the summary
+    # can only repeat what passed. The gate then checks these too.
+    print(f"\n{'─'*50}\n8. BOTTOM LINE, KEY FINDINGS, IMPLICATIONS\n{'─'*50}")
+    bottom_line, key_findings = _summarize(question, themes, checked_text, api_key, model)
+    implications = _implications(question, bottom_line, key_findings, api_key, model)
+    summary = [("Bottom line", bottom_line),
+               ("Key findings", "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1))),
+               (f"Implications for {AUDIENCE}", implications)]
+    summary_checked, summary_log, summary_verdict = verify.gate(
+        [(t, c) for t, c in summary if c], by_idx, gate_facts, api_key, run_audit=False)
+    verdict = verify.merge_verdicts(verdict, summary_verdict)
+    gate_log += summary_log
+    summary_text = dict(summary_checked)
 
-    print(f"\n{'─'*50}\nFACT-CHECK GATE (verify.py)\n{'─'*50}")
-    checked, gate_log, verdict = verify.gate(cleaned, by_idx, study_results, api_key)
-    # Corrections can make two rewordings of one claim identical -- keep the first
-    cleaned, so_far = [], ""
-    for title, c in checked:
-        c = _drop_repeated_sentences(c, so_far)
-        cleaned.append((title, c))
-        so_far += "\n\n" + c
     pad("synthesis_05_fact_check",
         f"# Fact-check gate: {verify.verdict_line(verdict)}\n\n"
-        "Each line is a sentence the gate reviewed -- flagged by the rules in code or the\n"
-        "local judge, or cited no source -- and what happened to it. The independent\n"
+        "Each line is a sentence the gate reviewed (flagged by the rules in code or the\n"
+        "local judge, or citing no source) and what happened to it. The independent\n"
         "audit at the end re-checked a random sample against the sources' full text.\n\n"
         + "\n\n".join(gate_log))
     with open(os.path.join(args.corpus, "brief_verdict.json"), "w", encoding="utf-8") as f:
         json.dump(verdict, f, indent=2)
 
     # ════════════════════════════════════════════════════════════════
-    # ASSEMBLE THE FINAL REPORT
+    # 9. ASSEMBLE THE BRIEF
     # ════════════════════════════════════════════════════════════════
-    # Combine all cleaned sections, metadata, and references into
-    # one Markdown file.
-
-    lines = []  # Will hold all lines of the final report
-
-    # Header
-    lines.append("# Research Brief\n")
-    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("**Pipeline:** explore → analyze → stats → synthesize")
-    lines.append(f"**Thesis:** #{thesis_num} (evidence-derived)")
-
-    # ── Coverage: how much of the corpus does the brief actually use? ─
-    # Citation brackets listing more than 5 sources are "dumps", not
-    # evidence for a claim -- they're counted separately, not as coverage
-    groups = [re.split(r"\s*,\s*", g) for _, c in cleaned
-              for g in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", c)]
-    dumps = sum(len(g) > 5 for g in groups)
-    cited = sorted({int(n) for g in groups if len(g) <= 5 for n in g if int(n) in by_idx})
+    all_text = "\n\n".join(list(checked_text.values()) + list(summary_text.values()))
+    cited = sorted({n for n in verify.citations(all_text) if n in by_idx})
     cited_langs = sorted({by_idx[i].get("lang", "?") for i in cited})
     coverage = (f"cites {len(cited)} of {len(usable) or len(corpus)} usable sources, "
-                f"in {len(cited_langs)} languages ({', '.join(cited_langs)})"
-                + (f"; {dumps} citation(s) listing 6+ sources not counted" if dumps else ""))
-    lines.append(f"**Evidence coverage:** {coverage}")
-    words = sum(len(re.findall(r"\w+", c)) for _, c in cleaned)
-    lines.append(f"**Length:** {words} words")
-    lines.append(f"**Fact-check gate:** {verify.verdict_line(verdict)} "
-                 f"(see scratchpad/synthesis_05_fact_check.md)\n")
-    lines.append("---\n")
+                f"in {len(cited_langs)} languages ({', '.join(cited_langs)})")
+    method = _method_section(topic, corpus, usable, by_idx, stats, findings, n_assigned,
+                             verdict, model, args.corpus)
+    words = _words(all_text) + _words(method)
 
-    # Sections
-    for t, c in cleaned:
-        lines.append(f"## {t}\n\n{c}\n\n---\n")
+    lines = [f"# Research Brief: {question}\n",
+             f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
+             f"**Evidence:** {coverage}  ",
+             f"**Length:** {words} words  ",
+             f"**Fact-check gate:** {verify.verdict_line(verdict)} "
+             f"(details: scratchpad/synthesis_05_fact_check.md)\n",
+             "---\n",
+             f"## Bottom line\n\n{summary_text.get('Bottom line', '*[Not written]*')}\n"]
 
-    # References
+    # Key findings, each followed by the evidence of its theme, counted in code
+    key_text = summary_text.get("Key findings", "")
+    lines.append("## Key findings\n")
+    for n, (title, _) in enumerate(themes, 1):
+        m = re.search(rf"^{n}\.\s*(.+)$", key_text, re.M)
+        if m:
+            lines.append(f"{n}. {m.group(1).strip()}  \n   *{title}. "
+                         f"{_evidence_line(checked_text.get(title, ''), by_idx)}*")
+    lines.append("")
+
+    lines.append("## Findings by theme\n")
+    for n, (title, sub_question) in enumerate(themes, 1):
+        if title in checked_text:
+            lines.append(f"### {n}. {title}\n\n*{sub_question} "
+                         f"{_evidence_line(checked_text[title], by_idx)}*\n\n{checked_text[title]}\n")
+    for title in ("Where the evidence disagrees", "Gaps in the evidence"):
+        if checked_text.get(title):
+            lines.append(f"## {title}\n\n{checked_text[title]}\n")
+    impl_title = f"Implications for {AUDIENCE}"
+    if summary_text.get(impl_title):
+        lines.append(f"## {impl_title}\n\n{summary_text[impl_title]}\n")
+    lines.append(f"## Method\n\n{method}\n")
     lines.append(f"## References\n\n{apa_text}")
 
-    # Save to file
-    # args.output is the user-specified filename, or None for auto-generated
     fn = args.output or f"brief_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-
     with open(fn, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))  # Join all lines with newlines
+        f.write("\n".join(lines))
 
-    # ── Done! ───────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print("SYNTHESIS COMPLETE")
     print(f"   {fn}")
@@ -617,8 +450,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
     print(f"   Fact-check gate: {verify.verdict_line(verdict)}")
     if verdict["status"] != "PASS":
         print("   Read scratchpad/synthesis_05_fact_check.md before using this brief.")
-    print("   Thesis was derived from evidence, not assumed.")
-    print("   Run 'deepen' to find targeted support for weak areas.")
+    print("   Run 'deepen' to look for evidence on the gaps.")
     print(f"{'='*60}")
 
 
@@ -717,6 +549,241 @@ def _study_results(corpus_dir):
         if p.exists():
             parts.append(f"── {label} ──\n{p.read_text(encoding='utf-8')[:FINDINGS_FILE_CHARS]}")
     return "\n\n".join(parts)
+
+
+def _frame_brief(topic, context, evidence, api_key, model):
+    """
+    Ask the AI for the research question and 5-7 themes (sub-questions the
+    evidence can answer). Returns (question, [(title, sub-question)], the
+    AI's answer). If the answer can't be read, the themes come from
+    analyze's topic model, or a fixed list as a last resort.
+    """
+    reply = call_ai(
+        f"You are preparing a research brief on this topic: {topic}\n\n"
+        "Below is everything the study found: its own analysis and statistics, then one "
+        "evidence card per source.\n\n"
+        "1. Write the research question the brief answers, in one sentence.\n"
+        "2. Group the evidence into 5-7 THEMES that together answer it. A theme is a "
+        "sub-question the evidence can answer (\"Do AI coding assistants make developers "
+        "faster?\"), not a position. Cover what the evidence is about, including costs and "
+        "risks, not only benefits. No theme about the study's own method.\n\n"
+        "Answer in exactly this format and nothing else:\n"
+        "QUESTION: <the research question>\n"
+        "THEME 1: <short title, 2-6 words> | <the sub-question it answers>\n"
+        "THEME 2: ...\n\n"
+        f"EVIDENCE:\n{(context + chr(10) * 2 + evidence)[:FRAMING_CONTEXT_CHARS]}",
+        api_key, model, temp=0.3) or ""
+    m = re.search(r"^\W*QUESTION\W*:?\s*(.+)$", reply, re.M | re.I)
+    question = m.group(1).strip() if m else topic
+    themes = []
+    for m in re.finditer(r"^\W*THEME\s*\d+\W*:?\s*(.+?)\s*\|\s*(.+)$", reply, re.M | re.I):
+        title = re.sub(r"[*_#]", "", m.group(1)).strip()
+        if title and title not in [t for t, _ in themes]:
+            themes.append((title, m.group(2).strip()))
+    if len(themes) < 3:
+        print("   Could not read the themes from the AI's answer; using fallback themes")
+        themes = _fallback_themes()
+    return question, themes[:7], reply
+
+
+def _fallback_themes():
+    """Themes from analyze's topic model, or a fixed list if there's none."""
+    p = Path("scratchpad") / "analysis_results.json"
+    try:
+        names = list(json.loads(p.read_text(encoding="utf-8")).get("themes", {}))[:6]
+    except (OSError, ValueError):
+        names = []
+    if len(names) < 3:
+        names = ["Productivity and speed", "Code quality and security", "Developers and skills",
+                 "Adoption and business models", "Governance and regulation"]
+    return [(n, f"What does the evidence say about {n.lower()}?") for n in names]
+
+
+def _writer_rules():
+    """The system prompt every writing call gets."""
+    return (
+        "You write the findings of a research brief from a ledger of checked findings. RULES:\n"
+        "- Every sentence that states a fact carries the ID of the finding it comes from,\n"
+        "  in braces: {C12}. One ID per brace: {C3}{C9} for two. Use ONLY the findings\n"
+        "  given, never facts from memory.\n"
+        "- One finding per sentence, or say clearly which source says what ('GitHub\n"
+        "  reports X {C3}, while a Veracode study found Y {C9}').\n"
+        "- Say 'studies' or 'several sources' only for a finding with 2+ sources.\n"
+        "- Keep each finding's numbers, hedges (up to, often, may) and scope (which study,\n"
+        "  sample, company, country, year) exactly. Never widen one study's sample into\n"
+        "  'developers' or 'companies' in general.\n"
+        "- Attribute vendors' claims about their own products ('GitHub reports ...').\n"
+        "- This study's own results carry no ID: write 'our analysis of the corpus\n"
+        "  found ...'. Never mention file names.\n"
+        "- Analyze, don't argue for a position. For each point say what was measured, by\n"
+        "  whom, on whom, and how strong the evidence is (one vendor blog, or several\n"
+        "  independent studies). Say where sources agree, where they conflict, and what\n"
+        "  the evidence cannot show.\n"
+        "- Your own interpretation carries no ID and is marked as interpretation\n"
+        "  ('Taken together, these findings suggest ...').\n"
+        "- Length follows the ideas: explain a hard finding in full, state a simple one in\n"
+        "  a sentence. No padding, and never make the same point twice.\n"
+        "- Mention a finding's source language when it matters: the corpus covers 9\n"
+        "  languages on purpose.\n"
+        "- Plain words. No dashes as punctuation (use commas, colons or full stops).\n"
+        "- NEVER use: " + ", ".join(f'"{p}"' for p in BANNED_PHRASES[:10])
+    )
+
+
+def _scratch_file(corpus_dir, name):
+    """The text of scratchpad/<name>.md, or "" if it doesn't exist."""
+    p = Path(corpus_dir) / f"{name}.md"
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def _plain_words(text, title, api_key, model):
+    """
+    Remove banned phrases (LLM-speak, buzzwords) from one section.
+    Deleting a phrase from the middle of a sentence breaks it ("Furthermore,
+    a paradigm shift looms." became ", a looms."), so:
+      1. Sentence-opening transitions ("Moreover,") are removed in code.
+      2. A sentence with any other banned phrase is rewritten by the AI. The
+         rewrite is used only if it kept every number and [n] tag and dropped
+         the phrase; otherwise the sentence stays as it was.
+    """
+    text, n_trans = _drop_transitions(text)
+    bad = _sentences_with_banned(text)
+    n_fixed = 0
+    if bad:
+        reply = call_ai(
+            "Rewrite each sentence below without the phrase(s) in brackets. "
+            "Keep its meaning, every fact, number and [n] tag. For EACH one, "
+            "output exactly two lines:\nORIGINAL: <the sentence, copied exactly>\n"
+            "FIX: <the rewritten sentence>\n\n"
+            + "\n".join(f"{sent}   [{', '.join(ph)}]" for sent, ph in bad),
+            api_key, model, temp=0.3, max_tokens=4000)
+        wanted = {sent: ph for sent, ph in bad}
+        for original, fix in re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or ""):
+            original, fix = original.strip().strip('"'), fix.strip().strip('"')
+            if original in wanted and _keeps_facts(original, fix, wanted[original]):
+                text = text.replace(original, fix)
+                n_fixed += 1
+    if n_trans or bad:
+        print(f"   {title}: {n_trans} transitions removed, "
+              f"{n_fixed} of {len(bad)} sentences with buzzwords rewritten")
+    return text
+
+
+def _drop_repeats_between(sections):
+    """Drop sentences a later section repeats from an earlier one (the first stays)."""
+    out, so_far = [], ""
+    for title, text in sections:
+        text = _drop_repeated_sentences(text, so_far)
+        out.append((title, text))
+        so_far += "\n\n" + text
+    return out
+
+
+def _summarize(question, themes, checked_text, api_key, model):
+    """
+    Write the bottom line and one key finding per theme from the sections the
+    gate already checked. Returns (bottom line, [key finding per theme], with
+    "" where the AI gave none).
+    """
+    sections = "\n\n".join(f"THEME {n}: {t}\n{checked_text.get(t, '')}"
+                           for n, (t, _) in enumerate(themes, 1) if checked_text.get(t))
+    extra = "\n\n".join(f"{t.upper()}:\n{checked_text[t]}"
+                        for t in ("Where the evidence disagrees", "Gaps in the evidence")
+                        if checked_text.get(t))
+    reply = call_ai(
+        f"RESEARCH QUESTION: {question}\n\n"
+        "Below are the checked sections of a research brief. Using ONLY what they say:\n"
+        "BOTTOM LINE: 3-5 sentences that answer the research question: what the evidence "
+        "shows, how strong it is, and the main tension or uncertainty.\n"
+        "K1: the key finding of theme 1 in 1-2 sentences. Keep the [n] citations of the "
+        "sentences it comes from, at most 3 per sentence.\n"
+        "K2: ... (one line per theme, in order)\n"
+        "Plain words, no dashes as punctuation. No new facts, numbers or sources.\n\n"
+        f"{sections}\n\n{extra}",
+        api_key, model, temp=0.2) or ""
+    m = re.search(r"BOTTOM LINE\W*:?\s*(.+?)(?=^\W*K1\W*:|\Z)", reply, re.S | re.M | re.I)
+    bottom_line = m.group(1).strip() if m else ""
+    keys = dict(re.findall(r"^\W*K(\d+)\W*:?\s*(.+)$", reply, re.M | re.I))
+    return bottom_line, [keys.get(str(n), "").strip() for n in range(1, len(themes) + 1)]
+
+
+def _implications(question, bottom_line, key_findings, api_key, model):
+    """Implications for AUDIENCE, reasoned from the bottom line and key findings only."""
+    keys = "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1) if k)
+    if not keys:
+        return ""
+    return call_ai(
+        f"RESEARCH QUESTION: {question}\n\nBOTTOM LINE:\n{bottom_line}\n\nKEY FINDINGS:\n{keys}\n\n"
+        f"Write the section 'Implications for {AUDIENCE}' of a research brief: 4-6 short "
+        "paragraphs. Start each with one sentence in bold (the implication), then 2-3 "
+        "sentences of reasoning from the findings. No new facts: a fact you use must come "
+        "from the key findings, with its [n]. No advice the findings don't support. Plain "
+        "words, no dashes as punctuation, no headings.",
+        api_key, model, temp=0.3) or ""
+
+
+def _corpus_profile(corpus, usable, by_idx):
+    """The corpus counted in code: sources, languages and source types."""
+    from collections import Counter
+    langs = Counter(s.get("lang", "?") for s in corpus)
+    kinds = Counter(_kind(s) for s in corpus)
+    vendor = sum(n for k, n in kinds.items() if "vendor" in k.lower())
+    return (f"Sources: {len(corpus)} found, {len(usable) or len(corpus)} with usable content.\n"
+            f"Languages: {', '.join(f'{k} {n}' for k, n in langs.most_common())}.\n"
+            f"Source types: {', '.join(f'{k} {n}' for k, n in kinds.most_common())}.\n"
+            f"Vendor sources: {vendor} of {len(corpus)} ({100 * vendor // max(1, len(corpus))}%).")
+
+
+def _kind(source):
+    """A source's type for the reader: "academic", "vendor/primary", ... or "other"."""
+    kind = source.get("quality") or "other"
+    return "other" if kind in ("unclassified", "?") else kind
+
+
+def _evidence_line(text, by_idx):
+    """'Evidence: 24 sources (9 news, 6 academic, ...), in 7 languages.' for a section."""
+    from collections import Counter
+    cited = {n for n in verify.citations(text) if n in by_idx}
+    if not cited:
+        return "Evidence: no sources cited."
+    kinds = Counter(_kind(by_idx[n]) for n in cited)
+    langs = {by_idx[n].get("lang", "?") for n in cited}
+    return (f"Evidence: {len(cited)} sources ({', '.join(f'{n} {k}' for k, n in kinds.most_common(4))}"
+            f"{', ...' if len(kinds) > 4 else ''}), in {len(langs)} language"
+            f"{'s' if len(langs) != 1 else ''}.")
+
+
+def _method_section(topic, corpus, usable, by_idx, stats, findings, n_assigned, verdict,
+                    model, corpus_dir):
+    """How the brief was made. Written in code from the run's own counts, not by the AI."""
+    from collections import Counter
+    langs = Counter(s.get("lang", "?") for s in corpus)
+    kinds = Counter(_kind(s) for s in corpus)
+    n_claims = stats["ok"] + stats["corrected"] + stats["dropped"]
+    tests = [line.replace("In words:", "").strip()
+             for line in _scratch_file(corpus_dir, "stats_report").splitlines()
+             if line.startswith("In words:")]
+    return "\n\n".join([
+        f"This brief was made on {datetime.now():%Y-%m-%d} by the Deep Research Toolkit, "
+        f"with no person editing the text. Topic: {topic}.",
+        f"**Sources.** {len(corpus)} sources were found by web, academic and forum search in "
+        f"{len(langs)} languages ({', '.join(f'{k} {n}' for k, n in langs.most_common())}); "
+        f"{len(usable) or len(corpus)} had usable content. Source types: "
+        f"{', '.join(f'{k} {n}' for k, n in kinds.most_common())}.",
+        f"**Claims.** The AI listed each usable source's factual claims with a quote from the "
+        f"source: {n_claims} claims. Code checked that every quote is in its source, and a "
+        f"local model checked that each quote supports its claim: {stats['ok']} were "
+        f"confirmed, {stats['corrected']} corrected to match their quote, and "
+        f"{stats['dropped']} dropped. Reports of the same finding were merged into "
+        f"{len(findings)} findings, {sum(len(f['sources']) > 1 for f in findings)} of them "
+        f"backed by two or more sources. The brief uses the {n_assigned} findings most "
+        f"related to its themes.",
+        f"**Writing and checking.** {model} wrote the brief from those findings only. Every "
+        f"sentence then went through a fact-check gate: rules in code (each number must appear "
+        f"in the cited sources, at most 3 sources per claim, no repeats), a local model that "
+        f"judges meaning, and a review by {verify.CHECK_MODEL}. Result: "
+        f"{verify.verdict_line(verdict)}.",
+    ] + (["**Statistical tests on the corpus.** " + " ".join(tests)] if tests else []))
 
 
 def _claim_groups(findings, size):

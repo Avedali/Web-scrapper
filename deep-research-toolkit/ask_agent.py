@@ -15,7 +15,7 @@ TWO MODES:
     → one answer, then done
 
   Interactive mode (type multiple questions in a row):
-    > what's our thesis?
+    > what's our main finding?
     > summarize the bias check findings
     > give me 3 bullet points for slide 2
     > explain the chi-squared result
@@ -153,7 +153,7 @@ def run_ask(args):
         # ── Interactive mode (with memory) ──────────────────────────
         # No question was given upfront → start a conversation loop.
         # The user can ask multiple questions in a row:
-        #   > what's our thesis?
+        #   > what's our main finding?
         #   > elaborate on that
         #   > give me bullet points for the workforce slide
         #   > quit
@@ -285,7 +285,7 @@ def _load_context(corpus_dir):
     core findings.
 
     Priority order:
-      1. Synthesis (the thesis and written sections -- the core findings)
+      1. Synthesis (the research question, themes and written sections)
       2. Analysis report (sentiment, topics, NER results)
       3. Stats report (statistical test results)
       4. Simulation report
@@ -313,7 +313,7 @@ def _load_context(corpus_dir):
 
     # ── Load priority files first ───────────────────────────────────
     priority = [
-        "synthesis_01_theses",     # The proposed theses
+        "synthesis_01_framing",    # The research question and themes
         "synthesis_03_brief_raw",  # Raw brief sections
         "analyze_report",          # NLP analysis summary
         "stats_report",            # Statistical test results

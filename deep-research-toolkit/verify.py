@@ -619,18 +619,21 @@ def verdict_line(v):
     audit_text = (f"independent audit of {n} sentences: {a['SUPPORTED']} supported, "
                   f"{a['PARTLY']} partly, {a['UNSUPPORTED']} unsupported") if n else "no audit"
     of = f" of {v['statements']} statements" if v.get("statements") else ""
-    return (f"{v['status']} -- {audit_text}; the gate reviewed {v['reviewed']} sentences and "
-            f"deleted {v['deleted']}{of}" + (f". Why: {'; '.join(v['reasons'])}" if v["reasons"] else ""))
+    return (f"{v['status']}. {audit_text[:1].upper() + audit_text[1:]}; the gate reviewed "
+            f"{v['reviewed']} sentences and deleted {v['deleted']}{of}."
+            + (f" Why: {'; '.join(v['reasons'])}." if v["reasons"] else ""))
 
 
 # ════════════════════════════════════════════════════════════════════════
 # THE WHOLE GATE, AND "python agent.py verify"
 # ════════════════════════════════════════════════════════════════════════
 
-def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL):
+def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL, run_audit=True):
     """
     Run the gate over a brief's [(title, text)] sections. Returns
-    (checked sections, log lines, verdict dict).
+    (checked sections, log lines, verdict dict). run_audit=False skips the
+    independent audit (for parts checked after the main audit, which
+    merge_verdicts then adds to the main verdict).
     """
     checked, log, not_checked, n_reviewed, n_deleted = [], [], [], 0, 0
     n_statements = sum(len(statements(text)) for _, text in sections)
@@ -650,13 +653,32 @@ def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL):
               f"{len(outcomes) - fixed - deleted} kept")
         log.append(f"## {title}\n\n" + ("\n".join(f"- {o}" for o in outcomes) or "- Nothing flagged"))
         checked.append((title, new))
-    whole = "\n\n".join(t for _, t in checked)
-    print(f"   Independent audit of {AUDIT_SAMPLE} sentences against their full sources...")
-    results = audit(whole, by_idx, api_key, model)
+    results = []
+    if run_audit:
+        whole = "\n\n".join(t for _, t in checked)
+        print(f"   Independent audit of {AUDIT_SAMPLE} sentences against their full sources...")
+        results = audit(whole, by_idx, api_key, model)
+        log.append("## Independent audit\n\n" + "\n".join(
+            f"- {verdict_}: {sentence}\n  → {reason}" for sentence, verdict_, reason in results))
     v = make_verdict(results, n_reviewed, n_deleted, not_checked, n_statements)
-    log.append("## Independent audit\n\n" + "\n".join(
-        f"- {verdict_}: {sentence}\n  → {reason}" for sentence, verdict_, reason in results))
+    v["not_checked"] = not_checked
     return checked, log, v
+
+
+def merge_verdicts(main, extra):
+    """
+    One verdict for a brief checked in two parts: the main part (with the
+    audit) and parts written afterwards (no audit). Counts are added, and
+    PASS / NEEDS REVIEW is decided again on the totals.
+    """
+    graded = main["audit"]
+    fake_audit = [("", k, "") for k in ("SUPPORTED", "PARTLY", "UNSUPPORTED") for _ in range(graded[k])]
+    v = make_verdict(fake_audit, main["reviewed"] + extra["reviewed"],
+                     main["deleted"] + extra["deleted"],
+                     main.get("not_checked", []) + extra.get("not_checked", []),
+                     main.get("statements", 0) + extra.get("statements", 0))
+    v["not_checked"] = main.get("not_checked", []) + extra.get("not_checked", [])
+    return v
 
 
 def split_brief(brief):

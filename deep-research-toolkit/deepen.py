@@ -1,6 +1,6 @@
 """
-deepen.py -- Mode 1.c: Targeted research to support the thesis.
-================================================================
+deepen.py: Mode 1.c, targeted research to fill the brief's gaps.
+=================================================================
 Run: python agent.py deepen --key KEY
 Or:  launcher.py → option 5
 
@@ -12,7 +12,7 @@ Think of it like a professor reading your draft and saying:
 Go find a real study." Then you go find the study.
 
 The process:
-  1. Load the thesis, outline, and brief from the scratchpad
+  1. Load the research question, themes and brief from the scratchpad
   2. Ask the AI: "which sections have thin evidence?"
   3. The AI suggests specific search queries to fill each gap
   4. Run those searches and fetch new sources
@@ -31,6 +31,7 @@ Only run AFTER synthesize (it reads synthesize's output).
 
 import json  # Read/write structured data files
 import os    # File/folder operations
+import sys   # Stop with an error code when a step can't run
 
 
 # From our shared toolbox:
@@ -57,7 +58,7 @@ from core import (
 
 def run_deepen(args):
     """
-    Find evidence gaps in the current thesis/brief and fill them
+    Find evidence gaps in the current brief and fill them
     with targeted research.
     """
 
@@ -71,22 +72,18 @@ def run_deepen(args):
     init_search(args.serper, args.brave)  # Set up search engines
 
     print("=" * 60)
-    print("MODE 1.c: DEEPEN (targeted thesis support)")
+    print("MODE 1.c: DEEPEN (fill the brief's evidence gaps)")
     print("=" * 60)
 
     # ── Load what synthesize produced ───────────────────────────────
-    # We need three things from the scratchpad:
-    #   - The thesis (what we're arguing)
-    #   - The outline (what sections the paper has)
-    #   - The brief (the actual written sections, to check for weak spots)
+    # Two files from the scratchpad:
+    #   - the framing: the research question and the themes of the brief
+    #   - the brief's sections, including "Gaps in the evidence"
+    framing = _load_pad("synthesis_01_framing")
+    brief = _load_pad("synthesis_03_brief_raw")
 
-    thesis = _load_pad("synthesis_01_theses")   # The 3 proposed theses
-    outline = _load_pad("synthesis_02_outline")  # The paper outline
-    brief = _load_pad("synthesis_03_brief_raw")  # The raw written sections
-
-    if not thesis:
-        print("No thesis found. Run 'synthesize' first.")
-        return
+    if not framing:
+        sys.exit("No brief found. Run 'synthesize' first.")
 
     # ── Load the existing corpus ────────────────────────────────────
     # We need to know what sources we already have so we:
@@ -116,8 +113,8 @@ def run_deepen(args):
     # ════════════════════════════════════════════════════════════════
     # STEP 1: FIND THE EVIDENCE GAPS
     # ════════════════════════════════════════════════════════════════
-    # We show the AI the thesis, outline, and written brief, and ask:
-    # "Which sections have thin evidence? What's missing?"
+    # We show the AI the research question, the themes and the brief, and
+    # ask which themes have thin evidence and what is missing.
     #
     # The AI reads the brief and notices things like:
     #   - "Section 3 cites only one vendor study for a major claim"
@@ -130,16 +127,14 @@ def run_deepen(args):
     print(f"\n{'─'*50}\nFINDING EVIDENCE GAPS\n{'─'*50}")
 
     gaps = call_ai(
-        # We give the AI all three pieces IN FULL: thesis, outline, and brief.
-        # (They used to be cut to 1,500-3,000 characters -- for a 5,000-word
-        # brief that's roughly the introduction, so gaps in later sections
-        # could never be found.)
+        # The AI gets the framing and the whole brief. (They used to be cut to
+        # 1,500-3,000 characters, which is about the first section of a long
+        # brief, so gaps in later sections were never found.)
         f"You are reviewing a research brief for evidence gaps.\n\n"
-        f"THESIS:\n{thesis}\n\n"
-        f"OUTLINE:\n{outline}\n\n"
-        f"BRIEF:\n{brief}\n\n"
-        f"Which sections have THIN evidence? For each weak section:\n"
-        f"1. Name the section\n"
+        f"RESEARCH QUESTION AND THEMES:\n{framing}\n\n"
+        f"BRIEF (its section 'Gaps in the evidence' lists known gaps):\n{brief}\n\n"
+        f"Which themes have THIN evidence? For each weak theme:\n"
+        f"1. Name the theme\n"
         f"2. What specific claim needs better support\n"
         f"3. Suggest 2-3 targeted search queries that would find that evidence\n"
         f"   (at least one in a non-English language if the gap is geographic)\n\n"
@@ -287,7 +282,7 @@ def _load_pad(name):
 
     Returns the file contents as a string, or "" if the file doesn't exist.
     """
-    # Build the full path: e.g., "scratchpad/synthesis_01_theses.md"
+    # Build the full path: e.g., "scratchpad/synthesis_01_framing.md"
     p = os.path.join(SCRATCHPAD, f"{name}.md")
 
     if os.path.exists(p):

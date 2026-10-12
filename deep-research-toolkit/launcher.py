@@ -218,8 +218,8 @@ def main():
         print("    1 → Explore      Gather sources (no opinion yet)")
         print("    2 → Analyze      Run NLP on what we found")
         print("    3 → Stats        Run statistical tests")
-        print("    4 → Synthesize   Let data propose a thesis")
-        print("    5 → Deepen       Fill gaps in the thesis")
+        print("    4 → Synthesize   Write the research brief")
+        print("    5 → Deepen       Find evidence for the brief's gaps")
         print()
         print("  OUTPUT")
         print("    6 → Charts       Generate paper + slide charts")
@@ -295,9 +295,9 @@ def main():
                 # No external data -- just run stats on what analyze produced
                 run_mode("stats")
 
-        # --- Option 4: Synthesize (thesis from evidence) ---
+        # --- Option 4: Synthesize (the research brief) ---
         elif choice == "4":
-            print("\n  Reading ALL evidence and proposing a thesis.")
+            print("\n  Reading all the evidence and writing the research brief.")
             print("  Only do this AFTER running Explore + Analyze + Stats.\n")
             confirm = input("  Ready? (y/n) → ").strip().lower()
             if confirm == "y":
@@ -305,7 +305,7 @@ def main():
 
         # --- Option 5: Deepen (fill evidence gaps) ---
         elif choice == "5":
-            print("\n  Finding targeted evidence for weak parts of the thesis.\n")
+            print("\n  Searching for evidence on the gaps the brief lists.\n")
             run_mode("deepen")
 
         # --- Option 6: Charts (paper + slide versions) ---
