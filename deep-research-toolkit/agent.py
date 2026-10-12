@@ -16,6 +16,28 @@ Typical workflow:
     explore → analyze → stats → synthesize → deepen → analyze → viz → simulate
 """
 import argparse
+import faulthandler
+import os
+import subprocess
+import sys
+
+# If a C library crashes (no Python error, just "Segmentation fault" or
+# "double free"), print where every thread was -- so the log says what broke
+faulthandler.enable()
+
+
+def use_toolkit_venv():
+    """
+    If install.py had to put the packages in a private environment (.venv --
+    it does that for Homebrew's Python on a Mac), run this script with that
+    environment's Python instead, so every package is found.
+    """
+    venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
+    python = (os.path.join(venv, "Scripts", "python.exe") if os.name == "nt"
+              else os.path.join(venv, "bin", "python"))
+    if os.path.exists(python) and os.path.realpath(sys.prefix) != os.path.realpath(venv):
+        sys.exit(subprocess.call([python, os.path.abspath(__file__), *sys.argv[1:]]))
+
 
 def main():
     ap = argparse.ArgumentParser(description="Deep Research Toolkit")
@@ -52,4 +74,5 @@ def main():
     getattr(module, fn_name)(a)
 
 if __name__ == "__main__":
+    use_toolkit_venv()   # Packages may live in .venv (see install.py)
     main()

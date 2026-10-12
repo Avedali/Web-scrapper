@@ -22,6 +22,7 @@ The thesis comes from the data, not from the researcher's gut.
 # ════════════════════════════════════════════════════════════════════════
 
 import json  # Read/write structured data files
+import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
 import re    # Pattern matching (used to parse outlines and clean text)
 
@@ -93,8 +94,7 @@ def run_synthesize(args):
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("No API key found -- run install.py to add one (or pass --key KEY)")
-        return
+        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")
 
     model = args.model  # Which AI model to use
 
@@ -108,8 +108,7 @@ def run_synthesize(args):
     context = _load_all_evidence(args.corpus)
 
     if not context:
-        print("No evidence found. Run explore → analyze → stats first.")
-        return
+        sys.exit("No evidence found. Run explore → analyze → stats first.")
 
     # len(context) = number of characters (letters) in the text
     print(f"   Loaded {len(context)} chars of evidence from scratchpad/")

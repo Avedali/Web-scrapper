@@ -25,7 +25,24 @@ A multilingual, multi-phase Python research pipeline for the Sciences Po capston
 
 1. Download [Thonny](https://thonny.org) (comes with Python)
 2. Open `install.py` → click ▶ Run → wait → paste API key when asked
-3. Open `launcher.py` → click ▶ Run → type a number
+3. Open `launcher.py` → click ▶ Run → type a number, or **R** to run the
+   whole pipeline unattended (~2.5 hours; the log is saved in `scratchpad/`)
+
+### On a Mac
+
+- **Thonny is the easiest route.** From Terminal instead, use `python3`
+  (`python3 install.py`, then `python3 launcher.py`) -- Macs have no `python`.
+- A Mac's built-in `python3` is 3.9, which is too old. The installer
+  says so and points you to Thonny or python.org; use 3.10 or newer.
+- Homebrew's Python doesn't allow installing packages into it. The
+  installer then makes a private environment in `.venv`, and the launcher
+  uses it automatically -- nothing to do.
+- **Intel Macs:** PyTorch stopped supporting them after version 2.2.2, so
+  the installer picks matching older package versions. That needs Python
+  3.12 or older; on 3.13+ an Intel Mac gets the light install (no NLP models).
+  Apple Silicon (M1-M4) Macs use the current versions on any Python.
+- Long runs keep the Mac awake by themselves (`caffeinate`), but closing
+  the lid still puts it to sleep -- keep it open while explore/analyze run.
 
 ## Recommended Pipeline
 

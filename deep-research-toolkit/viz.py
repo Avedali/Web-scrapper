@@ -26,6 +26,7 @@ Uses plotly (interactive, polished) for all charts.
 # ════════════════════════════════════════════════════════════════════════
 
 import json  # For loading simulation results
+import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
 
 
@@ -45,8 +46,7 @@ def run_viz(args):
     try:
         import pandas as pd
     except ImportError:
-        print("pip install pandas")
-        return
+        sys.exit("pip install pandas")
 
     try:
         # plotly.express = simple, high-level chart functions (px.box, px.bar, etc.)
@@ -54,8 +54,7 @@ def run_viz(args):
         import plotly.express as px
         import plotly.graph_objects as go
     except ImportError:
-        print("pip install plotly")
-        return
+        sys.exit("pip install plotly")
 
     # ── Create output directories ───────────────────────────────────
     # Two separate folders: one for paper-format charts, one for slide-format
@@ -67,8 +66,7 @@ def run_viz(args):
     # ── Load the analyzed corpus ────────────────────────────────────
     csv_path = os.path.join(args.corpus, "corpus_analyzed.csv")
     if not os.path.exists(csv_path):
-        print("Run 'python agent.py analyze' first.")
-        return
+        sys.exit("Run 'python agent.py analyze' first.")
 
     df = pd.read_csv(csv_path)  # Load into a DataFrame
     charts = 0                  # Counter for how many charts we've made

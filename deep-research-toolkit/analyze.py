@@ -35,6 +35,7 @@ All results are saved to scratchpad/ for stats mode and viz mode.
 # ════════════════════════════════════════════════════════════════════════
 
 import json  # Read/write structured data
+import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
 import re    # Pattern matching (reading the AI's theme names)
 
@@ -52,6 +53,51 @@ from core import (
 # If analyze is too slow on your laptop, set e.g. 10000 -- but text past
 # the limit is then ignored, which may be where the findings are.)
 ANALYZE_CHARS = None
+
+# On an Apple Silicon Mac, let PyTorch run the few operations the Mac GPU
+# can't do on the CPU instead of failing (must be set before torch loads)
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+
+class _FallbackPipe:
+    """A model on the Mac GPU that switches to the CPU for good if the GPU fails."""
+
+    def __init__(self, pipe, make_cpu_pipe):
+        self.pipe, self.make_cpu_pipe, self.on_gpu = pipe, make_cpu_pipe, True
+
+    def __call__(self, *args, **kwargs):
+        try:
+            return self.pipe(*args, **kwargs)
+        except Exception as e:
+            if not self.on_gpu:
+                raise
+            print(f"      Mac GPU failed ({type(e).__name__}) -- switching to the CPU", flush=True)
+            self.pipe, self.on_gpu = self.make_cpu_pipe(), False
+            return self.pipe(*args, **kwargs)
+
+
+def _make_pipeline(task, test, **kwargs):
+    """
+    A Hugging Face pipeline on the fastest device that works. Apple Silicon
+    Macs have a GPU PyTorch can use ("mps"), several times faster than the
+    CPU for these models. It's tried on a sample first (`test(pipe)`), and if
+    it ever fails mid-run the pipeline moves to the CPU -- a GPU problem
+    must never quietly turn into wrong results. Other computers: as before.
+    """
+    from transformers import pipeline
+    import torch
+
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        try:
+            pipe = pipeline(task, device="mps", **kwargs)
+            test(pipe)
+            print("   (running on the Mac's GPU)")
+            return _FallbackPipe(pipe, lambda: pipeline(task, device="cpu", **kwargs))
+        except Exception as e:
+            print(f"   Mac GPU not usable here ({type(e).__name__}) -- using the CPU")
+            return pipeline(task, device="cpu", **kwargs)
+    return pipeline(task, **kwargs)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -147,15 +193,13 @@ def run_analyze(args):
     corpus_path = os.path.join(args.corpus, "corpus.json")
 
     if not os.path.exists(corpus_path):
-        print("No corpus. Run 'python agent.py explore' first.")
-        return
+        sys.exit("No corpus. Run 'python agent.py explore' first.")
 
     with open(corpus_path, encoding="utf-8") as f:
         corpus = json.load(f)  # Load JSON → Python list of dictionaries
 
     if not corpus:
-        print("Corpus is empty. Re-run 'python agent.py explore'.")
-        return
+        sys.exit("Corpus is empty. Re-run 'python agent.py explore'.")
 
     print("=" * 60)
     print(f"MODE 2a: ANALYZE ({len(corpus)} documents)")
@@ -168,8 +212,7 @@ def run_analyze(args):
     try:
         import pandas as pd
     except ImportError:
-        print("pip install pandas")
-        return
+        sys.exit("pip install pandas")
 
     # Convert our list of dictionaries into a DataFrame (a data table).
     # Each dictionary becomes one row. The keys become column names.
@@ -227,10 +270,9 @@ def run_analyze(args):
     print(f"\n{'─'*40}\nSENTIMENT (Hugging Face -- multilingual)\n{'─'*40}")
 
     try:
-        # "pipeline" is Hugging Face's magic one-liner.
-        # pipeline("task-name") downloads a pretrained model and gives you
-        # a function you can call: result = pipe("some text")
-        from transformers import pipeline
+        # A Hugging Face "pipeline" downloads a pretrained model and gives
+        # you a function you can call: result = pipe("some text")
+        # (_make_pipeline, above, also picks the fastest device)
 
         # Create a MULTILINGUAL sentiment analysis pipeline.
         # This model outputs 1-5 stars. We convert to a -1 to +1 scale.
@@ -238,8 +280,9 @@ def run_analyze(args):
         # After that, it's cached locally and loads instantly.
         # truncation=True: cut long texts to fit the model's max input (512 tokens)
         # max_length=512: the model can only read 512 "tokens" (roughly words) at once
-        sentiment_pipe = pipeline(
+        sentiment_pipe = _make_pipeline(
             "sentiment-analysis",
+            test=lambda pipe: pipe("This tool saves me time."),
             model="nlptown/bert-base-multilingual-uncased-sentiment",
             truncation=True,
             max_length=512,
@@ -385,13 +428,12 @@ def run_analyze(args):
     print("\n" + '─'*40 + "\n ZERO-SHOT CLASSIFICATION (HF -- multilingual)\n" + '─'*40)
 
     try:
-        from transformers import pipeline
-
         # Create a MULTILINGUAL zero-shot classification pipeline.
         # xlm-roberta = cross-lingual RoBERTa (reads 100+ languages)
         # xnli = cross-lingual NLI (trained on 15 languages)
-        zs_pipe = pipeline(
+        zs_pipe = _make_pipeline(
             "zero-shot-classification",
+            test=lambda pipe: pipe("This tool saves me time.", candidate_labels=["time", "cost"]),
             model="joeddav/xlm-roberta-large-xnli",  # Multilingual XNLI
             truncation=True,
         )
@@ -508,13 +550,12 @@ def run_analyze(args):
     print(f"\n{'─'*40}\nNAMED ENTITY RECOGNITION (HF -- multilingual)\n{'─'*40}")
 
     try:
-        from transformers import pipeline
-
         # aggregation_strategy="simple" merges multi-word entities.
         # Without it, "New" and "York" would be two separate entities.
         # With it, "New York" is one entity.
-        ner_pipe = pipeline(
+        ner_pipe = _make_pipeline(
             "ner",
+            test=lambda pipe: pipe("GitHub and Google work with developers in Paris."),
             aggregation_strategy="simple",
             model="Davlan/xlm-roberta-large-ner-hrl",  # Multilingual NER
             # No truncation=True here: the NER pipeline rejects that argument

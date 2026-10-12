@@ -25,7 +25,43 @@ import subprocess  # Lets us run terminal commands from inside Python (like "pip
 import sys         # Gives us info about the Python version we're running
 import os          # Lets us work with files and folders (create, read, check if they exist)
 import importlib.util  # Lets us check if a package is installed without importing it
+import platform      # Which kind of computer this is (Intel or Apple Silicon Mac)
+import sysconfig     # Where this Python keeps its files
+import tempfile      # A place for a temporary settings file
 
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VENV_DIR = os.path.join(HERE, ".venv")
+
+# Intel Macs: PyTorch stopped making Intel Mac versions after 2.2.2, so the
+# packages around it must be versions that still work with it (and that
+# still come ready-built for Intel Macs, so nothing needs compiling).
+INTEL_MAC = sys.platform == "darwin" and platform.machine() == "x86_64"
+INTEL_MAC_PINS = """torch==2.2.2
+numpy<2
+transformers<4.58
+numba<=0.62.1
+llvmlite<=0.45.1
+"""
+
+
+def _venv_python(venv_dir):
+    """Path of the python program inside a virtual environment."""
+    if os.name == "nt":   # Windows
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
+
+
+def _externally_managed():
+    """
+    True if this Python refuses "pip install" (Homebrew's Python on a Mac,
+    and some Linux system Pythons, mark themselves this way). Packages then
+    have to go into a private environment (a "venv") instead.
+    """
+    in_venv = sys.prefix != sys.base_prefix
+    marker = os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED")
+    return not in_venv and os.path.exists(marker)
 
 def _camoufox_fetch():
     """
@@ -58,6 +94,35 @@ def main():
     print()                                   # Empty line for readability
     print("   This will install everything you need.")
     print("   It takes about 2-5 minutes. Just wait.\n")  # \n = extra empty line
+
+    # The toolkit (and the current versions of pandas, numpy and PyTorch)
+    # need Python 3.10 or newer. A Mac's built-in "python3" is 3.9.
+    if sys.version_info < (3, 10):  # noqa: UP036 -- users may run an old Python
+        print(f"   This is Python {sys.version.split()[0]} -- the toolkit needs 3.10 or newer.")
+        print("   Easiest fix: install Thonny (https://thonny.org), which comes with a")
+        print("   recent Python, and run install.py from Thonny. Or install Python")
+        print("   from https://www.python.org/downloads/ and use that.")
+        input("   Press Enter to close...")
+        sys.exit(1)
+
+    # Homebrew's Python (the usual "python3" on a developer's Mac) refuses to
+    # install packages into itself. Make a private environment in .venv and
+    # run this installer again inside it -- the launcher uses it from then on.
+    if _externally_managed():
+        print("   This Python doesn't allow installing packages into it (Homebrew or")
+        print("   system Python), so the toolkit gets its own private copy in .venv ...")
+        if not os.path.exists(_venv_python(VENV_DIR)):
+            subprocess.check_call([sys.executable, "-m", "venv", VENV_DIR])
+        sys.exit(subprocess.call([_venv_python(VENV_DIR), os.path.abspath(__file__)]))
+
+    # Pin package versions that still work on Intel Macs (see INTEL_MAC_PINS)
+    pip_extra = []
+    if INTEL_MAC:
+        pins = os.path.join(tempfile.gettempdir(), "deep_research_intel_mac_pins.txt")
+        with open(pins, "w") as f:
+            f.write(INTEL_MAC_PINS)
+        pip_extra = ["-c", pins]
+        print("   Intel Mac detected -- using package versions that still support it.\n")
 
     # ════════════════════════════════════════════════════════════════════
     # STEP 1: INSTALL ALL THE LIBRARIES (packages) THE TOOLKIT NEEDS
@@ -107,6 +172,13 @@ def main():
         nlp_choice = input("   > ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         nlp_choice = "y"
+
+    if INTEL_MAC and sys.version_info >= (3, 13) and nlp_choice != "n":
+        # PyTorch's last Intel Mac version (2.2.2) only exists for Python <= 3.12
+        print("   On an Intel Mac, the NLP models need Python 3.12 or older (this is")
+        print(f"   {sys.version.split()[0]}). Using the light install -- for the full one, install")
+        print("   Python 3.12 from python.org and run install.py with it.")
+        nlp_choice = "n"
 
     if nlp_choice == "n":
         # Light install: just TextBlob (tiny, fast, English-only but functional)
@@ -175,18 +247,24 @@ def main():
                 # sys.executable is the path to the Python you're using right now.
                 # "-m pip install -q" means "use pip to install quietly (less output noise)."
                 # stdout=DEVNULL and stderr=DEVNULL hide pip's verbose output.
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "-q", pkg],
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q", pkg, *pip_extra],
                     stdout=subprocess.DEVNULL,  # Hide normal output
-                    stderr=subprocess.DEVNULL,  # Hide error output
+                    stderr=subprocess.PIPE,     # Keep errors, to show why it failed
+                    text=True, check=True,
                 )
                 print(f"      {pkg}")  # Success!
 
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
                 # If the install fails (bad internet, incompatible package, etc.)
                 # we note it but DON'T crash. The toolkit can work without most packages.
                 failed.append(pkg)
                 print(f"      {pkg} (failed -- will work without it)")
+                # pip's last error line says why (skipping its "notice"/warning lines)
+                reasons = [line.strip() for line in (e.stderr or "").splitlines()
+                           if line.strip() and not line.lower().startswith(("[notice]", "warning"))]
+                if reasons:
+                    print(f"         reason: {reasons[-1][:200]}")
 
     # Report results
     if failed:
@@ -324,6 +402,31 @@ def main():
             print("   Browser ready!")
         except Exception:
             print("   Browser download failed -- simulate will try Chrome/Edge instead.")
+
+    # ── Chrome for saving charts as PNG images ──────────────────────────
+    # kaleido (plotly's image export) draws charts with Google Chrome. If
+    # Chrome isn't installed, it can download its own copy (~150MB).
+    if importlib.util.find_spec("kaleido"):
+        test_chart = ("import plotly.graph_objects as go, tempfile, os; "
+                      "go.Figure().write_image(os.path.join(tempfile.gettempdir(), 'kaleido_test.png'))")
+        if subprocess.call([sys.executable, "-c", test_chart],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+            print("\n   Downloading Chrome for saving charts as images (~150MB)...")
+            # This download uses Python's own HTTPS, which on a Mac with
+            # Python from python.org has no certificates until "Install
+            # Certificates.command" is run -- use certifi's instead
+            env = dict(os.environ)
+            try:
+                import certifi
+                env["SSL_CERT_FILE"] = certifi.where()
+            except ImportError:
+                pass
+            try:
+                subprocess.check_call([sys.executable, "-c", "import kaleido; kaleido.get_chrome_sync()"],
+                                      stdout=subprocess.DEVNULL, env=env)
+                print("   Chart export ready!")
+            except Exception:
+                print("   Download failed -- charts are still saved as interactive HTML.")
 
     # ════════════════════════════════════════════════════════════════════
     # STEP 4: TEST THAT EVERYTHING WORKS

@@ -42,6 +42,7 @@ The layman/junior/senior quality gap is visible without reading code.
 # ════════════════════════════════════════════════════════════════════════
 
 import json      # Save results as structured data
+import sys   # Stop with an error code when a step can't run
 import os        # File/folder operations
 import time      # Measure how long each AI call takes
 import re        # Extract HTML from AI responses (strip markdown fences)
@@ -1020,8 +1021,7 @@ def run_simulate(args):
     # ── Setup ───────────────────────────────────────────────────────
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("No API key found -- run install.py to add one (or pass --key KEY)")
-        return
+        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")
 
     # ── Let the user choose which models to benchmark ───────────────
     # Instead of hardcoding 3 models, we ask the user. They can paste

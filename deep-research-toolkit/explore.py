@@ -27,6 +27,7 @@ The opinion comes later, from what the data shows (in synthesize mode).
 
 import re    # Pattern matching in text (used to clean up AI responses)
 import json  # Read/write structured data files
+import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations and environment variables
 
 from collections import defaultdict # Auto-initializing dictionary (see core.py)
@@ -201,8 +202,7 @@ def run_explore(args):
     # if it's empty/None, use the second one.
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("No API key found -- run install.py to add one (or pass --key KEY)")
-        return  # Stop here -- can't do anything without a key
+        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")  # Stop here -- can't do anything without a key
 
     model = args.model               # Which AI model to use
     topic = args.topic or DEFAULT_TOPIC  # User's topic, or the default
@@ -514,6 +514,12 @@ def run_explore(args):
     #
     # This also prevents two teammates from accidentally clobbering
     # each other's work if they run modes at the same time.
+
+    # Nothing found (no internet, or every search engine blocked us): stop
+    # with an error rather than replace a good corpus with an empty one
+    if not sources:
+        sys.exit("No sources found -- check the internet connection and try again. "
+                 "Any previous corpus was kept.")
 
     import shutil  # For copying files (backup)
     from datetime import datetime  # Timestamps for backup filenames

@@ -11,8 +11,22 @@ Type a number. That's it.
 # Built-in Python tools (no install needed)
 import os          # Work with files, folders, and environment variables
 import sys         # Info about the current Python installation
+import shutil      # Find programs on this computer (caffeinate on a Mac)
 import subprocess  # Run other scripts/commands from inside this one
 
+
+
+def use_toolkit_venv():
+    """
+    If install.py had to put the packages in a private environment (.venv --
+    it does that for Homebrew's Python on a Mac), run this script with that
+    environment's Python instead, so every package is found.
+    """
+    venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
+    python = (os.path.join(venv, "Scripts", "python.exe") if os.name == "nt"
+              else os.path.join(venv, "bin", "python"))
+    if os.path.exists(python) and os.path.realpath(sys.prefix) != os.path.realpath(venv):
+        sys.exit(subprocess.call([python, os.path.abspath(__file__), *sys.argv[1:]]))
 
 def load_key():
     """
@@ -54,7 +68,7 @@ def load_key():
     return os.environ.get("OPENROUTER_API_KEY", "")
 
 
-def run_mode(mode, extra_args=None):
+def run_mode(mode, extra_args=None, log=None):
     """
     Run one of the toolkit's modes (explore, analyze, stats, etc.)
 
@@ -68,6 +82,9 @@ def run_mode(mode, extra_args=None):
     Parameters:
         mode       -- which mode to run (e.g., "explore", "analyze", "ask")
         extra_args -- any additional arguments to pass (e.g., a question for ask mode)
+        log        -- an open file: run unattended and copy all output into it
+
+    Returns the mode's exit code (0 = it finished without crashing).
     """
 
     # Build the command as a list of strings.
@@ -91,7 +108,68 @@ def run_mode(mode, extra_args=None):
     # subprocess.run() starts a new process and waits for it to finish.
     # cwd = "current working directory" -- we set it to the toolkit folder
     # so the scripts can find each other.
-    subprocess.run(cmd, cwd=os.path.dirname(os.path.abspath(__file__)), check=False)
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # On a Mac, "caffeinate -i" keeps the computer awake while the mode runs:
+    # explore and analyze take 30-60 minutes, and a Mac that goes to sleep
+    # pauses them. (Closing the lid still sleeps it -- keep it open.)
+    if sys.platform == "darwin" and shutil.which("caffeinate"):
+        cmd = ["caffeinate", "-i", *cmd]
+
+    if log is None:
+        return subprocess.run(cmd, cwd=here, check=False).returncode
+
+    # Unattended: no keyboard (every question takes its default answer), and
+    # everything printed is also saved to the log file for later reading
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    proc = subprocess.Popen(cmd, cwd=here, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env, text=True,
+                            encoding="utf-8", errors="replace")
+    for line in proc.stdout:
+        print(line, end="")
+        log.write(line)
+        log.flush()
+    return proc.wait()
+
+
+# The modes "Run everything" runs, in order. Deepen is left out: what it
+# adds only reaches the brief after another Analyze + Synthesize.
+FULL_RUN = ["explore", "analyze", "stats", "synthesize", "viz", "simulate"]
+
+
+def run_everything():
+    """Run FULL_RUN one after another with no questions, stopping at a failure."""
+    import time
+    from datetime import datetime
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(here, "scratchpad"), exist_ok=True)
+    log_path = os.path.join(here, "scratchpad",
+                            f"run_log_{datetime.now():%Y%m%d_%H%M}.txt")
+    results = []
+    with open(log_path, "w", encoding="utf-8") as log:
+        for mode in FULL_RUN:
+            started = time.time()
+            banner = f"\n{'#' * 60}\n#  {mode.upper()}  ({datetime.now():%H:%M})\n{'#' * 60}\n"
+            print(banner)
+            log.write(banner)
+            code = run_mode(mode, log=log)
+            minutes = (time.time() - started) / 60
+            results.append((mode, code, minutes))
+            if code != 0:
+                break   # Later steps need this one's output -- stop here
+
+        summary = "\n" + "=" * 50 + "\n  RUN EVERYTHING -- SUMMARY\n" + "=" * 50 + "\n"
+        for mode, code, minutes in results:
+            summary += f"  {'OK    ' if code == 0 else 'FAILED'}  {mode:11s} {minutes:5.0f} min\n"
+        for mode in FULL_RUN[len(results):]:
+            summary += f"  skipped {mode}\n"
+        summary += f"\n  Full log: {log_path}\n"
+        if all(code == 0 for _, code, _ in results) and len(results) == len(FULL_RUN):
+            summary += "  The brief is in this folder (brief_*.md); charts and simulations\n"
+            summary += "  are in scratchpad/. Optional next: 5 (Deepen), then 2 and 4 again.\n"
+        print(summary)
+        log.write(summary)
 
 
 def main():
@@ -125,6 +203,8 @@ def main():
         print()
         print("  TEAM")
         print("    8 → Ask          Ask a question about the research")
+        print()
+        print("    R → Run everything  1, 2, 3, 4, 6, 7 in a row, no questions (~2.5 hours)")
         print()
         print("    9 → Clean up     Delete API key from .env (run before submitting!)")
         print("    0 → Quit")
@@ -235,6 +315,19 @@ def main():
                 # can ask multiple questions in a row
                 run_mode("ask")
 
+        # --- Option R: everything, unattended ---
+        elif choice.lower() == "r":
+            print("\n  Runs Explore, Analyze, Stats, Synthesize, Charts and Simulate")
+            print("  one after another -- about 2.5 hours and $0.40 -- with no more")
+            print("  questions (each step takes its default). You can walk away.")
+            if sys.platform == "darwin":
+                print("  Your Mac is kept awake while it runs; keep the lid open.")
+            if not load_key():
+                print("\n  No API key found -- run install.py first, or add it to .env")
+                continue
+            if input("\n  Start? (y/n) → ").strip().lower() == "y":
+                run_everything()
+
         # --- Option 9: Clean up (delete API key before submission) ---
         elif choice == "9":
             print("\n  This removes your API key from the .env file so you")
@@ -264,7 +357,7 @@ def main():
 
         # --- Anything else: not a valid option ---
         else:
-            print(f"\n  '{choice}' isn't an option. Type a number 0-9.\n")
+            print(f"\n  '{choice}' isn't an option. Type a number 0-9, or R.\n")
 
         # After any mode finishes, pause so the user can read the output
         # before the menu reappears and pushes it off screen.
@@ -279,6 +372,7 @@ def main():
 # (As opposed to being imported by another file, which we don't do here.)
 
 if __name__ == "__main__":
+    use_toolkit_venv()   # Packages may live in .venv (see install.py)
 
     # Before showing the menu, check if setup has been done.
     # We do this by looking for the .env file -- if it doesn't exist,

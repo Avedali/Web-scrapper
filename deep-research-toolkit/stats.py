@@ -26,6 +26,7 @@ Falls back to scipy if not.
 # IMPORTS
 # ════════════════════════════════════════════════════════════════════════
 
+import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
 
 from core import pad  # Scratchpad saving
@@ -49,8 +50,7 @@ def run_stats(args):
     try:
         import pandas as pd
     except ImportError:
-        print("pip install pandas")
-        return
+        sys.exit("pip install pandas")
 
     # ── Decision: external survey data or corpus data? ──────────────
     if args.data and os.path.exists(args.data):
@@ -105,8 +105,7 @@ def _corpus_stats(df, args):
     try:
         from scipy import stats as sp
     except ImportError:
-        print("pip install scipy")
-        return
+        sys.exit("pip install scipy")
 
     # ════════════════════════════════════════════════════════════════
     # TEST 0: DESCRIPTIVE STATISTICS
