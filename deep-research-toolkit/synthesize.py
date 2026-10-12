@@ -698,28 +698,52 @@ def _summarize(question, themes, checked_text, api_key, model):
     """
     Write the bottom line and one key finding per theme from the sections the
     gate already checked. Returns (bottom line, [key finding per theme], with
-    "" where the AI gave none).
+    "" where the AI gave none). Themes the first answer skipped get a second,
+    smaller call (a live run once stopped after theme 4 of 6).
     """
-    sections = "\n\n".join(f"THEME {n}: {t}\n{checked_text.get(t, '')}"
-                           for n, (t, _) in enumerate(themes, 1) if checked_text.get(t))
     extra = "\n\n".join(f"{t.upper()}:\n{checked_text[t]}"
                         for t in ("Where the evidence disagrees", "Gaps in the evidence")
                         if checked_text.get(t))
+    key_rule = ("the key finding of that theme in 1-2 sentences: its most important specific "
+                "result, with the number and who found it (\"A GitHub study found developers "
+                "finished 55% faster\"), and whether other sources agree or disagree. Keep the "
+                "[n] citations of the sentences it comes from, at most 3 per sentence.")
+
+    def sections_for(numbers):
+        """The checked text of the themes with these numbers, labelled THEME n."""
+        return "\n\n".join(f"THEME {n}: {themes[n - 1][0]}\n{checked_text.get(themes[n - 1][0], '')}"
+                           for n in numbers if checked_text.get(themes[n - 1][0]))
+
+    all_numbers = list(range(1, len(themes) + 1))
     reply = call_ai(
         f"RESEARCH QUESTION: {question}\n\n"
         "Below are the checked sections of a research brief. Using ONLY what they say:\n"
-        "BOTTOM LINE: 3-5 sentences that answer the research question: what the evidence "
-        "shows, how strong it is, and the main tension or uncertainty.\n"
-        "K1: the key finding of theme 1 in 1-2 sentences. Keep the [n] citations of the "
-        "sentences it comes from, at most 3 per sentence.\n"
-        "K2: ... (one line per theme, in order)\n"
+        "BOTTOM LINE: 3-5 sentences that answer the research question: the specific results "
+        "that carry the answer, how strong the evidence is, and the main tension or "
+        "uncertainty.\n"
+        f"K1: {key_rule}\n"
+        f"K2: ... one line per theme, in order, up to K{len(themes)}.\n"
         "Plain words, no dashes as punctuation. No new facts, numbers or sources.\n\n"
-        f"{sections}\n\n{extra}",
+        f"{sections_for(all_numbers)}\n\n{extra}",
         api_key, model, temp=0.2) or ""
     m = re.search(r"BOTTOM LINE\W*:?\s*(.+?)(?=^\W*K1\W*:|\Z)", reply, re.S | re.M | re.I)
     bottom_line = m.group(1).strip() if m else ""
     keys = dict(re.findall(r"^\W*K(\d+)\W*:?\s*(.+)$", reply, re.M | re.I))
-    return bottom_line, [keys.get(str(n), "").strip() for n in range(1, len(themes) + 1)]
+
+    missing = [n for n in all_numbers if not keys.get(str(n), "").strip()
+               and checked_text.get(themes[n - 1][0])]
+    if missing:
+        again = call_ai(
+            f"RESEARCH QUESTION: {question}\n\n"
+            "Below are checked sections of a research brief. For EACH theme below, write one "
+            f"line starting with its label (K{missing[0]}: ...): {key_rule}\n"
+            "Plain words, no dashes as punctuation. No new facts, numbers or sources.\n\n"
+            f"{sections_for(missing)}",
+            api_key, model, temp=0.2) or ""
+        for n, text in re.findall(r"^\W*K(\d+)\W*:?\s*(.+)$", again, re.M | re.I):
+            if int(n) in missing:
+                keys[n] = text
+    return bottom_line, [keys.get(str(n), "").strip() for n in all_numbers]
 
 
 def _implications(question, bottom_line, key_findings, api_key, model):
