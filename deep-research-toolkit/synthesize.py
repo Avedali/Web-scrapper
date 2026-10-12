@@ -546,6 +546,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
 
     print(f"\n{'─'*50}\nFACT CHECK (claims vs. cited sources)\n{'─'*50}")
     checked, check_log, n_flagged, not_checked = [], [], 0, []
+    n_deleted = 0
     for title, c in cleaned:
         fixed, flagged = _fact_check(c, by_idx, cards, api_key, model, findings=context)
         if flagged is None:
@@ -556,13 +557,17 @@ Output a numbered outline with section titles and one-line argument summaries.""
                              "Re-run synthesize, or check this section by hand.")
         else:
             n_flagged += len(flagged)
-            print(f"   {title}: {len(flagged)} unsupported/uncited sentences fixed")
+            deleted = sum(1 for f in flagged if f.endswith("→ DELETED"))
+            n_deleted += deleted
+            print(f"   {title}: {len(flagged)} unsupported/uncited sentences -- "
+                  f"{len(flagged) - deleted} corrected, {deleted} deleted")
             check_log.append(f"## {title}\n\n" + ("\n".join(f"- {f}" for f in flagged)
                                                    or "- All claims supported by their sources"))
         checked.append((title, fixed))
     cleaned = checked
     pad("synthesis_05_fact_check",
-        f"# Fact check: {n_flagged} sentences flagged and fixed"
+        f"# Fact check: {n_flagged} sentences flagged -- {n_flagged - n_deleted} corrected, "
+        f"{n_deleted} deleted"
         + (f" -- {len(not_checked)} section(s) NOT CHECKED" if not_checked else "") + "\n\n"
         "Each line was flagged as not supported by the source(s) it cites (UNSUPPORTED)\n"
         "or as stating a fact without a source (UNCITED), then corrected or removed.\n\n"
@@ -597,7 +602,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
     words = sum(len(re.findall(r"\w+", c)) for _, c in cleaned)
     check_note = (f"**WARNING: {len(not_checked)} section(s) NOT fact-checked** "
                   f"({', '.join(not_checked)}) -- re-run synthesize" if not_checked else
-                  f"{n_flagged} unsupported or uncited sentences corrected")
+                  f"{n_flagged} unsupported or uncited sentences flagged -- "
+                  f"{n_flagged - n_deleted} corrected, {n_deleted} deleted")
     lines.append(f"**Length:** {words} words | **Fact check:** {check_note} "
                  f"(see scratchpad/synthesis_05_fact_check.md)\n")
     lines.append("---\n")
@@ -621,7 +627,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
     print("SYNTHESIS COMPLETE")
     print(f"   {fn}")
     print(f"   Brief {coverage}")
-    print(f"   {words} words; fact check corrected {n_flagged} sentences")
+    print(f"   {words} words; fact check flagged {n_flagged} sentences: "
+          f"{n_flagged - n_deleted} corrected, {n_deleted} deleted")
     if not_checked:
         print(f"   WARNING: {len(not_checked)} section(s) were NOT fact-checked "
               f"(AI calls failed) -- re-run synthesize before using this brief")
@@ -797,14 +804,16 @@ def _fact_check(text, by_idx, cards, api_key, model, findings=""):
     proposed = {}
     for raw_original, raw_fix in re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or ""):
         proposed[raw_original.strip().strip('"')] = raw_fix.strip().strip('"')
-    fixed = text
+    fixed, outcomes = text, []
     for f in flagged:
         original = f.split(": ", 1)[1]
         fix = proposed.get(original, "DELETE")
         fixed = fixed.replace(original, "" if fix.upper() == "DELETE" else fix)
+        # Record what happened to it, so a human can audit the checker
+        outcomes.append(f + ("\n  → DELETED" if fix.upper() == "DELETE" else f"\n  → CORRECTED: {fix}"))
     fixed = re.sub(r"[ \t]{2,}", " ", fixed)      # Tidy gaps left by deletions
     fixed = re.sub(r"^[ \t]+", "", fixed, flags=re.MULTILINE)
-    return fixed, flagged
+    return fixed, outcomes
 
 
 def _banned_pattern(phrase):
