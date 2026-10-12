@@ -780,6 +780,9 @@ def _ids_to_citations(text, findings_by_id, most=3):
         sentence = re.sub(r"\]\s*\[", ", ", sentence)        # "[3] [7]" → "[3, 7]"
         return re.sub(r"\s+([.,;:])", r"\1", sentence)
 
+    # An ID placed after the full stop ("... faster. {C12}") belongs to that
+    # sentence -- otherwise it becomes a stray "[166]" fragment of its own
+    text = re.sub(r"([.!?])((?:\s*[{\[(]\s*C\s*\d+[^}\])\n]*[}\])])+)", r"\2\1", text)
     lines = []
     for line in text.split("\n"):
         lines.append(" ".join(one_sentence(x) for x in re.split(r"(?<=[.!?])[ \t]+", line)))

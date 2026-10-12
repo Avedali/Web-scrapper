@@ -565,7 +565,7 @@ def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
     from concurrent.futures import ThreadPoolExecutor
     from core import call_ai
 
-    cited = [s for s in sentences(text) if citations(s) and not s.startswith("#")]
+    cited = [s for s in statements(text) if citations(s)]   # Real statements, not "[166]" fragments
     sample = random.Random(seed).sample(cited, min(n, len(cited)))
 
     def one(sentence):
