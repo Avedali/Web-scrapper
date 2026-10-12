@@ -753,7 +753,12 @@ def run_analyze(args):
 
     # Add the BERTopic themes (with their English names) if we found any
     if "theme" in df.columns:
-        results["themes"] = df.loc[df["bertopic"] != -1, "theme"].value_counts().to_dict()
+        themed = df[df["bertopic"] != -1]
+        results["themes"] = themed["theme"].value_counts().to_dict()
+        # Which languages discuss each theme (so synthesize/ask can see it)
+        results["theme_languages"] = {
+            theme: group["lang"].value_counts().to_dict()
+            for theme, group in themed.groupby("theme")}
 
     with open(os.path.join(args.corpus, "analysis_results.json"), "w") as f:
         # default=str tells json.dump to convert any weird types to strings
@@ -761,8 +766,16 @@ def run_analyze(args):
         json.dump(results, f, indent=2, default=str)
 
     # Save a markdown report to the scratchpad
+    # Themes as plain sentences too -- easier for people (and the ask
+    # agent) to read than the nested JSON below
+    theme_lines = "".join(
+        f"- {theme}: {n} sources ("
+        + ", ".join(f"{lang} {k}" for lang, k in results["theme_languages"][theme].items()) + ")\n"
+        for theme, n in results.get("themes", {}).items())
     pad("analyze_report",
-        f"# NLP Analysis\n\nDocuments: {len(df)}\n"
+        f"# NLP Analysis\n\nDocuments: {len(df)}\n\n"
+        + (f"## Themes (BERTopic) and the languages discussing them\n\n{theme_lines}\n"
+           if theme_lines else "")
         + json.dumps(results, indent=2, default=str))
 
     print(f"\n{'='*60}\nANALYSIS COMPLETE\n{'='*60}")

@@ -420,12 +420,37 @@ def _try_search(page):
 
 
 def _try_paste_data(page):
-    """Paste a small CSV (then JSON) into the page and press its button."""
+    """Give the page sample data -- pasted CSV, pasted JSON, or an uploaded
+    CSV file -- press its button, and return how many table rows appear."""
     for sample in (SAMPLE_CSV, SAMPLE_JSON):   # "a tool for looking at data" may want JSON
         rows = _try_paste_csv(page, sample)
         if rows:
             return rows
-    return 0
+    return _try_upload_csv(page)
+
+
+def _try_upload_csv(page):
+    """For pages with a file picker instead of a paste box."""
+    import tempfile
+    try:
+        picker = page.locator("input[type=file]")
+        if not picker.count():
+            return 0
+        with tempfile.TemporaryDirectory() as tmp:
+            sample_file = os.path.join(tmp, "sample.csv")
+            with open(sample_file, "w", encoding="utf-8") as f:
+                f.write(SAMPLE_CSV)
+            picker.first.set_input_files(sample_file)
+            page.wait_for_timeout(300)
+            go = page.locator("button:visible").filter(has_text=re.compile(
+                r"load|parse|render|show|display|submit|go|analy|view|table|process|upload|import",
+                re.I))
+            if go.count():
+                go.first.click()
+            page.wait_for_timeout(600)   # FileReader is asynchronous
+            return page.evaluate(PROBE_JS)["rows"]
+    except Exception:
+        return 0
 
 
 def _try_paste_csv(page, sample=SAMPLE_CSV):
@@ -510,7 +535,7 @@ def check_pages_in_browser(results, out_dir):
                     rows = found["rows"] or _try_paste_data(page)
                     ok = rows >= 3
                     check = (f"{found['rows']} table rows shown" if found["rows"]
-                             else f"empty; pasting sample data gave {rows} rows")
+                             else f"empty; giving it sample data (paste or upload) gave {rows} rows")
             except Exception as e:
                 ok, check, shot = False, f"page failed to load ({type(e).__name__})", ""
 

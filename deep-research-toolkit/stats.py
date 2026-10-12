@@ -324,6 +324,12 @@ def _corpus_stats(df, args):
     if "topic_zs" in df.columns:
         cat_pairs.append("topic_zs")
 
+    # Add the BERTopic themes (from analyze) -- sources without usable
+    # evidence have no theme, so leave them out of the tests
+    if "theme" in df.columns:
+        df["theme"] = df["theme"].where(df["theme"] != "no usable evidence")
+        cat_pairs.append("theme")
+
     if len(cat_pairs) >= 2:
         print(f"\n{'─'*40}\nCHI-SQUARED ASSOCIATIONS\n{'─'*40}")
 

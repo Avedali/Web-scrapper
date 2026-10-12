@@ -359,11 +359,16 @@ def run_viz(args):
     #
     # data-to-viz.com: two categoricals → heatmap/mosaic
 
-    if "topic_zs" in df.columns and "lang" in df.columns:
+    # Prefer analyze's named BERTopic themes; fall back to zero-shot topics
+    topic_col = "theme" if "theme" in df.columns else "topic_zs"
+
+    if topic_col in df.columns and "lang" in df.columns:
 
         # Build a cross-tabulation (contingency table):
         # rows = languages, columns = topics, cells = counts
-        ct = pd.crosstab(df["lang"], df["topic_zs"])
+        # (sources with no usable evidence have no theme -- leave them out)
+        sub = df[df[topic_col].notna() & (df[topic_col] != "no usable evidence")]
+        ct = pd.crosstab(sub["lang"], sub[topic_col])
 
         # Need at least 2 languages and 2 topics for a meaningful heatmap
         if ct.shape[0] >= 2 and ct.shape[1] >= 2:
@@ -387,8 +392,8 @@ def run_viz(args):
             )
 
             save(fig, "04_topic_language",
-                 "Figure 4: Topic distribution by source language",
-                 "Different languages discuss different concerns")
+                 "Figure 4: Theme distribution by source language",
+                 "Which languages discuss which themes")
 
     # ════════════════════════════════════════════════════════════════
     # CHART 5: Source quality breakdown (LOLLIPOP)
