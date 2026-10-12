@@ -564,7 +564,12 @@ Output a numbered outline with section titles and one-line argument summaries.""
             check_log.append(f"## {title}\n\n" + ("\n".join(f"- {f}" for f in flagged)
                                                    or "- All claims supported by their sources"))
         checked.append((title, fixed))
-    cleaned = checked
+    # Corrections can make two rewordings of one claim identical -- keep the first
+    cleaned, so_far = [], ""
+    for title, c in checked:
+        c = _drop_repeated_sentences(c, so_far)
+        cleaned.append((title, c))
+        so_far += "\n\n" + c
     pad("synthesis_05_fact_check",
         f"# Fact check: {n_flagged} sentences flagged -- {n_flagged - n_deleted} corrected, "
         f"{n_deleted} deleted"
@@ -862,9 +867,11 @@ def _drop_citation_dumps(text, most=5):
 
 def _drop_repeated_sentences(text, earlier):
     """
-    Remove sentences of `text` that already appear in `earlier` (ignoring
-    [n] tags, case and punctuation) -- writing passes sometimes restate the
-    thesis and headline numbers at the start of every section.
+    Remove sentences of `text` that already appear in `earlier`, or earlier
+    in `text` itself (ignoring [n] tags, case and punctuation) -- writing
+    passes sometimes restate the thesis and headline numbers at the start of
+    every section, and fact-check corrections can turn two rewordings of a
+    claim into the same sentence.
     """
     def key(sentence):
         no_tags = re.sub(r"\[[\d,\s]+\]", "", sentence)
@@ -873,8 +880,14 @@ def _drop_repeated_sentences(text, earlier):
     seen = {key(x) for x in re.split(r"(?<=[.!?])\s+", earlier) if len(key(x)) > 40}
     lines = []
     for line in text.split("\n"):   # Line by line, so lists and headings keep their shape
-        kept = [x for x in re.split(r"(?<=[.!?])[ \t]+", line)
-                if len(key(x)) <= 40 or key(x) not in seen]
+        kept = []
+        for sentence in re.split(r"(?<=[.!?])[ \t]+", line):
+            k = key(sentence)
+            if len(k) <= 40:
+                kept.append(sentence)
+            elif k not in seen:      # First time: keep it, and drop any later copy
+                seen.add(k)
+                kept.append(sentence)
         if kept or not line.strip():
             lines.append(" ".join(kept))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
