@@ -114,8 +114,10 @@ try:
     from camoufox.sync_api import Camoufox  # A modified Firefox browser that
                                              # looks like a real human browsing,
                                              # not a bot. Bypasses anti-scraping.
+    from camoufox.pkgman import installed_verstr
+    installed_verstr()   # Raises if the browser itself (~300MB) isn't downloaded
     _CAMO = True
-except ImportError:
+except Exception:        # Not installed, browser missing, or a broken install
     _CAMO = False
 
 # --- Language detection ---
@@ -586,6 +588,22 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
 
     print(f"      read {len(pages)} of {len(urls)} pages in {time.time() - started:.0f}s")
     return pages
+
+
+def region_for(query):
+    """
+    Search region for a query, from its script: a Korean query searches
+    Korean pages, a Japanese one Japanese pages, etc. Latin-script queries
+    (English, French, German...) can't be told apart reliably this way, so
+    they use the US-English region.
+    """
+    for lang, script in [("ko", r"[\uac00-\ud7a3]"),     # Hangul
+                         ("ja", r"[\u3040-\u30ff]"),     # Hiragana/Katakana (before zh:
+                         ("zh", r"[\u4e00-\u9fff]"),     #   Japanese also uses Kanji)
+                         ("ru", r"[\u0400-\u04ff]")]:    # Cyrillic
+        if re.search(script, query):
+            return LANGUAGES[lang]["region"]
+    return "us-en"
 
 
 def search_many(jobs, workers=3):

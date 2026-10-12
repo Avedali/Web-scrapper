@@ -36,6 +36,7 @@ import os    # File/folder operations
 # From our shared toolbox:
 from core import (
     search_many,      # Run several web searches at once
+    region_for,       # Search region matching a query's script (ja, ko, ...)
     fetch_pages,      # Read many web pages at once
     CONTENT_CHARS,    # How much text to keep per source
     search_academic,  # Search Semantic Scholar + arXiv
@@ -184,7 +185,7 @@ def run_deepen(args):
         existing_urls.add(item["url"])
 
     # ── Web search: all queries at once, then read new pages in parallel
-    results = search_many([(q, 3, "us-en") for q in queries])
+    results = search_many([(q, 3, region_for(q)) for q in queries])
     found = {}  # url -> search result (first query that found it)
     for q, rs in zip(queries, results, strict=True):
         print(f"   {q[:55]}...  ({len(rs)} results)")

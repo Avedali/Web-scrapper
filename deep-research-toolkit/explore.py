@@ -36,6 +36,7 @@ from collections import defaultdict # Auto-initializing dictionary (see core.py)
 # from core.py into this file so we can use them directly.
 from core import (
     search_many,         # Run several web searches at once
+    region_for,          # Search region matching a query's script (ja, ko, ...)
     fetch_pages,         # Read many web pages at once
     CONTENT_CHARS,       # How much text to keep per source
     search_academic,     # Search Semantic Scholar + arXiv
@@ -494,13 +495,6 @@ def run_explore(args):
     # fix query looks for Korean pages.
 
     print(f"\n{'─'*50}\nGAP FILL ({len(fixes[:GAP_QUERIES])} queries)\n{'─'*50}")
-
-    def region_for(query):
-        for lang, script in [("ko", NATIVE_SCRIPT["ko"]), ("ja", r"[\u3040-\u30ff]"),
-                             ("zh", NATIVE_SCRIPT["zh"]), ("ru", NATIVE_SCRIPT["ru"])]:
-            if re.search(script, query):
-                return LANGUAGES[lang]["region"]
-        return "us-en"
 
     added = _gather([(q, 3, region_for(q), "mixed") for q in fixes[:GAP_QUERIES]], sources)
     print(f"   {added} sources added")

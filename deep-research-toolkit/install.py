@@ -27,6 +27,27 @@ import os          # Lets us work with files and folders (create, read, check if
 import importlib.util  # Lets us check if a package is installed without importing it
 
 
+def _camoufox_fetch():
+    """
+    Download the camoufox browser (~300MB). camoufox needs PyYAML's fast C
+    loader, which some Linux/Mac Pythons ship without ("cannot import name
+    'CLoader'") -- so install pip's own copy of PyYAML first when it's missing.
+    """
+    try:
+        from yaml import CLoader  # noqa: F401 -- only checking it exists
+    except ImportError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "--ignore-installed", "pyyaml"])
+    subprocess.check_call([sys.executable, "-m", "camoufox", "fetch"])
+    # "fetch" can report an error and still exit normally -- check the
+    # browser is really there before saying it's ready
+    if subprocess.call(
+            [sys.executable, "-c", "from camoufox.pkgman import installed_verstr; installed_verstr()"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+        raise RuntimeError("the browser didn't download -- try again later with: "
+                           "python -m camoufox fetch")
+
+
 def main():
     """This is the main function. Everything happens inside here."""
 
@@ -263,10 +284,10 @@ def main():
         # requirements.txt). "fetch" is a no-op if it's already there.
         print("   Camoufox package found -- making sure the browser is downloaded...")
         try:
-            subprocess.check_call([sys.executable, "-m", "camoufox", "fetch"])
+            _camoufox_fetch()
             print("   Camoufox ready!")
-        except Exception:
-            print("   Browser download failed -- not a problem, toolkit works without it.")
+        except Exception as e:
+            print(f"   Browser download failed ({e}) -- not a problem, toolkit works without it.")
     else:
         # None means the package isn't installed
         print("   Camoufox is a stealth browser for hard-to-scrape sites.")
@@ -284,11 +305,10 @@ def main():
                 subprocess.check_call(
                     [sys.executable, "-m", "pip", "install", "-q", "camoufox[geoip]"])
                 # Download the actual browser binary (~300MB)
-                subprocess.check_call(
-                    [sys.executable, "-m", "camoufox", "fetch"])
+                _camoufox_fetch()
                 print("   Camoufox installed!")
-            except Exception:
-                print("   Camoufox install failed -- not a problem, toolkit works without it.")
+            except Exception as e:
+                print(f"   Camoufox install failed ({e}) -- not a problem, toolkit works without it.")
         else:
             print("   Skipped.")
 
