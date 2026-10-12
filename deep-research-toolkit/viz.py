@@ -204,6 +204,7 @@ def run_viz(args):
     # ════════════════════════════════════════════════════════════════
     # These come first: they illustrate the brief's findings. The charts
     # about how the research was done follow, in the appendix folders.
+    brief = None   # The brief's themes and findings, if synthesize has run
     brief_path = os.path.join(args.corpus, "brief_findings.json")
     if not os.path.exists(brief_path):
         print("   No brief yet (run synthesize first): skipping the findings charts")
@@ -243,36 +244,37 @@ def run_viz(args):
                                        "method and sample, so the figures are not directly "
                                        "comparable.</sup>")
                 save(fig, "reported_" + re.sub(r"\W+", "_", m["name"].lower()).strip("_")[:40],
-                     f"{m['name']}: the figure each source reports ({len(pts)} sources)",
-                     f"{m['name']}: reported figures range<br>from {_fmt(lo, m['unit'], signed)} "
-                     f"to {_fmt(hi, m['unit'], signed)} ({len(pts)} sources)")
+                     f"{m['name']}: the figure each source reports",
+                     _headline(m["name"], pts, m["unit"], signed))
 
-        # ── How much evidence backs each key finding ────────────────
-        # One bar per theme of the brief, split by the type of source.
-        themes = [t for t in brief.get("themes", []) if t.get("sources_by_type")]
-        if themes:
-            kinds = sorted({k for t in themes for k in t["sources_by_type"]},
-                           key=lambda k: -sum(t["sources_by_type"].get(k, 0) for t in themes))
-            # A color per type, so the legend can tell them apart. AI tool
-            # makers keep the accent red, as in the other charts.
-            fixed = {"Research papers": DARK, "Other websites": MUTED}
-            others = iter(["#457B9D", "#F4A261", "#2A9D8F", "#8D99AE", "#E9C46A", "#6D597A", GRAY])
-            palette = {k: (ACCENT if k.startswith("AI tool makers") else fixed.get(k) or next(others, GRAY))
-                       for k in kinds}
-            fig = go.Figure()
-            names = [t["title"] for t in themes]
-            for k in kinds:
-                fig.add_trace(go.Bar(
-                    y=names, x=[t["sources_by_type"].get(k, 0) for t in themes], name=k,
-                    orientation="h", marker_color=palette[k]))
-            fig.update_layout(barmode="stack", yaxis_autorange="reversed")
-            fig.update_xaxes(title="Sources cited")
-            totals = {t["title"]: sum(t["sources_by_type"].values()) for t in themes}
-            most, least = max(totals, key=totals.get), min(totals, key=totals.get)
-            save(fig, "evidence_per_finding",
-                 "Sources cited for each theme of the brief, by type of source",
-                 f"{most} rests on the most sources ({totals[most]}),<br>"
-                 f"{least} on the fewest ({totals[least]})", keep_legend=True)
+    # ════════════════════════════════════════════════════════════════
+    # APPENDIX: charts about how the research was done
+    # ════════════════════════════════════════════════════════════════
+
+    # ── How many sources each theme of the brief cites ──────────
+    # One bar per theme, split by the type of source. This describes the
+    # evidence base, so it goes in the appendix with the other method charts.
+    themes = [t for t in (brief or {}).get("themes", []) if t.get("sources_by_type")]
+    if themes:
+        kinds = sorted({k for t in themes for k in t["sources_by_type"]},
+                       key=lambda k: -sum(t["sources_by_type"].get(k, 0) for t in themes))
+        # A color per type, so the legend can tell them apart. AI tool
+        # makers keep the accent red, as in the other charts.
+        fixed = {"Research papers": DARK, "Other websites": MUTED}
+        others = iter(["#457B9D", "#F4A261", "#2A9D8F", "#8D99AE", "#E9C46A", "#6D597A", GRAY])
+        palette = {k: (ACCENT if k.startswith("AI tool makers") else fixed.get(k) or next(others, GRAY))
+                   for k in kinds}
+        fig = go.Figure()
+        names = [t["title"] for t in themes]
+        for k in kinds:
+            fig.add_trace(go.Bar(
+                y=names, x=[t["sources_by_type"].get(k, 0) for t in themes], name=k,
+                orientation="h", marker_color=palette[k]))
+        fig.update_layout(barmode="stack", yaxis_autorange="reversed")
+        fig.update_xaxes(title="Sources cited")
+        save(fig, "sources_per_theme",
+             "Sources cited for each theme of the brief, by type of source",
+             "Sources cited for each theme of the brief", appendix=True, keep_legend=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 1: Sentiment by source type (box plot)
@@ -691,7 +693,7 @@ def run_viz(args):
 # THE BRIEF'S KEY MEASURES (for the findings charts)
 # ════════════════════════════════════════════════════════════════════════
 
-MAX_MEASURES = 4      # Charts of reported figures
+MAX_MEASURES = 6      # Charts of reported figures
 MIN_POINTS = 3        # A measure needs figures from at least this many sources
 
 
@@ -702,7 +704,7 @@ def _measures(brief, by_idx, api_key, model):
     Every figure is then checked in code: the number must appear in the
     finding AND in one of its sources, or it is left out. Returns
     [{"name", "unit", "points": [{"value", "label", "source", "tool_maker",
-    "research"}]}], keeping measures with at least MIN_POINTS figures.
+    "research", "group"}]}], keeping measures with at least MIN_POINTS figures.
     """
     findings = {f["id"]: f for f in brief.get("findings", [])}
     keys = "\n".join(f"- {t['title']}: {t['key_finding']}" for t in brief.get("themes", [])
@@ -712,7 +714,9 @@ def _measures(brief, by_idx, api_key, model):
         f"Below are the findings the brief is written from (ID, claim). Choose up to "
         f"{MAX_MEASURES} MEASURES that best illustrate the key findings and that at least "
         f"{MIN_POINTS} findings report as a number, for example 'Change in coding speed with "
-        "AI assistants (%)' or 'Share of AI-generated code with security flaws (%)'. Name "
+        "AI assistants (%)' or 'Share of AI-generated code with security flaws (%)'. A "
+        "measure is an outcome in the world the research question asks about (speed, quality, "
+        "cost, jobs, adoption...), never a count of sources, studies or citations. Name "
         "each in plain words a non-specialist understands, with its unit.\n"
         "Format, exactly:\n"
         "MEASURE: <plain name, with unit in brackets>\n"
@@ -762,8 +766,47 @@ def _measures(brief, by_idx, api_key, model):
             "source": f"{lead.get('title', '')[:80]} ({lead.get('domain', '')})",
             "tool_maker": kind == "AI tool maker",
             "research": kind == "independent study",
+            "group": {"AI tool maker": "AI tool makers", "independent study": "independent studies",
+                      "survey": "surveys"}.get(kind, "other sources"),
         })
     return [m for m in measures if len(m["points"]) >= MIN_POINTS][:MAX_MEASURES]
+
+
+def _headline(name, pts, unit, signed):
+    """
+    The slide title for a chart of reported figures: what the figures say,
+    worked out from the points so no number in it is made up. Examples:
+      "Change in coding speed: AI tool makers report +26% to +55%,<br>independent studies -19% to +21%"
+      "Change in coding speed: 5 of 7 sources report an increase,<br>2 a decrease"
+      "Change in coding speed: all 4 sources report an increase,<br>from +10% to +55%"
+      "Share of AI code with security flaws: sources report<br>from 25% to 62%"
+    """
+    def spread(values):
+        lo, hi = min(values), max(values)
+        return _fmt(lo, unit, signed) if lo == hi else f"{_fmt(lo, unit, signed)} to {_fmt(hi, unit, signed)}"
+
+    groups = {}   # "AI tool makers" → [55, 26], in the order below
+    for kind in ["AI tool makers", "independent studies", "surveys", "other sources"]:
+        values = [p["value"] for p in pts if p["group"] == kind]
+        if values:
+            groups[kind] = values
+    up = sum(p["value"] > 0 for p in pts)
+    down = sum(p["value"] < 0 for p in pts)
+    values = [p["value"] for p in pts]
+
+    if "AI tool makers" in groups and "independent studies" in groups:
+        return (f"{name}: AI tool makers report {spread(groups['AI tool makers'])},<br>"
+                f"independent studies {spread(groups['independent studies'])}")
+    if signed and up and down:
+        return f"{name}: {up} of {len(pts)} sources report an increase,<br>{down} a decrease"
+    if len(groups) >= 2:
+        (k1, v1), (k2, v2) = list(groups.items())[:2]
+        return f"{name}: {k1} report {spread(v1)},<br>{k2} {spread(v2)}"
+    if signed and up == len(pts):
+        return f"{name}: all {len(pts)} sources report an increase,<br>from {spread(values)}"
+    if signed and down == len(pts):
+        return f"{name}: all {len(pts)} sources report a decrease,<br>from {spread(values)}"
+    return f"{name}: sources report<br>from {spread(values)}"
 
 
 def _fmt(value, unit, signed=False):
