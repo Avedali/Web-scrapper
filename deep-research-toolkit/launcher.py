@@ -129,8 +129,8 @@ def main():
         print("    9 → Clean up     Delete API key from .env (run before submitting!)")
         print("    0 → Quit")
         print()
-        print("  Cost (measured, default model Gemini 2.5 Flash Lite): ~$0.10 for a")
-        print("     full run of options 1-7, plus ~1-2 cents per Ask question")
+        print("  Cost (default model Gemini 2.5 Flash Lite, ~290 sources): about $0.40")
+        print("     for a full run of options 1-7, plus ~1-3 cents per Ask question")
         print()
 
         # ── Wait for the user to type something ────────────────────
@@ -159,7 +159,7 @@ def main():
         # --- Option 1: Explore (gather research, no opinion) ---
         elif choice == "1":
             print("\n  This searches the web in 9 languages and gathers sources.")
-            print("  It takes about 20-40 minutes (45 queries, 9 languages). Let it run.\n")
+            print("  It takes about 25-35 minutes (72 queries, 9 languages). Let it run.\n")
             # Ask for confirmation before starting a long process
             confirm = input("  Start? (y/n) → ").strip().lower()
             if confirm == "y":
@@ -168,6 +168,7 @@ def main():
         # --- Option 2: Analyze (NLP on collected sources) ---
         elif choice == "2":
             print("\n  Running sentiment analysis, topic modeling, and NER")
+            print("  (reads every source in full -- about an hour on a laptop for ~300 sources)")
             print("  on the sources we already collected.\n")
             run_mode("analyze")  # Calls: python agent.py analyze
 

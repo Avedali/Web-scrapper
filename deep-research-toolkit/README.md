@@ -58,4 +58,5 @@ Opinion comes AFTER data, not before.
 - All search results are real -- no fallback to example data.
 - The toolkit combines web-sourced information with AI analysis. The AI writes from the scratchpad only, never from its training data.
 - Before submitting: run `launcher.py → option 9` to delete your API key from the `.env` file.
-- Cost (measured on a real run, default model `google/gemini-2.5-flash-lite`): about $0.10 for a full pipeline run, plus 1-2 cents per Ask question.
+- Cost (default model `google/gemini-2.5-flash-lite`, ~290 sources, estimated from a real test run): about $0.40 for a full pipeline run, plus 1-3 cents per Ask question.
+- Time: explore ~25-35 min; analyze ~1 hour on a 4-core laptop (it reads every source in full -- set `ANALYZE_CHARS` in analyze.py to trade depth for speed); synthesize ~10-15 min.

@@ -526,6 +526,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
     # -- correct, re-cite or delete, never add. The log is saved so a human
     # can review exactly what was changed.
 
+    # Remove file names the writer may still cite as if they were sources
+    # ("[analysis_results.json]", "(stats_report.md)") -- [n] is for sources
+    cleaned = [(t, _strip_file_refs(c)) for t, c in cleaned]
+
     print(f"\n{'─'*50}\nFACT CHECK (claims vs. cited sources)\n{'─'*50}")
     checked, check_log, n_flagged, not_checked = [], [], 0, []
     for title, c in cleaned:
@@ -652,24 +656,30 @@ def _load_all_evidence(corpus_dir):
     # evidence cards already give the AI every source properly.)
     p = pad_dir / "analysis_results.json"
     if p.exists():
-        parts.append(f"── analysis_results.json ──\n{p.read_text(encoding='utf-8')}\n")
+        parts.append(f"── Corpus analysis results (sentiment, topics, themes) ──\n"
+                     f"{p.read_text(encoding='utf-8')}\n")
 
     # ── Statistical reports ──────────────────────────────────────────
     # .glob("stats_*.md") finds all files matching "stats_*.md"
     for fn in sorted(pad_dir.glob("stats_*.md")):
         # fn.stem is the filename without extension: "stats_report.md" → "stats_report"
-        parts.append(f"── {fn.stem} ──\n{fn.read_text(encoding='utf-8')}\n")
+        parts.append(f"── Statistical tests ──\n{fn.read_text(encoding='utf-8')}\n")
 
     # ── Red team and bias audit ──────────────────────────────────────
-    for name in ["06_red_team", "065_bias", "01_definitions", "02_decomposition"]:
+    # Human labels, not file names: the writer quotes these labels, and
+    # once cited "[analysis_results.json]" as if it were a source
+    for name, label in [("06_red_team", "Red-team critique of the corpus"),
+                        ("065_bias", "Bias audit of the corpus"),
+                        ("01_definitions", "Key term definitions"),
+                        ("02_decomposition", "Research questions by language")]:
         p = pad_dir / f"{name}.md"
         if p.exists():
-            parts.append(f"── {name} ──\n{p.read_text(encoding='utf-8')}\n")
+            parts.append(f"── {label} ──\n{p.read_text(encoding='utf-8')}\n")
 
     # ── Simulation results (if the user ran simulate mode) ───────────
     p = pad_dir / "simulation_report.md"
     if p.exists():
-        parts.append(f"── simulation ──\n{p.read_text(encoding='utf-8')}\n")
+        parts.append(f"── Coding-assistant simulation results ──\n{p.read_text(encoding='utf-8')}\n")
 
     # Join all parts into one big string
     return "\n".join(parts)
@@ -771,6 +781,16 @@ def _fact_check(text, by_idx, cards, api_key, model, findings=""):
             fixed = fixed.replace(original, "" if fix.upper() == "DELETE" else fix, 1)
     fixed = re.sub(r"[ \t]{2,}", " ", fixed)      # Tidy gaps left by deletions
     return fixed, flagged
+
+
+def _strip_file_refs(text):
+    """Drop bracketed/parenthesised file-name citations and bare file names."""
+    text = re.sub(r"\s*[\[(][^\])\n]*\.(?:json|md|csv)[^\])\n]*[\])]", "", text)
+    text = re.sub(r"\b(?:the\s+)?[\w-]+\.(?:json|md|csv)(?:\s+files?)?\b", "our analysis", text,
+                  flags=re.I)
+    # Capitalise it where it now starts a sentence
+    text = re.sub(r"(^|[.!?]\s+)our analysis", r"\1Our analysis", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
 
 
 def _words(text):
