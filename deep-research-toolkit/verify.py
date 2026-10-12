@@ -355,6 +355,10 @@ _LEAD_INS = [
     r"show|shows|showed|suggest|suggests|suggested|reveal|reveals|revealed|reported|reports|"
     r"noted|notes|estimates|estimated)\s+(?:that\s+)?",
     r"(?:according to [^,]+,|teams report(?:ing)?|developers report(?:ing)?)\s*",
+    # "GitHub reports (that) ...", "A 2025 Stack Overflow survey found ...",
+    # "another indicated that ..."
+    r"(?:an?\s+)?(?:[\w&.'’\-]+\s+){0,4}?(?:reports?|reported|says|said|found|finds|"
+    r"estimates|claims|notes|states|indicated|indicates|showed|shows)\s+(?:that\s+)?",
 ]
 
 
