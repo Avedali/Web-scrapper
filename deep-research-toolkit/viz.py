@@ -19,12 +19,13 @@ from the kind of data being shown:
   - Part of a whole → treemap (easier to read than a pie chart)
 
 Two groups of charts:
-  Findings (charts_paper/, charts_slide/): what the evidence shows. The
-     spread of figures sources report for the brief's key measures, how
-     much evidence backs each key finding, and the simulation results.
+  Findings (charts_paper/, charts_slide/): what the evidence shows. One
+     chart per key finding of the brief, drawn from the figures its sources
+     report (e.g. "Young developers lost 13% of jobs while older ones
+     gained 6-9%"), then the simulation results.
   Appendix (charts_paper/appendix/, charts_slide/appendix/): how the
-     research was done. Sentiment by source type and language, language
-     coverage, topics by language, the mix of source types.
+     research was done. Sources per theme, sentiment by source type and
+     language, language coverage, topics by language, the mix of source types.
 
 All charts use plotly, which produces interactive HTML charts as well as PNG images.
 """
@@ -36,7 +37,8 @@ All charts use plotly, which produces interactive HTML charts as well as PNG ima
 import json  # For loading simulation results and the brief's findings
 import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
-import re    # Reading the AI's list of measures
+import re    # Reading the AI's chart designs
+import datetime   # This year, to mark forecasts on trend charts
 
 from core import call_ai, source_label   # AI calls; plain names for source types
 import verify                             # Checks each charted number against its source
@@ -101,7 +103,7 @@ def run_viz(args):
     # ── Save function (generates both paper and slide versions) ─────
     numbers = {"findings": 0, "appendix": 0}   # Next figure number in each group
 
-    def save(fig, slug, caption, title_slide, appendix=False, keep_legend=False):
+    def save(fig, slug, caption, title_slide, appendix=False, keep_legend=False, note=""):
         """
         Save one chart in both formats (paper and slide).
 
@@ -114,12 +116,18 @@ def run_viz(args):
                           go in an "appendix" subfolder and are numbered A1, A2...
             keep_legend:  True when the colors carry meaning that isn't written
                           on the chart (stacked bars), so slides keep the legend
+            note:         a line of small print under the chart (where the numbers come from)
 
         'nonlocal charts' lets us modify the 'charts' counter from
         inside this nested function. Without it, Python would create
         a new local variable instead of updating the outer one.
         """
         nonlocal charts
+        bottom = (100 if keep_legend else 20) + (30 if note else 0)   # Room under the chart
+        if note:
+            fig.add_annotation(text=note, showarrow=False, xref="paper", yref="paper",
+                               x=0, y=0, yshift=-bottom - 52, xanchor="left", yanchor="bottom",
+                               font=dict(size=11, color="#6B6B6B"))
         group = "appendix" if appendix else "findings"
         numbers[group] += 1
         number = f"A{numbers[group]}" if appendix else str(numbers[group])
@@ -139,6 +147,8 @@ def run_viz(args):
             font_size=11,            # Body text size
             template="plotly_white",  # Clean white template with gridlines
         )
+        if note:
+            fig.update_layout(margin=dict(b=bottom + 60))   # Axis title plus the note
         # Save as PNG image at 2× resolution (high quality for printing).
         # width/height are in pixels. 900×550 fits well in a paper.
         # The try/except is there because write_image needs the 'kaleido'
@@ -180,7 +190,7 @@ def run_viz(args):
             yaxis_showgrid=False,
             showlegend=keep_legend,    # Usually no legend: labels are on the chart itself
             legend=dict(orientation="h", yanchor="top", y=-0.12, x=0),
-            margin=dict(l=20, r=20, t=60, b=110 if keep_legend else 20),
+            margin=dict(l=20, r=20, t=90, b=bottom + (60 if note else 0)),
         )
         # Save as PNG (larger, for projection) and HTML (interactive, for zooming).
         # Same kaleido guard as above.
@@ -214,38 +224,74 @@ def run_viz(args):
         with open(os.path.join(args.corpus, "corpus.json"), encoding="utf-8") as f:
             by_idx = {int(src["idx"]): src for src in json.load(f)}
 
-        # ── The figures sources report for the brief's key measures ──
-        # One chart per measure that several sources report as a number
-        # (e.g. change in coding speed). Each dot is one source's figure.
+        # ── One chart per key finding ───────────────────────────────
+        # Chart 1 shows the figures behind key finding 1, and so on. For
+        # example: "Developer use of AI tools rose from 76% to 84% in a year"
+        # (a trend), or the productivity gains tool makers report next to
+        # those independent studies measured (bars).
         api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            print("   No API key: skipping the charts of reported figures (they need one AI call)")
+            print("   No API key: skipping the findings charts (each needs one AI call)")
         else:
-            for m in _measures(brief, by_idx, api_key, args.model):
-                pts = sorted(m["points"], key=lambda p: p["value"])
-                # A "+" sign only on measures of change ("+55% faster"), not on shares
-                signed = (min(p["value"] for p in pts) < 0 or bool(re.search(
-                    r"change|effect|difference|increase|decrease|reduction|gain", m["name"], re.I)))
-                colors = [ACCENT if p["tool_maker"] else DARK if p["research"] else MUTED for p in pts]
-                labels = _unique([p["label"] for p in pts])
-                fig = go.Figure(go.Scatter(
-                    x=[p["value"] for p in pts], y=labels, mode="markers+text",
-                    marker=dict(size=14, color=colors),
-                    text=[_fmt(p["value"], m["unit"], signed) for p in pts], textposition="middle right",
-                    customdata=[p["source"] for p in pts],
-                    hovertemplate="%{y}: %{text}<br>%{customdata}<extra></extra>",
-                    showlegend=False))
-                lo, hi = min(p["value"] for p in pts), max(p["value"] for p in pts)
-                if lo < 0 < hi:
-                    fig.add_vline(x=0, line_color=GRAY, line_width=1)   # "No change" line
-                span = (hi - lo) or abs(hi) or 1
-                fig.update_xaxes(range=[min(0, lo) - 0.05 * span, max(0, hi) + 0.3 * span],
-                                 title=f"{m['name']} ({m['unit']})<br><sup>Studies differ in "
-                                       "method and sample, so the figures are not directly "
-                                       "comparable.</sup>")
-                save(fig, "reported_" + re.sub(r"\W+", "_", m["name"].lower()).strip("_")[:40],
-                     f"{m['name']}: the figure each source reports",
-                     _headline(m["name"], pts, m["unit"], signed))
+            this_year = datetime.date.today().year
+            for c in _theme_charts(brief, by_idx, api_key, args.model):
+                pts, unit = c["points"], c["unit"]
+                signed = any(p["lo"] < 0 for p in pts)
+                show = lambda p: (_fmt(p["lo"], unit, signed) if p["lo"] == p["hi"] else
+                                  f"{_fmt(p['lo'], unit, signed)} to {_fmt(p['hi'], unit, signed)}" if signed
+                                  else f"{p['lo']:g}-{_fmt(p['hi'], unit)}")
+                for p in pts:
+                    p["hover"] = f"{p['label']}: {show(p)}<br>{p['source']}"
+                fig = go.Figure()
+                if c["kind"] == "bars":
+                    # Horizontal bars in the AI's order, top to bottom. The bar
+                    # the title is about is red, the others gray (or all navy
+                    # when none is marked). A range ("35-45%") is a bar from 35 to 45.
+                    marked = any(p["highlight"] for p in pts)
+                    colors = [ACCENT if p["highlight"] else GRAY if marked else DARK for p in pts]
+                    fig.add_trace(go.Bar(
+                        y=_unique([_wrap(p["label"]) for p in pts]),
+                        x=[p["hi"] - p["lo"] if p["lo"] != p["hi"] else p["hi"] for p in pts],
+                        base=[p["lo"] if p["lo"] != p["hi"] else 0 for p in pts],
+                        orientation="h", marker_color=colors,
+                        text=[show(p) for p in pts], textposition="outside", cliponaxis=False,
+                        hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+                    fig.update_layout(yaxis_autorange="reversed", bargap=0.35)
+                    if signed:
+                        fig.add_vline(x=0, line_color=GRAY, line_width=1)   # "No change" line
+                    share = re.search(r"%\s*of", unit)   # "% of developers", not "% gain"
+                    if share and max(p["hi"] for p in pts) <= 100 and not signed:
+                        fig.update_xaxes(range=[0, 108])   # Shares on a 0-100% scale
+                    fig.update_xaxes(title=unit)
+                else:
+                    # One line per series (label), years along the bottom.
+                    # Forecasts (years after this one) get an open marker.
+                    series = {}
+                    for p in pts:
+                        series.setdefault(p["label"], []).append(p)
+                    palette = iter([ACCENT, DARK, MUTED, GRAY])
+                    for name, sp in sorted(series.items(), key=lambda kv: not any(p["highlight"] for p in kv[1])):
+                        sp.sort(key=lambda p: p["year"])
+                        future = [int(p["year"]) > this_year for p in sp]
+                        fig.add_trace(go.Scatter(
+                            x=[int(p["year"]) for p in sp], y=[p["hi"] for p in sp], name=name,
+                            mode="lines+markers+text", line=dict(color=next(palette, GRAY), width=2),
+                            marker=dict(size=10, symbol=["circle-open" if f else "circle" for f in future]),
+                            text=[show(p) + (" (forecast)" if f else "") for p, f in zip(sp, future)],
+                            textposition="top center", cliponaxis=False,
+                            hovertext=[p["hover"] for p in sp], hoverinfo="text"))
+                    fig.update_xaxes(title="", dtick=1, tickformat="d")   # Years at true distances
+                    if re.search(r"%\s*of", unit):
+                        fig.update_yaxes(range=[0, 105])   # Shares on a 0-100% scale
+                    fig.update_yaxes(title=unit)
+                # Which sources the numbers come from, as the brief cites them ([85])
+                cited = ", ".join(f"[{i}]" for i in dict.fromkeys(p["idx"] for p in pts) if i is not None)
+                title = c["title"] or c["theme"]
+                save(fig, re.sub(r"\W+", "_", c["theme"].lower()).strip("_")[:40],
+                     f"{c['theme']}: {title}", _wrap(title, 70),
+                     keep_legend=c["kind"] == "trend" and len({p["label"] for p in pts}) > 1,
+                     note=f"Sources: {cited} in the brief's references. The figures come from "
+                          "different studies and samples.")
 
     # ════════════════════════════════════════════════════════════════
     # APPENDIX: charts about how the research was done
@@ -690,123 +736,160 @@ def run_viz(args):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# THE BRIEF'S KEY MEASURES (for the findings charts)
+# ONE CHART PER KEY FINDING (the findings charts)
 # ════════════════════════════════════════════════════════════════════════
 
-MAX_MEASURES = 6      # Charts of reported figures
-MIN_POINTS = 3        # A measure needs figures from at least this many sources
+MAX_NUMBERED = 80     # Findings with numbers shown to the AI for one theme
+MAX_BARS = 8          # Bars (or points) in one chart
 
 
-def _measures(brief, by_idx, api_key, model):
+def _theme_charts(brief, by_idx, api_key, model):
     """
-    Group the brief's findings into measures that several sources report as
-    a number ("Change in coding speed with AI assistants (%)"), one AI call.
-    Every figure is then checked in code: the number must appear in the
-    finding AND in one of its sources, or it is left out. Returns
-    [{"name", "unit", "points": [{"value", "label", "source", "tool_maker",
-    "research", "group"}]}], keeping measures with at least MIN_POINTS figures.
-    """
-    findings = {f["id"]: f for f in brief.get("findings", [])}
-    keys = "\n".join(f"- {t['title']}: {t['key_finding']}" for t in brief.get("themes", [])
-                     if t.get("key_finding"))
-    reply = call_ai(
-        f"RESEARCH QUESTION: {brief.get('question', '')}\n\nKEY FINDINGS:\n{keys}\n\n"
-        f"Below are the findings the brief is written from (ID, claim). Choose up to "
-        f"{MAX_MEASURES} MEASURES that best illustrate the key findings and that at least "
-        f"{MIN_POINTS} findings report as a number, for example 'Change in coding speed with "
-        "AI assistants (%)' or 'Share of AI-generated code with security flaws (%)'. A "
-        "measure is an outcome in the world the research question asks about (speed, quality, "
-        "cost, jobs, adoption...), never a count of sources, studies or citations. Name "
-        "each in plain words a non-specialist understands, with its unit.\n"
-        "Format, exactly:\n"
-        "MEASURE: <plain name, with unit in brackets>\n"
-        "- C12 | <the number; negative if the finding reports a decrease, e.g. 19% slower "
-        "on a speed measure is -19> | <who measured and on whom, at most 8 plain words> | "
-        "<who did the study: tool maker (a company selling AI coding tools, e.g. GitHub, "
-        "Microsoft), independent study, survey, or other>\n\n"
-        "FINDINGS:\n" + "\n".join(f"{i}: {f['claim']}" for i, f in findings.items()),
-        api_key, model, temp=0) or ""
+    For each theme of the brief, ask the AI which of the theme's figures show
+    its key finding, and how: as bars (figures side by side, e.g. "69% of
+    CEOs say AI is changing their business" next to "1% call their AI use
+    mature") or as a trend (the same figure in different years, e.g.
+    developers using AI tools: 76% in 2024, 84% in 2025).
 
-    measures, current = [], None
+    Code then checks every number: a value must appear in its finding and in
+    one of that finding's sources, a year must appear in the finding, and
+    the title may only contain numbers that are on the chart. Values that
+    fail are left out; a title that fails is replaced by the theme's name.
+
+    Returns [{"theme", "kind" ("bars"/"trend"), "title", "unit",
+    "points": [{"label", "lo", "hi", "year", "highlight", "idx", "source"}]}].
+    """
+    by_theme = {}
+    for f in brief.get("findings", []):
+        if re.search(r"\d", f["claim"]):
+            by_theme.setdefault(f.get("theme"), []).append(f)
+
+    charts = []
+    for t in brief.get("themes", []):
+        found = {f["id"]: f for f in by_theme.get(t["title"], [])[:MAX_NUMBERED]}
+        if len(found) < 2:
+            print(f"   {t['title']}: fewer than 2 findings with numbers, no chart")
+            continue
+        reply = call_ai(
+            f"RESEARCH QUESTION: {brief.get('question', '')}\n"
+            f"THEME: {t['title']}\nKEY FINDING OF THIS THEME: {t.get('key_finding', '')}\n\n"
+            "Below are this theme's findings that contain numbers (ID: claim). Design ONE chart "
+            "that shows a reader what this theme found, using these numbers. Choose:\n"
+            "- bars: figures side by side. Every bar is the same kind of number in the same unit "
+            "(e.g. all '% of developers' or all '% change in productivity'), and the contrast "
+            "between bars is the point (e.g. what tool makers claim vs what independent studies "
+            "measured; young vs older developers; what executives expect vs what they have done).\n"
+            "- trend: the same figure in different years (e.g. share of developers using AI tools "
+            "in 2024 and 2025; a forecast for 2028 counts too).\n"
+            "- none: if no 2 numbers here can honestly go on one chart.\n"
+            "The chart must be about the subject of the research (what AI is doing to "
+            "productivity, jobs, companies, code...), never about the sources themselves.\n\n"
+            "Format, exactly:\n"
+            "CHART: bars | trend | none\n"
+            "TITLE: <what the chart shows, as a plain sentence a non-specialist understands, at "
+            "most 14 words, using only numbers from the chart, e.g. 'Young developers lost jobs "
+            "while older ones gained'>\n"
+            "UNIT: <e.g. % of developers>\n"
+            f"Then 2 to {MAX_BARS} lines, in the order to show them:\n"
+            "- C12 | <label: who or what this number is about, and who measured it, at most 7 "
+            "plain words, e.g. 'Developers aged 22-25 (Stanford)'> | <the number as written in "
+            "the finding, e.g. 55 or 35-45; negative for a decrease> | <year, for a trend; "
+            "otherwise empty> | <* if this is the number the title is about, otherwise empty>\n\n"
+            "FINDINGS:\n" + "\n".join(f"{i}: {f['claim']}" for i, f in found.items()),
+            api_key, model, temp=0) or ""
+        chart = _read_chart(reply, found, by_idx)
+        if not chart:
+            print(f"   {t['title']}: no chart (the AI found no comparable numbers)")
+            continue
+        chart["theme"] = t["title"]
+        charts.append(chart)
+    return charts
+
+
+def _read_chart(reply, found, by_idx):
+    """Read one chart from the AI's reply and check its numbers (see _theme_charts)."""
+    def field(name):
+        m = re.search(rf"^\W*{name}\W*:\s*(.+)$", reply, re.I | re.M)
+        return m.group(1).strip().strip("*").strip() if m else ""
+
+    kind = field("CHART").lower()
+    kind = "trend" if "trend" in kind else "bars" if "bar" in kind else ""
+    if not kind:
+        return None
+    points = []
     for line in reply.splitlines():
-        m = re.match(r"^\W*MEASURE\W*:?\s*(.+)$", line, re.I)
-        if m:
-            name = m.group(1).strip()
-            unit = re.search(r"\(([^)]*)\)\s*$", name)
-            current = {"name": re.sub(r"\s*\([^)]*\)\s*$", "", name), "unit": unit.group(1) if unit else "",
-                       "points": []}
-            measures.append(current)
+        parts = [x.strip() for x in line.strip().lstrip("-• ").split("|")]
+        if len(parts) < 3 or parts[0] not in found:
             continue
-        p = re.match(r"^\W*(C\d+)\s*\|\s*([-+−]?\d+(?:[.,]\d+)?)\s*%?\s*\|\s*([^|]+?)"
-                     r"(?:\s*\|\s*(.+))?$", line.strip())
-        if not (p and current and p.group(1) in findings):
+        f = found[parts[0]]
+        m = re.fullmatch(r"([-+−]?)\s*(\d[\d.,]*)\s*%?(?:\s*(?:-|–|to)\s*(\d[\d.,]*)\s*%?)?", parts[2])
+        if not m:
             continue
-        f = findings[p.group(1)]
-        value = float(p.group(2).replace("−", "-").replace(",", "."))
-        # The check: the number must be in the finding and in one of its sources
-        readings = verify._readings(p.group(2).lstrip("+-−").replace(",", "."))
         sources = [by_idx[s] for s in f["sources"][:3] if s in by_idx]
-        if not (readings & verify.numbers(f["claim"])
-                and any(readings & verify.numbers(s.get("content", "")) for s in sources)):
-            print(f"   left out of the chart (number not found in its source): {p.group(1)} {p.group(2)}")
+        raws = [r for r in (m.group(2), m.group(3)) if r]
+        # The check: each number must be in the finding and in one of its sources
+        if not all(_in_text(r, f["claim"]) and any(_in_text(r, s.get("content", "")) for s in sources)
+                   for r in raws):
+            print(f"   left out of the chart (number not found in its source): {parts[0]} {parts[2]}")
             continue
+        sign = -1 if m.group(1) in ("-", "−") else 1
+        values = sorted(sign * float(_readings_one(r)) for r in raws)
+        year = parts[3] if len(parts) > 3 else ""
+        year = year if re.fullmatch(r"(19|20)\d\d", year) and year in f["claim"] else ""
+        if kind == "trend" and (not year or len(raws) > 1):
+            continue   # A trend point needs a year written in its finding, and one value
         lead = sources[0] if sources else {}
-        # Who did the study (the AI reads it from the finding: "A GitHub study
-        # found..."). The website quoting it can be a blog, so the site's
-        # own type is only the fallback.
-        who = (p.group(4) or "").lower()
-        if not who:
-            who = ("tool maker" if "vendor" in (lead.get("quality") or "") else
-                   "independent study" if lead.get("quality") == "academic" else "other")
-        kind = ("AI tool maker" if "tool" in who else "independent study" if "independent" in who
-                else "survey" if "survey" in who else "")
-        current["points"].append({
-            "value": value,
-            "label": p.group(3).strip()[:50] + (f" ({kind})" if kind else ""),
+        points.append({
+            "label": parts[1][:60] or parts[0],
+            "lo": values[0], "hi": values[-1], "year": year,
+            "highlight": len(parts) > 4 and "*" in parts[4],
+            "idx": lead.get("idx"),
             "source": f"{lead.get('title', '')[:80]} ({lead.get('domain', '')})",
-            "tool_maker": kind == "AI tool maker",
-            "research": kind == "independent study",
-            "group": {"AI tool maker": "AI tool makers", "independent study": "independent studies",
-                      "survey": "surveys"}.get(kind, "other sources"),
         })
-    return [m for m in measures if len(m["points"]) >= MIN_POINTS][:MAX_MEASURES]
+    points = points[:MAX_BARS]
+    if len(points) < 2:
+        return None
+
+    # The title may only use numbers that are on the chart
+    title = field("TITLE")
+    allowed = set()
+    for p in points:
+        for v in (p["lo"], p["hi"]):
+            allowed |= verify._readings(f"{abs(v):g}") | {f"{round(abs(v)):g}"}   # 54.9 may be written 55
+        allowed.add(p["year"])
+    unknown = {n for n in re.findall(r"\d+(?:[.,]\d+)?", title)
+               if not (verify._readings(n.replace(",", ".")) & allowed)}
+    if unknown or not title:
+        if title:
+            print(f"   chart title replaced (numbers not on the chart: {', '.join(sorted(unknown))}): {title}")
+        title = ""
+    return {"kind": kind, "title": title, "unit": field("UNIT"), "points": points}
 
 
-def _headline(name, pts, unit, signed):
-    """
-    The slide title for a chart of reported figures: what the figures say,
-    worked out from the points so no number in it is made up. Examples:
-      "Change in coding speed: AI tool makers report +26% to +55%,<br>independent studies -19% to +21%"
-      "Change in coding speed: 5 of 7 sources report an increase,<br>2 a decrease"
-      "Change in coding speed: all 4 sources report an increase,<br>from +10% to +55%"
-      "Share of AI code with security flaws: sources report<br>from 25% to 62%"
-    """
-    def spread(values):
-        lo, hi = min(values), max(values)
-        return _fmt(lo, unit, signed) if lo == hi else f"{_fmt(lo, unit, signed)} to {_fmt(hi, unit, signed)}"
+def _in_text(raw, text):
+    """True if the number `raw` ("55", "1", "0,47") is written in `text`."""
+    if verify._readings(raw.replace(",", ".")) & verify.numbers(text):
+        return True
+    # numbers() skips single digits ("only 1% call it mature"), so look for those directly
+    return bool(re.search(rf"(?<![\d.,]){re.escape(raw)}(?![\d])", text or ""))
 
-    groups = {}   # "AI tool makers" → [55, 26], in the order below
-    for kind in ["AI tool makers", "independent studies", "surveys", "other sources"]:
-        values = [p["value"] for p in pts if p["group"] == kind]
-        if values:
-            groups[kind] = values
-    up = sum(p["value"] > 0 for p in pts)
-    down = sum(p["value"] < 0 for p in pts)
-    values = [p["value"] for p in pts]
 
-    if "AI tool makers" in groups and "independent studies" in groups:
-        return (f"{name}: AI tool makers report {spread(groups['AI tool makers'])},<br>"
-                f"independent studies {spread(groups['independent studies'])}")
-    if signed and up and down:
-        return f"{name}: {up} of {len(pts)} sources report an increase,<br>{down} a decrease"
-    if len(groups) >= 2:
-        (k1, v1), (k2, v2) = list(groups.items())[:2]
-        return f"{name}: {k1} report {spread(v1)},<br>{k2} {spread(v2)}"
-    if signed and up == len(pts):
-        return f"{name}: all {len(pts)} sources report an increase,<br>from {spread(values)}"
-    if signed and down == len(pts):
-        return f"{name}: all {len(pts)} sources report a decrease,<br>from {spread(values)}"
-    return f"{name}: sources report<br>from {spread(values)}"
+def _readings_one(raw):
+    """One number from its text: "1,000" → 1000, "0,47" → 0.47."""
+    r = sorted(verify._readings(raw))
+    return r[0] if len(r) == 1 else raw.replace(",", "")
+
+
+def _wrap(text, width=28):
+    """Break a long label into lines of about `width` characters for the chart axis."""
+    lines, line = [], ""
+    for word in text.split():
+        if line and len(line) + len(word) + 1 > width:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}".strip()
+    return "<br>".join(lines + [line])
 
 
 def _fmt(value, unit, signed=False):
