@@ -194,8 +194,9 @@ def merge_claims(cache, by_idx):
     """
     Turn the checked claims into findings: [{"id": "C1", "claim", "sources":
     [idx...] (strongest first), "quotes": {idx: quote}}]. Claims are merged
-    when they mean the same (similarity >= MERGE_SIMILARITY) AND state the
-    same numbers -- "55% faster" and "26% faster" stay apart however alike.
+    when they mean the same (similarity >= MERGE_SIMILARITY) AND their numbers
+    agree (one's are among the other's) -- "55% faster" and "26% faster" stay
+    apart however alike.
     """
     flat = []
     for key, entry in cache.items():
@@ -212,10 +213,19 @@ def merge_claims(cache, by_idx):
         emb = model.encode([c["claim"] for c in flat], batch_size=64, convert_to_tensor=True)
         communities = util.community_detection(emb, threshold=MERGE_SIMILARITY, min_community_size=1)
         for community in communities:
-            by_numbers = {}
-            for i in community:   # Same meaning AND same numbers
-                by_numbers.setdefault(frozenset(verify.numbers(flat[i]["claim"])), []).append(i)
-            groups += list(by_numbers.values())
+            # Same meaning AND compatible numbers: one source's "19% slower"
+            # and another's "16 developers were 19% slower" are the same study;
+            # "55% faster" and "26% faster" are not. Most specific claim first.
+            members = sorted(community, key=lambda i: -len(verify.numbers(flat[i]["claim"])))
+            sub = []   # [(numbers of the group's most specific claim, [members])]
+            for i in members:
+                nums = verify.numbers(flat[i]["claim"])
+                home = next((g for g in sub if nums <= g[0]), None)
+                if home:
+                    home[1].append(i)
+                else:
+                    sub.append((nums, [i]))
+            groups += [m for _, m in sub]
     else:
         seen = {}
         for i, c in enumerate(flat):   # Without the matching model: identical text only
@@ -224,10 +234,14 @@ def merge_claims(cache, by_idx):
 
     findings = []
     for members in groups:
+        most_numbers = max(len(verify.numbers(flat[i]["claim"])) for i in members)
+        # Worded as the strongest source among the most specific claims has it
+        wording = min((i for i in members if len(verify.numbers(flat[i]["claim"])) == most_numbers),
+                      key=lambda i: _rank(by_idx[flat[i]["src"]]))
         members = sorted(members, key=lambda i: _rank(by_idx[flat[i]["src"]]))
         sources = list(dict.fromkeys(flat[i]["src"] for i in members))
         findings.append({
-            "claim": flat[members[0]]["claim"],     # Worded as the strongest source has it
+            "claim": flat[wording]["claim"],
             "sources": sources,
             "quotes": {flat[i]["src"]: flat[i]["quote"] for i in members},
         })
