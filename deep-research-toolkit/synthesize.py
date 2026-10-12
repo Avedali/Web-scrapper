@@ -61,6 +61,7 @@ from core import (
 
 BRIEF_WORDS = 6000             # Only tells the outline how big the paper is
 THESIS_CONTEXT_CHARS = 120000  # Findings + ALL evidence cards for the thesis step
+NEAR_REPEAT = 0.92            # Sentences this alike in meaning count as a repeat
 CLAIMS_PER_PASS = 12           # Findings one writing call turns into prose. Long
                                # sections take several passes, each from DIFFERENT
                                # findings -- no pass sees another's text (shown the
@@ -357,7 +358,8 @@ Output a numbered outline with section titles and one-line argument summaries.""
     sys_prompt = (
         "You write academic research from a ledger of checked findings. RULES:\n"
         "- Every sentence that states a fact carries the ID of the finding it comes\n"
-        "  from, in braces: {C12}. Use ONLY the findings given -- never facts from memory.\n"
+        "  from, in braces: {C12} -- one ID per brace, {C3}{C9} for two. Use ONLY the\n"
+        "  findings given -- never facts from memory.\n"
         "- One finding per sentence, or say clearly which source says what ('GitHub\n"
         "  reports X {C3}, while a Veracode study found Y {C9}').\n"
         "- Say 'studies' or 'several sources' only for a finding with 2+ sources.\n"
@@ -419,11 +421,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
                 print(f"      {p_label} FAILED -- this section is incomplete")
                 return ""
             unfiltered.append(f"## {title} -- {p_label}\n\n{text}")
-            for m in re.finditer(r"^\W*SKIP\W*\{?(C\d+)\}?\s*[-–—:]*\s*(.*)$", text, re.M | re.I):
-                skipped[m.group(1).upper()] = m.group(2).strip() or "no reason given"
+            for m in re.finditer(r"^\W*SKIP\W*\{?C\s*(\d+)\}?\s*[-–—:]*\s*(.*)$", text, re.M | re.I):
+                skipped["C" + m.group(1)] = m.group(2).strip() or "no reason given"
             text = re.sub(r"^\W*SKIP\W*\{?C\d+.*$", "", text, flags=re.M | re.I).strip()
-            ids = {i.upper() for i in re.findall(r"\{(C\d+)\}", text, re.I)}
-            used.update(ids & {f["id"] for f in group})
+            used.update(set(_finding_ids(text)) & {f["id"] for f in group})
             return text
 
         for p, group in enumerate(groups, 1):
@@ -451,10 +452,14 @@ Output a numbered outline with section titles and one-line argument summaries.""
         missing = [f["id"] for f in mine if f["id"] not in used and f["id"] not in skipped]
 
         content = _ids_to_citations("\n\n".join(pieces), findings_by_id)
+        content, recited = _recite_numbers(content, mine, findings, by_idx)
+        if recited:
+            coverage_log.append(f"## {title} -- re-cited\n\n" + "\n".join(f"- {r}" for r in recited))
         content = _drop_repeated_sentences(content, "\n\n".join(c for _, c in sections))
         print(f"      used {len(used)} of {len(mine)} findings"
               + (f", {len(skipped)} skipped with a reason" if skipped else "")
               + (f", {len(missing)} not used" if missing else "")
+              + (f", {len(recited)} re-cited" if recited else "")
               + f" -- {_words(content)} words")
         coverage_log.append(
             f"## {title}\n\nUsed {len(used)} of {len(mine)} findings.\n"
@@ -733,28 +738,101 @@ def _claim_groups(findings, size):
     return out
 
 
+def _finding_ids(text):
+    """
+    Every finding ID in a text, however the writer bracketed it: {C12},
+    {C12, C14}, {C12}{C14}, [C12], {C 12}.
+    """
+    ids = []
+    for group in re.findall(r"[{\[(]\s*(C\s*\d+(?:(?:\s*[,;/&]\s*|\s+)(?:and\s+)?C?\s*\d+)*)\s*[}\])]", text, re.I):
+        ids += ["C" + n for n in re.findall(r"\d+", group)]
+    return ids
+
+
 def _ids_to_citations(text, findings_by_id, most=3):
     """
-    Turn {C12} finding IDs into [n] source numbers, sentence by sentence:
-    at most `most` sources per sentence, shared fairly between the findings it
-    cites (strongest source of each first). Unknown IDs are removed.
+    Turn finding IDs ({C12}, {C12, C14}, ...) into [n] source numbers,
+    sentence by sentence: at most `most` sources per sentence, shared fairly
+    between the findings it cites (strongest source of each first). Unknown
+    IDs and other leftovers in braces ("{Simulation Results}") are removed.
     """
+    id_group = re.compile(r"\s*[{\[(]\s*C\s*\d+(?:(?:\s*[,;/&]\s*|\s+)(?:and\s+)?C?\s*\d+)*\s*[}\])]", re.I)
+
     def one_sentence(sentence):
-        ids = [i.upper() for i in re.findall(r"\{(C\d+)\}", sentence, re.I)]
-        known = [i for i in dict.fromkeys(ids) if i in findings_by_id]
+        known = [i for i in dict.fromkeys(_finding_ids(sentence)) if i in findings_by_id]
         share = max(1, most // max(1, len(known)))
-        for i in dict.fromkeys(ids):
-            if i in known:
-                cites = findings_by_id[i]["sources"][:share]
-                sentence = re.sub(r"\{" + i + r"\}", "[" + ", ".join(map(str, cites)) + "]",
-                                  sentence, count=1, flags=re.I)
-            sentence = re.sub(r"\s*\{" + i + r"\}", "", sentence, flags=re.I)  # Repeats / unknown
-        return re.sub(r"\]\s*\[", ", ", sentence)   # "[3] [7]" → "[3, 7]"
+        done = set()
+
+        def replace(match):
+            mine = [i for i in dict.fromkeys(_finding_ids(match.group(0))) if i in known and i not in done]
+            done.update(mine)
+            cites = list(dict.fromkeys(n for i in mine for n in findings_by_id[i]["sources"][:share]))
+            return " [" + ", ".join(map(str, cites)) + "]" if cites else ""
+
+        sentence = id_group.sub(replace, sentence)
+        sentence = re.sub(r"\s*\{[^{}]*\}", "", sentence)   # Other leftovers in braces
+        sentence = re.sub(r"\]\s*\[", ", ", sentence)        # "[3] [7]" → "[3, 7]"
+        return re.sub(r"\s+([.,;:])", r"\1", sentence)
 
     lines = []
     for line in text.split("\n"):
         lines.append(" ".join(one_sentence(x) for x in re.split(r"(?<=[.!?])[ \t]+", line)))
     return "\n".join(lines)
+
+
+def _recite_numbers(text, section_findings, all_findings, by_idx):
+    """
+    Fix a misattributed number before the gate sees it. The writer sometimes
+    puts a true finding's number next to a neighbouring finding's ID (the
+    METR "19% longer" result, cited to sources that never mention it). For
+    each sentence whose numbers aren't in its cited sources, find the finding
+    that states ALL of them and is closest in meaning -- this section's
+    first -- and cite its sources instead. Returns (text, log lines).
+    """
+    model = verify._match_model()
+    if model is None:
+        return text, []
+    from sentence_transformers import util
+    pools = {}
+
+    def numbers_of(idx):
+        if idx not in pools:
+            pools[idx] = verify.numbers(by_idx.get(idx, {}).get("content", ""))
+        return pools[idx]
+
+    log, out = [], []
+    for line in text.split("\n"):
+        fixed = []
+        for sentence in re.split(r"(?<=[.!?])[ \t]+", line):
+            cites = verify.citations(sentence)
+            nums = verify.number_readings(sentence)
+            pool = set().union(*(numbers_of(c) for c in cites)) if cites else set()
+            if not cites or not nums or all(r & pool for r in nums.values()):
+                fixed.append(sentence)
+                continue
+            plain = re.sub(r"\[[\d,\s]+\]", "", sentence)
+            best = None
+            for candidates in (section_findings, all_findings):
+                fitting = [f for f in candidates
+                           if all(r & verify.numbers(f["claim"] + " " + " ".join(f["quotes"].values()))
+                                  for r in nums.values())
+                           and all(r & set().union(*(numbers_of(x) for x in f["sources"][:3]))
+                                   for r in nums.values())]
+                if fitting:
+                    sims = util.cos_sim(model.encode(plain, convert_to_tensor=True),
+                                        model.encode([f["claim"] for f in fitting], convert_to_tensor=True))[0]
+                    i = int(sims.argmax())
+                    if float(sims[i]) >= 0.5:
+                        best = fitting[i]
+                        break
+            if best:
+                new = re.sub(r"\s*\[[\d,\s]+\]", "", sentence)
+                new = re.sub(r"([.!?]?)$", " [" + ", ".join(map(str, best["sources"][:3])) + r"]\1", new, count=1)
+                log.append(f"{sentence}\n  → {new}  (finding {best['id']}: {best['claim'][:120]})")
+                sentence = new
+            fixed.append(sentence)
+        out.append(" ".join(fixed))
+    return "\n".join(out), log
 
 
 def _banned_pattern(phrase):
@@ -796,19 +874,39 @@ def _keeps_facts(original, fix, phrases):
             and not any(_banned_pattern(p).search(fix) for p in phrases))
 
 
-def _drop_repeated_sentences(text, earlier):
+def _drop_repeated_sentences(text, earlier, same_meaning=NEAR_REPEAT):
     """
-    Remove sentences of `text` that already appear in `earlier`, or earlier
-    in `text` itself (ignoring [n] tags, case and punctuation) -- writing
-    passes sometimes restate the thesis and headline numbers at the start of
-    every section, and fact-check corrections can turn two rewordings of a
-    claim into the same sentence.
+    Remove sentences of `text` already said in `earlier`, or earlier in `text`
+    itself: word for word (ignoring [n] tags, case and punctuation), or -- when
+    the sentence-matching model is installed -- in other words with the same
+    meaning (similarity >= same_meaning). Writing passes reword the thesis and
+    the same list of risks; fact-check corrections can turn two rewordings of
+    a claim into the same sentence.
     """
     def key(sentence):
         no_tags = re.sub(r"\[[\d,\s]+\]", "", sentence)
         return re.sub(r"\W+", " ", no_tags).strip().lower()
 
-    seen = {key(x) for x in re.split(r"(?<=[.!?])\s+", earlier) if len(key(x)) > 40}
+    earlier_keys = [key(x) for x in re.split(r"(?<=[.!?])\s+", earlier) if len(key(x)) > 40]
+    seen = set(earlier_keys)
+    model = verify._match_model() if same_meaning else None
+    kept_emb = []
+    if model is not None and earlier_keys:
+        kept_emb = list(model.encode(earlier_keys, convert_to_tensor=True))
+
+    def said_before(k):
+        if k in seen:
+            return True
+        if model is None:
+            return False
+        import torch
+        from sentence_transformers import util
+        e = model.encode(k, convert_to_tensor=True)
+        if kept_emb and float(util.cos_sim(e, torch.stack(kept_emb)).max()) >= same_meaning:
+            return True
+        kept_emb.append(e)
+        return False
+
     lines = []
     for line in text.split("\n"):   # Line by line, so lists and headings keep their shape
         kept = []
@@ -816,7 +914,7 @@ def _drop_repeated_sentences(text, earlier):
             k = key(sentence)
             if len(k) <= 40:
                 kept.append(sentence)
-            elif k not in seen:      # First time: keep it, and drop any later copy
+            elif not said_before(k):   # First time: keep it, and drop any later copy
                 seen.add(k)
                 kept.append(sentence)
         if kept or not line.strip():
