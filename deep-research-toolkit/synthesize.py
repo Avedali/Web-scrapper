@@ -62,6 +62,16 @@ FACT_CHECK_CHARS = 400000      # Room for the full text of every source a sectio
                                # cites (~100k tokens), so the checker sees it all
 MAX_SOURCES_PER_SECTION = 15   # Sources the evidence map assigns per section
 SOURCES_PER_PART = 5           # Long sections are written in passes of ~5 sources
+
+# Banned phrases that only open a sentence ("Moreover, X") -- removed in code
+TRANSITIONS = [
+    "it's important to note that", "it is important to note that",
+    "it's worth noting that", "it is worth noting that",
+    "furthermore", "moreover", "additionally", "in conclusion", "to summarize",
+    "as we have seen", "as discussed above",
+    "en effet", "par ailleurs", "en conclusion", "darüber hinaus", "des Weiteren",
+    "zusammenfassend lässt sich sagen", "en conclusión", "em conclusão",
+]
                                # (models write ~400-500 words per call, however
                                # long they're asked to write)
 MAX_SECTIONS_PER_SOURCE = 3    # A source is ASSIGNED to at most this many sections
@@ -371,6 +381,11 @@ Output a numbered outline with section titles and one-line argument summaries.""
     weights = {k: max(3, len(assignment.get(k, []))) for k in range(1, len(section_titles) + 1)}
     targets = {k: min(1500, max(350, round(BRIEF_WORDS * w / sum(weights.values()))))
                for k, w in weights.items()}
+    # A section with no assigned sources (often the conclusion) has only the
+    # cards to draw on -- give it the minimum, not a share it can't fill
+    for k in targets:
+        if not assignment.get(k):
+            targets[k] = 350
 
     sections = []  # Will hold (title, content) pairs
 
@@ -431,6 +446,11 @@ Output a numbered outline with section titles and one-line argument summaries.""
                 part = call_ai(*part_args, **part_kwargs)
             if not part:
                 print(f"      part {p} of {n_parts} FAILED -- this section is incomplete")
+            if part and content:
+                # Drop paragraphs a pass repeated from the text so far
+                seen = {re.sub(r"\s+", " ", x).strip() for x in content.split("\n\n")}
+                part = "\n\n".join(x for x in part.split("\n\n")
+                                     if re.sub(r"\s+", " ", x).strip() not in seen)
             content = (content + "\n\n" + part).strip() if part else content
 
         # Store the section. If the AI call failed, use a placeholder.
@@ -461,59 +481,39 @@ Output a numbered outline with section titles and one-line argument summaries.""
     # Scan each section for banned phrases (LLM-speak, buzzwords,
     # metaphors, hollow transitions) and remove them.
     #
-    # Two-pass cleaning:
-    #   Pass 1: Regex find-and-delete of known bad phrases
-    #   Pass 2: If any phrases were found, ask the AI to rewrite
-    #           the section cleanly (the regex leaves awkward gaps)
+    # Deleting a phrase from the middle of a sentence leaves broken grammar
+    # ("Furthermore, a paradigm shift looms." -> ", a looms."), so:
+    #   1. Sentence-opening transitions ("Moreover,") are removed in code --
+    #      the sentence still reads fine without them.
+    #   2. Each sentence containing any other banned phrase is rewritten by
+    #      the AI, and the rewrite is applied only if it kept every number
+    #      and [n] tag and dropped the phrase. Otherwise the sentence stays
+    #      as written: a buzzword is better than a broken sentence.
 
     cleaned = []  # Will hold the cleaned (title, content) pairs
 
     for title, content in sections:
-        c = content   # Working copy (we'll modify this, not the original)
-        flags = 0     # Count how many bad phrases we found
-
-        # Check each banned phrase
-        for phrase in BANNED_PHRASES:
-            # re.compile creates a reusable pattern object.
-            # re.escape makes sure special characters in the phrase
-            # (like parentheses) are treated as literal text, not regex syntax.
-            # re.IGNORECASE means "game-changer" matches "Game-Changer" too.
-            pat = re.compile(re.escape(phrase), re.IGNORECASE)
-
-            # Count how many times this phrase appears
-            hits = len(pat.findall(c))
-
-            if hits:
-                flags += hits           # Add to total count
-                c = pat.sub("", c)      # Remove all occurrences (replace with nothing)
-
-        # Clean up the mess left behind (double spaces, orphaned punctuation).
-        # r"[ \t]{2,}" matches 2+ spaces/tabs only -- NOT newlines, so the
-        # paragraph breaks survive. Then squash 3+ newlines back to 2.
-        c = re.sub(r"[ \t]{2,}", " ", c)
-        c = re.sub(r"\n{3,}", "\n\n", c).strip()
-
-        # If we found and removed phrases, the text probably reads awkwardly.
-        # Ask the AI to rewrite it smoothly while keeping facts and citations.
-        if flags > 0:
-            # Keep the length: an open-ended "rewrite" used to shorten
-            # sections by up to ~20%, dropping facts along the way.
-            rw = call_ai(
-                f"Some buzzwords were just deleted from this text, leaving a few "
-                f"awkward sentences. Fix ONLY those sentences so they read naturally. "
-                f"Keep every other sentence, every fact, number and [n] tag, and the "
-                f"same length. Output only the text.\n\n{c}",
-                api_key, model, temp=0.3,  # Low temp = stay close to original
+        c, n_trans = _drop_transitions(content)
+        bad = _sentences_with_banned(c)
+        n_fixed = 0
+        if bad:
+            reply = call_ai(
+                "Rewrite each sentence below without the phrase(s) in brackets. "
+                "Keep its meaning, every fact, number and [n] tag. For EACH one, "
+                "output exactly two lines:\nORIGINAL: <the sentence, copied exactly>\n"
+                "FIX: <the rewritten sentence>\n\n"
+                + "\n".join(f"{sent}   [{', '.join(ph)}]" for sent, ph in bad),
+                api_key, model, temp=0.3, max_tokens=4000,
             )
-            # Only accept a rewrite that kept (nearly) everything -- a model
-            # once turned a 428-word section into one 28-word sentence.
-            if rw and _words(rw) >= 0.85 * _words(c):
-                c = rw  # Use the rewritten version
-            elif rw:
-                print(f"   {title}: rewrite dropped text -- kept the original instead")
-
-            print(f"   {title}: {flags} phrases cleaned")
-
+            wanted = {sent: ph for sent, ph in bad}
+            for original, fix in re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or ""):
+                original, fix = original.strip().strip('"'), fix.strip().strip('"')
+                if original in wanted and _keeps_facts(original, fix, wanted[original]):
+                    c = c.replace(original, fix)
+                    n_fixed += 1
+        if n_trans or bad:
+            print(f"   {title}: {n_trans} transitions removed, "
+                  f"{n_fixed} of {len(bad)} sentences with buzzwords rewritten")
         cleaned.append((title, c))
 
     # ════════════════════════════════════════════════════════════════
@@ -769,18 +769,60 @@ def _fact_check(text, by_idx, cards, api_key, model, findings=""):
         "PROBLEMS:\n" + "\n".join(flagged),
         api_key, model, temp=0, max_tokens=8000,
     )
+    # Apply fixes only to flagged sentences (the model may "fix" others too),
+    # everywhere they occur. A flagged sentence with no usable fix -- or every
+    # one, if the fix call failed -- is deleted rather than kept: the check
+    # found it unsupported (conservative by design).
+    proposed = {}
+    for raw_original, raw_fix in re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or ""):
+        proposed[raw_original.strip().strip('"')] = raw_fix.strip().strip('"')
     fixed = text
-    fixes = re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or "")
-    if not fixes:
-        # The fix call failed: delete the flagged sentences rather than keep
-        # claims the check found unsupported (conservative by design)
-        fixes = [(f.split(": ", 1)[1], "DELETE") for f in flagged]
-    for raw_original, raw_fix in fixes:
-        original, fix = raw_original.strip().strip('"'), raw_fix.strip().strip('"')
-        if original and original in fixed:
-            fixed = fixed.replace(original, "" if fix.upper() == "DELETE" else fix, 1)
+    for f in flagged:
+        original = f.split(": ", 1)[1]
+        fix = proposed.get(original, "DELETE")
+        fixed = fixed.replace(original, "" if fix.upper() == "DELETE" else fix)
     fixed = re.sub(r"[ \t]{2,}", " ", fixed)      # Tidy gaps left by deletions
+    fixed = re.sub(r"^[ \t]+", "", fixed, flags=re.MULTILINE)
     return fixed, flagged
+
+
+def _banned_pattern(phrase):
+    """Regex for a banned phrase as whole words, case-insensitive."""
+    return re.compile(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", re.IGNORECASE)
+
+
+def _drop_transitions(text):
+    """
+    Remove banned transition words ("Moreover,", "Furthermore,", "En effet,")
+    where they open a sentence, and capitalise what follows. Returns
+    (text, number removed). Mid-sentence occurrences are left to the rewrite.
+    """
+    n = 0
+    for phrase in TRANSITIONS:
+        pat = re.compile(r"(^|(?<=[.!?:]\s)|(?<=\n))" + re.escape(phrase) + r"\s*,?\s+(\w)",
+                         re.IGNORECASE | re.MULTILINE)
+        text, k = pat.subn(lambda m: m.group(1) + m.group(2).upper(), text)
+        n += k
+    return text, n
+
+
+def _sentences_with_banned(text):
+    """[(sentence, [banned phrases in it])] for each sentence with any."""
+    found = []
+    for line in text.split("\n"):
+        for sent in re.split(r"(?<=[.!?])\s+", line):
+            phrases = [p for p in BANNED_PHRASES if _banned_pattern(p).search(sent)]
+            if phrases and sent.strip() and (sent.strip(), phrases) not in found:
+                found.append((sent.strip(), phrases))
+    return found
+
+
+def _keeps_facts(original, fix, phrases):
+    """True if `fix` kept every number and [n] tag and dropped the phrases."""
+    def facts(t):
+        return sorted(re.findall(r"\[[\d,\s]+\]|\d+(?:[.,]\d+)?", t))
+    return (len(fix) > 0.4 * len(original) and facts(fix) == facts(original)
+            and not any(_banned_pattern(p).search(fix) for p in phrases))
 
 
 def _strip_file_refs(text):

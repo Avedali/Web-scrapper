@@ -23,6 +23,7 @@ import json       # Read and write JSON files (a structured data format, like a 
 import re         # "Regular expressions" -- a way to search for patterns in text.
                   # For example, re.sub(r"\s+", " ", text) replaces multiple spaces with one.
 
+import sys        # Stop with a clear message when a required package is missing
 import os         # Work with files and folders: check if a file exists, create folders,
                   # read environment variables (system-wide settings like your API key)
 
@@ -553,6 +554,12 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     """
     from concurrent.futures import ThreadPoolExecutor  # Run downloads in parallel
 
+    # Without a page reader every page "fails" and only search snippets are
+    # kept -- stop now rather than run for half an hour and save nothing
+    if urls and not (_TRAF or _CAMO):
+        sys.exit("\n   No page reader is installed (trafilatura). "
+                 "Run install.py, or: pip install trafilatura")
+
     import time
     started = time.time()
     urls = list(dict.fromkeys(urls))  # Drop duplicates, keep order
@@ -589,6 +596,11 @@ def search_many(jobs, workers=3):
     """
     from concurrent.futures import ThreadPoolExecutor  # Run searches in parallel
 
+    # Without a search library every search "finds nothing" -- stop with
+    # the real reason instead of reporting 0 results and carrying on
+    if jobs and _SEARCH == "none":
+        sys.exit("\n   No web search library is installed (ddgs). "
+                 "Run install.py, or: pip install ddgs")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(lambda job: search_web(job[0], n=job[1], region=job[2]), jobs))
 

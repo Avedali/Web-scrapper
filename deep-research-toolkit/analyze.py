@@ -70,6 +70,27 @@ ANALYZE_CHARS = None
 # The tradeoff is speed: a long source becomes 3-4 model calls
 # instead of 1. For 80 sources, analyze mode takes 3-4× longer.
 
+def _progress(label, total):
+    """
+    Return a tick() to call once per document: it prints a progress line
+    every ~10% with the time left, so a long step (NER takes ~40 minutes
+    on a laptop for ~300 sources) never looks like a hang.
+    """
+    import time
+    state = {"done": 0, "start": time.time()}
+    step = max(1, total // 10)
+
+    def tick():
+        state["done"] += 1
+        done = state["done"]
+        if done % step == 0 or done == total:
+            spent = time.time() - state["start"]
+            left = spent / done * (total - done)
+            print(f"      {label}: {done}/{total} done, "
+                  f"~{left / 60:.0f} min left", flush=True)
+    return tick
+
+
 def _chunk_text(text, chunk_size=450, overlap=50):
     """
     Split a text into overlapping chunks of roughly chunk_size characters.
@@ -282,7 +303,14 @@ def run_analyze(args):
         # .apply() runs a function on every row of a column.
         # So this analyzes the sentiment of every source's content.
         # The result is a column of (score, label) tuples.
-        sentiments = df["content"].apply(get_sentiment)
+        tick = _progress("sentiment", len(df))
+
+        def sentiment_with_progress(text):
+            result = get_sentiment(text)
+            tick()   # Print progress every ~10%
+            return result
+
+        sentiments = df["content"].apply(sentiment_with_progress)
 
         # Split the (score, label) tuples into two separate columns.
         # lambda x: x[0] means "take the first element of the tuple" (the score)
@@ -416,7 +444,14 @@ def run_analyze(args):
         # Classify each source's evidence card when there is one: a single
         # English summary of what the source says, instead of ~7 chunks of
         # raw page text per source -- about 7x faster on a laptop CPU.
-        df["topic_zs"] = df.apply(card_or_text, axis=1).apply(classify)
+        tick = _progress("zero-shot", len(df))
+
+        def classify_with_progress(text):
+            result = classify(text)
+            tick()   # Print progress every ~10%
+            return result
+
+        df["topic_zs"] = df.apply(card_or_text, axis=1).apply(classify_with_progress)
 
         # Show how many documents fell into each category
         # .value_counts() counts occurrences of each unique value
@@ -492,7 +527,9 @@ def run_analyze(args):
 
         # .iterrows() loops through the DataFrame row by row
         # _ means "we don't need the row index, throw it away"
+        tick = _progress("NER", len(df))
         for _, row in df.iterrows():
+            tick()
             try:
                 # CHUNKED: split the source into pieces and run NER on each.
                 # An organization mentioned only on page 3 of a long article
