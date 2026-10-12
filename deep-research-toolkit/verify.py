@@ -1,23 +1,23 @@
 """
-verify.py -- Checks that keep the brief tied to its sources
+verify.py: checks that keep the brief tied to its sources
 ============================================================
 
-Two checks the claim ledger and the fact-check gate are built on:
+The claim ledger and the fact-check gate are built on two checks:
 
   A. quote_in_source(quote, source)
-     Is this quote really in the source? Compared word for word, but
-     forgiving about formatting (spacing, curly quotes, capitals, words split
-     across lines). The only thing it catches is a quote the AI made up.
+     Is this quote in the source? The quote is compared word for word, but
+     differences in formatting (spacing, curly quotes, capitals, words split
+     across lines) are ignored. It catches one problem: a quote the AI made up.
 
   B. judge_support(premise, hypothesis)
      Does the premise (a quote from a source) support the hypothesis (a
-     claim or a sentence of the brief)? Judged by MEANING, by a local model
-     trained for exactly this ("natural language inference"), in 100+
-     languages. It runs on this computer -- free, and independent of the AI
-     that wrote the text, so it doesn't share that AI's blind spots.
+     claim or a sentence of the brief)? A local model trained for this task
+     ("natural language inference") judges the meaning, in 100+ languages.
+     It runs on this computer, so it costs nothing. It is also independent of
+     the AI that wrote the text, so it doesn't repeat that AI's mistakes.
        "the sky is often perceived as blue"  →  "the sky is blue"
-       is NOT supported (the claim drops the hedge): the claim gets corrected
-       to the quote's wording, not deleted.
+       is not supported (the claim drops the hedge). The claim is then
+       corrected to the quote's wording and kept.
 """
 
 import re
@@ -26,7 +26,7 @@ from difflib import SequenceMatcher
 
 
 # ════════════════════════════════════════════════════════════════════════
-# A. IS THE QUOTE REALLY IN THE SOURCE?
+# A. IS THE QUOTE IN THE SOURCE?
 # ════════════════════════════════════════════════════════════════════════
 
 QUOTE_MIN_CHARS = 15     # Shorter "quotes" ("AI tools") prove nothing
@@ -35,21 +35,21 @@ QUOTE_MATCH = 0.9        # Share of the quote that must match, in order
 
 def normalize(text):
     """
-    Text reduced to what matters for matching: same letters and numbers,
-    no formatting. Curly quotes, dashes, capitals, extra spaces, soft hyphens
+    Return the text reduced to what matching needs: the same letters and
+    numbers, without formatting. Curly quotes, dashes, capitals, extra spaces, soft hyphens
     and words split across lines ("produc-\\ntivity") all disappear.
     """
     text = unicodedata.normalize("NFKC", text or "")   # Full-width → normal, "ﬁ" → "fi"
     text = text.replace("­", "")                  # Soft hyphens
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)  # Words split across lines
     text = re.sub(r"[^\w%$€£¥.,]+", " ", text.lower())  # Punctuation → space (keep 4.5%, $1,000)
-    text = re.sub(r"(?<!\d)[.,]|[.,](?!\d)", " ", text)  # ...but only inside numbers
+    text = re.sub(r"(?<!\d)[.,]|[.,](?!\d)", " ", text)  # ...and keep . and , only inside numbers
     return re.sub(r"\s+", " ", text).strip()
 
 
 def quote_in_source(quote, source):
     """
-    True if `quote` appears in `source` -- exactly after normalizing, or with
+    True if `quote` appears in `source`: exactly after normalizing, or with
     at least QUOTE_MATCH of its characters matching in order (pages extracted
     from HTML lose and gain the odd character).
     """
@@ -90,8 +90,8 @@ _nli = {}   # The loaded model, kept so it's loaded once
 
 def judge_available():
     """
-    True if the local judge can run (PyTorch and transformers installed --
-    the full install). Without it, the other checks still run.
+    True if the local judge can run (PyTorch and transformers are installed,
+    as in the full install). Without it, the other checks still run.
     """
     if "available" not in _nli:
         try:
@@ -143,7 +143,7 @@ def judge_support_many(pairs, batch_size=8):
         except Exception:
             if nli["device"] == "cpu":
                 raise
-            # The Mac GPU failed mid-run: move to the CPU for good
+            # The Mac GPU failed mid-run: use the CPU for the rest of the run
             nli["model"].to("cpu")
             nli["device"] = "cpu"
             with torch.no_grad():
@@ -170,10 +170,10 @@ def judge_support(premise, hypothesis):
 # ════════════════════════════════════════════════════════════════════════
 # THE GATE, LAYER 1-2: RULES IN CODE + THE LOCAL JUDGE
 # ════════════════════════════════════════════════════════════════════════
-# Works on any brief whose claims cite sources as [n] -- one synthesize just
+# Works on any brief whose claims cite sources as [n]: one that synthesize
 # wrote, or one a teammate edited by hand (python agent.py verify).
 
-MAX_CITES = 3            # A claim needs 1-3 sources; more says nothing about which
+MAX_CITES = 3            # A claim needs 1-3 sources; with more, the reader can't tell which one says it
 PASSAGES = 5             # Source sentences shown to the judge per claim
 MATCH_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Same as BERTopic
 
@@ -246,9 +246,9 @@ def _match_model():
 
 def best_passages(claim, source_texts, k=PASSAGES):
     """
-    The k sentences of the cited sources that best match `claim` -- by
+    The k sentences of the cited sources that best match `claim`: by
     meaning when the matching model is installed (so an English sentence finds
-    its passage in a Japanese source), else by shared words and numbers.
+    its passage in a Japanese source), otherwise by shared words and numbers.
     """
     candidates = []
     for text in source_texts:
@@ -287,8 +287,8 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
     (list of strings), "passages" (what the judge read)}.
 
     Rules (code): cites at most MAX_CITES sources, all of which exist; every
-    number appears in the cited sources (or, for an uncited sentence -- this
-    study's own results -- in the research findings); not a repeat.
+    number appears in the cited sources (for an uncited sentence, which reports
+    this study's own results, in the research findings instead); not a repeat.
     Judge (local model): the cited passages support the sentence's meaning.
     """
     use_judge = use_judge and judge_available()
@@ -342,11 +342,12 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
 
 def judge_with_passages(items):
     """
-    For each (claim, passages) -- passages best match first -- 'supported',
-    'contradicted' or 'not shown'. Each passage is judged on its own and the
-    best two together, and the strongest support wins: glued together, one
-    supporting sentence got drowned out by unrelated ones. A contradiction
-    only counts from the best-matching passage.
+    Return 'supported', 'contradicted' or 'not shown' for each (claim,
+    passages) item, with the passages ordered best match first. Each passage
+    is judged on its own, and the best two are also judged together; the
+    highest support score decides. (When all passages were joined into one
+    text, a single supporting sentence was outweighed by the unrelated ones.)
+    A contradiction counts only if it comes from the best-matching passage.
     """
     pairs, spans = [], []
     for claim, passages in items:
@@ -388,7 +389,7 @@ def core_claim(claim):
     """
     The fact in a claim, without its lead-in: "and another study indicated
     that 45% of examples failed" → "45% of examples failed". The local judge
-    trips over such lead-ins even when the passage says exactly the fact.
+    can fail on such lead-ins even when the passage states the fact exactly.
     """
     text = claim.split("; ")[-1].strip()
     for _ in range(3):
@@ -421,9 +422,10 @@ def claim_parts(sentence):
 # ════════════════════════════════════════════════════════════════════════
 # THE GATE, LAYER 3: AI REVIEW AND REPAIR
 # ════════════════════════════════════════════════════════════════════════
-# The local judge flags; an AI decides, with the passages in front of it.
-# A stronger model than the writer: in a test, the default model deleted
-# 25 of 25 flagged sentences, this one corrected 19 of 24.
+# The local judge flags sentences; an AI model reads the passages and decides
+# what to do with each one. It is a stronger model than the writer: in a test,
+# the default model deleted 25 of 25 flagged sentences, and this one corrected
+# 19 of 24.
 
 CHECK_MODEL = "google/gemini-2.5-flash"
 
@@ -473,17 +475,18 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
     The gate for one section: rules and the local judge flag sentences, the
     AI reviews the flagged ones and every uncited one, fixes are re-checked by
     the rules, and anything that still fails is removed. Returns
-    (new text, outcomes) -- one outcome per reviewed sentence, for the log --
-    or (text, None) if the AI call failed (the section is then NOT CHECKED).
+    (new text, outcomes), with one outcome per reviewed sentence for the log,
+    or (text, None) if the AI call failed (the section is then marked
+    "NOT CHECKED").
     """
     from core import call_ai
 
     reports = check_sentences(text, by_idx, findings, use_judge=use_judge)
-    # Repeats need no AI: the later copy goes
+    # Repeats need no AI call: the later copy is deleted
     outcomes = []
     for r in reports:
         if "repeats an earlier sentence" in r["problems"]:
-            at = text.rfind(r["sentence"])          # The LATER copy goes
+            at = text.rfind(r["sentence"])          # rfind finds the last copy, which is deleted
             if at != -1:
                 text = text[:at] + text[at + len(r["sentence"]):]
             outcomes.append(f"REPEAT: {r['sentence']}\n  → DELETED")
@@ -556,16 +559,16 @@ PASS_DELETED = 0.20      # At most this share of the draft's statements deleted
 
 def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
     """
-    Re-check a random sample of the final cited sentences against the FULL
-    text of their sources (not the passages the gate picked) -- the automated
-    version of a human audit. Returns a list of (sentence, verdict, reason)
+    Re-check a random sample of the final cited sentences against the full
+    text of their sources, instead of the passages the gate picked. This is
+    an automated version of a human audit. Returns a list of (sentence, verdict, reason)
     with verdict SUPPORTED / PARTLY / UNSUPPORTED / ERROR.
     """
     import random
     from concurrent.futures import ThreadPoolExecutor
     from core import call_ai
 
-    cited = [s for s in statements(text) if citations(s)]   # Real statements, not "[166]" fragments
+    cited = [s for s in statements(text) if citations(s)]   # statements() leaves out "[166]" fragments
     sample = random.Random(seed).sample(cited, min(n, len(cited)))
 
     def one(sentence):
@@ -590,8 +593,8 @@ def make_verdict(audit_results, n_reviewed, n_deleted, not_checked, n_statements
     PASS or NEEDS REVIEW, with the reasons and the numbers behind them.
     NEEDS REVIEW: a section wasn't checked, the audit found more than
     PASS_UNSUPPORTED unsupported, or the gate deleted more than PASS_DELETED
-    of the draft's statements (a brief gutted by its own checker is badly
-    written).
+    of the draft's statements (if the checker had to delete that much, the
+    brief was badly written).
     """
     graded = [v for _, v, _ in audit_results if v != "ERROR"]
     counts = {k: graded.count(k) for k in ("SUPPORTED", "PARTLY", "UNSUPPORTED")}
@@ -695,7 +698,7 @@ def split_brief(brief):
 
 def run_verify(args):
     """
-    python agent.py verify [brief.md] -- run the fact-check gate on a brief
+    python agent.py verify [brief.md]: runs the fact-check gate on a brief
     (by default the newest brief_*.md), e.g. after a teammate edited it.
     Writes <brief>_verified.md (corrected) and <brief>_verify_report.md; the
     original is not changed.

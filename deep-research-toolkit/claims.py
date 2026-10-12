@@ -1,5 +1,5 @@
 """
-claims.py -- The claim ledger: every fact the brief may use, tied to its source
+claims.py: the claim ledger. Every fact the brief may use, tied to its source
 ===============================================================================
 
 Before anything is written, every usable source is read once and its factual
@@ -8,19 +8,20 @@ claims are listed, each with the exact sentence of the source that states it:
   1. EXTRACT  The AI lists each source's claims (in English) with a quote (in
               the source's language). Cached in scratchpad/claims.json, so
               re-running synthesize doesn't pay for this again.
-  2. CHECK    A: the quote must really be in the source (verify.quote_in_source)
-                 -- otherwise the AI made it up, and the claim is dropped.
-              B: the quote must support the claim BY MEANING (the local judge).
+  2. CHECK    A: the quote must appear in the source (verify.quote_in_source).
+                 If it doesn't, the AI made it up, and the claim is dropped.
+              B: the quote must support the claim by meaning (the local judge).
                  A claim that overstates its quote ("the sky is blue" from "the
-                 sky is often perceived as blue") is corrected by the AI to the
-                 quote's hedge and scope, not deleted.
+                 sky is often perceived as blue") is rewritten by the AI to keep
+                 the quote's hedge and scope. The claim stays in the ledger.
   3. MERGE    Sources that report the same finding ("up to 55% faster") become
-              ONE claim backed by several sources -- so it's written once.
-  4. ASSIGN   Each merged claim goes to the ONE section it fits best. A claim
+              one claim backed by several sources, so it's written once.
+  4. ASSIGN   Each merged claim goes to the one section it fits best. A claim
               the conclusion doesn't own can't be restated in the conclusion.
 
-The writer then cites claims, not sources: {C12}. Code turns that into the
-claim's sources [3, 17] -- so a number can't end up on the wrong source.
+The writer cites claim IDs such as {C12} instead of source numbers. Code turns
+each ID into the claim's sources [3, 17], so a number can't end up on the
+wrong source.
 """
 
 import json
@@ -86,7 +87,8 @@ def _parse_claims(answer, wanted):
 def extract_claims(corpus, api_key, model, corpus_dir=SCRATCHPAD):
     """
     Return {idx: [{"claim", "quote"}...]} for every usable source, using and
-    updating the cache in corpus_dir/claims.json. Claims are NOT checked here.
+    updating the cache in corpus_dir/claims.json. This function does not
+    check the claims; check_claims does that.
     """
     path = os.path.join(corpus_dir, CLAIMS_FILE)
     cache = {}
@@ -202,10 +204,10 @@ def _rank(source):
 def merge_claims(cache, by_idx):
     """
     Turn the checked claims into findings: [{"id": "C1", "claim", "sources":
-    [idx...] (strongest first), "quotes": {idx: quote}}]. Claims are merged
-    when they mean the same (similarity >= MERGE_SIMILARITY) AND their numbers
-    agree (one's are among the other's) -- "55% faster" and "26% faster" stay
-    apart however alike.
+    [idx...] (strongest first), "quotes": {idx: quote}}]. Two claims are
+    merged when they mean the same (similarity >= MERGE_SIMILARITY) and their
+    numbers agree (all of one claim's numbers appear in the other). "55% faster"
+    and "26% faster" stay separate however alike the rest of the wording is.
     """
     flat = []
     for key, entry in cache.items():
@@ -222,7 +224,7 @@ def merge_claims(cache, by_idx):
         emb = model.encode([c["claim"] for c in flat], batch_size=64, convert_to_tensor=True)
         communities = util.community_detection(emb, threshold=MERGE_SIMILARITY, min_community_size=1)
         for community in communities:
-            # Same meaning AND compatible numbers: one source's "19% slower"
+            # Same meaning and compatible numbers: one source's "19% slower"
             # and another's "16 developers were 19% slower" are the same study;
             # "55% faster" and "26% faster" are not. Most specific claim first.
             members = sorted(community, key=lambda i: -len(verify.numbers(flat[i]["claim"])))
@@ -265,7 +267,7 @@ def merge_claims(cache, by_idx):
 # ════════════════════════════════════════════════════════════════════════
 
 def outline_blocks(outline, titles):
-    """{title: the outline text under that title} -- what each section is about."""
+    """Return {title: the outline text under that title}, which says what each section is about."""
     lines, blocks, current = outline.split("\n"), {t: t for t in titles}, None
     for line in lines:
         hit = next((t for t in titles if t.lower() in line.lower()), None)
@@ -278,11 +280,12 @@ def outline_blocks(outline, titles):
 
 def assign_claims(findings, titles, outline):
     """
-    {title: [finding...]} -- each finding in the ONE section it's most related
-    to (by meaning, against the section's outline text). Findings unrelated to
-    every section are left out; each section keeps its most related findings
-    -- its share of CLAIMS_IN_BRIEF, at most MAX_CLAIMS_PER_SECTION, and at
-    most MAX_PER_SOURCE_IN_SECTION led by one source.
+    Put each finding in the one section it is most related to (by meaning,
+    compared with the section's outline text). The assignment is
+    {title: [finding...]}. Findings unrelated to every section are left out.
+    Each section keeps its most related findings: its share of
+    CLAIMS_IN_BRIEF, at most MAX_CLAIMS_PER_SECTION, and at most
+    MAX_PER_SOURCE_IN_SECTION led by one source.
     Returns (assignment, number of related findings left unused).
     """
     blocks = outline_blocks(outline, titles)

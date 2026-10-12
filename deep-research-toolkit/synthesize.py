@@ -5,7 +5,8 @@ Run: python agent.py synthesize
 Or:  launcher.py → option 4
 
 Reads everything explore, analyze and stats saved, and writes a research
-brief organized by finding, not by argument:
+brief organized by finding. It reports what the evidence shows and does not
+argue for a position:
 
   Bottom line       3-5 sentences that answer the research question
   Key findings      one per theme, each with its evidence counted in code
@@ -14,10 +15,10 @@ brief organized by finding, not by argument:
   Disagreements     findings that contradict each other, and why
   Gaps              what this evidence cannot tell the reader
   Implications      what it means for the reader
-  Method            how the brief was made (written in code, not by the AI)
+  Method            how the brief was made (written by code, with no AI call)
 
 Every fact comes from the claim ledger (claims.py) and every sentence goes
-through the fact-check gate (verify.py). Run this AFTER explore + analyze + stats.
+through the fact-check gate (verify.py). Run this after explore, analyze and stats.
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -30,21 +31,21 @@ import os    # File/folder operations
 import re    # Pattern matching (used to parse outlines and clean text)
 
 from datetime import datetime       # Timestamps for the final report
-from collections import defaultdict # Auto-initializing dictionary
-from pathlib import Path            # Nice file path handling
+from collections import defaultdict # Dictionary that fills in a default for a missing key
+from pathlib import Path            # Object-based file path handling
 
 from explore import DEFAULT_TOPIC   # The research topic, if none was given
 import claims   # The claim ledger: checked findings the brief is written from
 import verify   # The fact-check gate
 
-# From our shared toolbox:
+# From core.py, the shared helper module:
 from core import (
     call_ai,               # Send prompts to the AI model
     pad,                   # Save work to the scratchpad
     build_evidence_cards,  # 1-2 sentence English summary per source
     NO_EVIDENCE,           # Card text for sources with nothing usable
     LANGUAGES,             # The 9-language config (for APA language notes)
-    BANNED_PHRASES,        # LLM-speak phrases to strip (for voice cleaning)
+    BANNED_PHRASES,        # LLM-speak phrases to remove (used by _plain_words)
 )
 
 
@@ -61,7 +62,8 @@ from core import (
 #
 # No word count is set. A section is as long as its findings need: the writer
 # explains a hard finding in full and states a simple one in a sentence. To
-# get a longer brief, collect more evidence (deepen), don't ask for more words.
+# get a longer brief, collect more evidence with deepen instead of asking for
+# more words.
 # Everything written goes through the fact-check gate (verify.py).
 
 AUDIENCE = "financial industry professionals"   # Who the implications are written for
@@ -125,7 +127,7 @@ def run_synthesize(args):
     # A card is a 1-2 sentence English summary of one source (see
     # core.build_evidence_cards). All cards fit in one prompt, so the
     # framing step sees every source, in every language. Analyze already
-    # built them, so this step reads them from the cache for free.
+    # built them, so this step reads them from the cache with no new AI calls.
     corpus = _load_corpus(args.corpus)
     by_idx = {s["idx"]: s for s in corpus}
     cards = build_evidence_cards(corpus, api_key, model, args.corpus) if corpus else {}
@@ -146,10 +148,10 @@ def run_synthesize(args):
     # ════════════════════════════════════════════════════════════════
     # 1. FRAMING: the research question and the themes that answer it
     # ════════════════════════════════════════════════════════════════
-    # The brief is organized by theme: each theme is a sub-question the
-    # evidence can answer ("Does AI make developers faster?"), not a
-    # position to argue. The AI picks 5-7 themes after reading every card
-    # and the study's own results.
+    # The brief is organized by theme. Each theme is a sub-question the
+    # evidence can answer, such as "Does AI make developers faster?". A theme
+    # is never a position to argue. The AI picks 5-7 themes after reading
+    # every card and the study's own results.
     print(f"\n{'─'*50}\n1. FRAMING (research question and themes)\n{'─'*50}")
     question, themes, framing = _frame_brief(topic, context, evidence, api_key, model)
     titles = [t for t, _ in themes]
@@ -299,8 +301,9 @@ def run_synthesize(args):
     # 4. WHERE THE EVIDENCE DISAGREES
     # ════════════════════════════════════════════════════════════════
     # Pairs of findings on the same subject that contradict each other,
-    # found by the local judge (claims.find_disagreements). An essay hides
-    # these in a counterarguments section; a brief shows them.
+    # found by the local judge (claims.find_disagreements). The brief shows
+    # them in a section of their own, where an essay would put them under
+    # counterarguments.
     print(f"\n{'─'*50}\n4. WHERE THE EVIDENCE DISAGREES\n{'─'*50}")
     in_brief = [f for t in titles for f in assignment.get(t, [])]
     pairs = claims.find_disagreements(in_brief)
@@ -429,7 +432,7 @@ def run_synthesize(args):
     lines.append("## Key findings\n")
     shown = 0
     for n, (title, _) in enumerate(themes, 1):
-        if found.get(n):   # A key finding the gate removed is left out, not shown empty
+        if found.get(n):   # A key finding the gate removed is skipped, so no empty item appears
             shown += 1
             lines.append(f"{shown}. {found[n]}  \n   *{title}. "
                          f"{_evidence_line(checked_text.get(title, ''), by_idx)}*")
@@ -469,16 +472,16 @@ def run_synthesize(args):
 # HELPER FUNCTIONS (used internally by run_synthesize)
 # ════════════════════════════════════════════════════════════════════════
 #
-# Functions whose names start with _ are "private by convention" --
-# they're meant to be used only inside this file, not called from
-# outside. Python doesn't enforce this (unlike some other languages),
-# but the underscore signals "internal use."
+# Functions whose names start with _ are "private by convention": they
+# are meant to be used only inside this file. Python doesn't enforce this
+# (some other languages do). The underscore tells other programmers that
+# the function is for internal use.
 
 def _load_all_evidence(corpus_dir):
     """
-    Load EVERYTHING from the scratchpad into one big text string.
+    Load all the findings files from the scratchpad into one text string.
 
-    This is what the thesis generation AI reads. It includes:
+    This is the text the AI reads when it frames the brief. It includes:
       - Analysis results (sentiment scores, topic distributions)
       - Statistical test results (chi-squared, Mann-Whitney, etc.)
       - Red team critique (what's wrong with the research)
@@ -486,7 +489,7 @@ def _load_all_evidence(corpus_dir):
       - Definitions and decomposition
       - Simulation results (if available)
 
-    Each file is labeled with its name so the AI knows what it's reading.
+    Each file gets a label so the AI knows what it's reading.
     """
     parts = []  # Will hold text chunks from each file
 
@@ -499,9 +502,9 @@ def _load_all_evidence(corpus_dir):
     # These files are summaries (a few KB each), so they're read in full.
     # (They used to be cut at 2,000-3,000 characters each.)
 
-    # ── Analysis results (highest priority -- these ARE the findings) ──
+    # ── Analysis results (highest priority: these are the study's findings) ──
     # (corpus_analyzed.csv is no longer included: it's raw data, and the
-    # evidence cards already give the AI every source properly.)
+    # evidence cards already give the AI a summary of every source.)
     p = pad_dir / "analysis_results.json"
     if p.exists():
         parts.append(f"── Corpus analysis results (sentiment, topics, themes) ──\n"
@@ -514,8 +517,8 @@ def _load_all_evidence(corpus_dir):
         parts.append(f"── Statistical tests ──\n{fn.read_text(encoding='utf-8')}\n")
 
     # ── Red team and bias audit ──────────────────────────────────────
-    # Human labels, not file names: the writer quotes these labels, and
-    # once cited "[analysis_results.json]" as if it were a source
+    # Readable labels are used instead of file names. The writer quotes these
+    # labels, and once cited "[analysis_results.json]" as if it were a source.
     for name, label in [("06_red_team", "Red-team critique of the corpus"),
                         ("065_bias", "Bias audit of the corpus"),
                         ("01_definitions", "Key term definitions"),
@@ -529,9 +532,10 @@ def _load_all_evidence(corpus_dir):
     if p.exists():
         parts.append(f"── Coding-assistant simulation results ──\n{p.read_text(encoding='utf-8')}\n")
 
-    # Join all parts into one big string
-    # A findings file is a few KB. One that's far bigger is a model that got
-    # stuck repeating itself (a 270 KB bias audit once filled every prompt)
+    # Join all parts into one string.
+    # A findings file is a few KB. A much bigger one comes from a model that got
+    # stuck repeating itself (a 270 KB bias audit once filled every prompt), so
+    # each file is cut at FINDINGS_FILE_CHARS.
     parts = [x if len(x) <= FINDINGS_FILE_CHARS else
              x[:FINDINGS_FILE_CHARS] + "\n[... cut: the rest of this file repeats itself]\n"
              for x in parts]
@@ -549,8 +553,8 @@ def _load_corpus(corpus_dir):
 
 def _study_results(corpus_dir):
     """
-    This study's own results, short: the analysis results and the statistical
-    tests (which say in words what each compared). The writer reports them
+    Return this study's own results in short form: the analysis results and
+    the statistical tests (which say in words what each compared). The writer reports them
     with no [n]; the gate checks uncited numbers against them.
     """
     parts = []
@@ -766,7 +770,7 @@ def _evidence_line(text, by_idx):
 
 def _method_section(topic, corpus, usable, by_idx, stats, findings, n_assigned, verdict,
                     model, corpus_dir):
-    """How the brief was made. Written in code from the run's own counts, not by the AI."""
+    """How the brief was made. Written in code from the run's own counts, with no AI call."""
     from collections import Counter
     langs = Counter(s.get("lang", "?") for s in corpus)
     kinds = Counter(_kind(s) for s in corpus)
@@ -894,7 +898,8 @@ def _ids_to_citations(text, findings_by_id, most=3):
         return re.sub(r"\s+([.,;:])", r"\1", sentence)
 
     # An ID placed after the full stop ("... faster. {C12}") belongs to that
-    # sentence -- otherwise it becomes a stray "[166]" fragment of its own
+    # sentence, so it is moved before the full stop. Left where it is, it would
+    # become a stray "[166]" fragment of its own.
     text = re.sub(r"([.!?])((?:\s*[{\[(]\s*C\s*\d+[^}\])\n]*[}\])])+)", r"\2\1", text)
     lines = []
     for line in text.split("\n"):
@@ -908,8 +913,8 @@ def _recite_numbers(text, section_findings, all_findings, by_idx):
     puts a true finding's number next to a neighbouring finding's ID (the
     METR "19% longer" result, cited to sources that never mention it). For
     each sentence whose numbers aren't in its cited sources, find the finding
-    that states ALL of them and is closest in meaning -- this section's
-    first -- and cite its sources instead. Returns (text, log lines).
+    that states all of them and is closest in meaning (this section's findings
+    are searched first), and cite its sources instead. Returns (text, log lines).
     """
     model = verify._match_model()
     if model is None:
@@ -936,8 +941,9 @@ def _recite_numbers(text, section_findings, all_findings, by_idx):
             if not cites and len(re.findall(r"\w+", plain)) < 8:
                 fixed.append(sentence)
                 continue
-            # Uncited: only re-cite a sentence that closely matches one of THIS
-            # section's findings (the writer left off its ID); reasoning stays uncited
+            # Uncited: re-cite a sentence only if it closely matches one of this
+            # section's findings (the writer left off its ID). The writer's own
+            # reasoning stays uncited.
             searches = (section_findings, all_findings) if cites else (section_findings,)
             need = 0.5 if cites else UNCITED_MATCH
             best = None
@@ -1006,8 +1012,8 @@ def _keeps_facts(original, fix, phrases):
 def _drop_repeated_sentences(text, earlier, same_meaning=NEAR_REPEAT):
     """
     Remove sentences of `text` already said in `earlier`, or earlier in `text`
-    itself: word for word (ignoring [n] tags, case and punctuation), or -- when
-    the sentence-matching model is installed -- in other words with the same
+    itself: word for word (ignoring [n] tags, case and punctuation), or, when
+    the sentence-matching model is installed, in other words with the same
     meaning (similarity >= same_meaning). Writing passes reword the thesis and
     the same list of risks; fact-check corrections can turn two rewordings of
     a claim into the same sentence.
@@ -1134,11 +1140,11 @@ def _build_apa(corpus_dir):
 
     Since we usually don't know the author (we scraped the pages),
     we use the title and domain as available fields. When the publication
-    year is unknown, APA uses "n.d." (no date) -- NOT the current year.
+    year is unknown, APA uses "n.d." (no date) and never the current year.
 
     Non-English sources get a language note: [In Japanese].
 
-    We read corpus.json (not sources_meta.json) so each reference number
+    We read corpus.json instead of sources_meta.json, so each reference number
     is the same "idx" the evidence block uses for its [n] tags. deepen
     appends new sources to corpus.json only, so numbering by the metadata
     file would leave the new [n] tags pointing at missing references.
@@ -1165,7 +1171,7 @@ def _build_apa(corpus_dir):
             # LANGUAGES.get(sl, {}).get("name", sl) means:
             # Look up the language code in our LANGUAGES dictionary.
             # If found, get its "name" field.
-            # If not found, just use the code itself (e.g., "ja").
+            # If not found, use the code itself (e.g., "ja").
             lang_note = f" [In {LANGUAGES.get(sl, {}).get('name', sl)}]."
 
         # Build the APA entry.

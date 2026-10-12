@@ -71,7 +71,7 @@ def _camoufox_fetch():
     'CLoader'"). So this first installs pip's own copy of PyYAML when it's missing.
     """
     try:
-        from yaml import CLoader  # noqa: F401 -- only checking it exists
+        from yaml import CLoader  # noqa: F401 (only checking it exists)
     except ImportError:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "-q", "--ignore-installed", "pyyaml"])
@@ -98,7 +98,7 @@ def main():
 
     # The toolkit (and the current versions of pandas, numpy and PyTorch)
     # need Python 3.10 or newer. A Mac's built-in "python3" is 3.9.
-    if sys.version_info < (3, 10):  # noqa: UP036 -- users may run an old Python
+    if sys.version_info < (3, 10):  # noqa: UP036 (users may run an old Python)
         print(f"   This is Python {sys.version.split()[0]} -- the toolkit needs 3.10 or newer.")
         print("   Easiest fix: install Thonny (https://thonny.org), which comes with a")
         print("   recent Python, and run install.py from Thonny. Or install Python")

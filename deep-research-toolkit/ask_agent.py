@@ -95,8 +95,9 @@ def run_ask(args):
 
     # ── Load all research as context ────────────────────────────────
     # This step reads every file in the scratchpad and gives it to the
-    # AI as background knowledge. The AI answers only from this context
-    # and not from its general training data, which prevents hallucination.
+    # AI as background knowledge. The AI is told to answer only from this
+    # context and not from its general training data, which reduces made-up
+    # answers (it can still make mistakes).
     #
     # args.corpus is the path to the scratchpad folder (default: "scratchpad")
     parts, corpus = _load_context(args.corpus)
