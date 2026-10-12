@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# ↑ This line tells your computer "run this file using Python 3."
-#   You don't need to worry about it -- it's just a standard header.
+# ↑ This line tells your computer to run this file with Python 3.
+#   It is a standard header and needs no changes.
 
 """
-install.py -- Run this ONCE. It does everything.
-=============================================
+install.py: run this once to set up the toolkit.
+==================================================
 Open this file in Thonny and click the green Run button.
 Or double-click it. Or type: python install.py
 
@@ -15,9 +15,10 @@ It will:
   4. Test that everything works
   5. Tell you what to do next
 
-(Why not "setup.py"? Python packaging tools treat any file with that name
-as a package build script and may run it -- e.g. "pip install ." would
-execute this installer and hang waiting for input.)
+(The file is not called "setup.py" because Python packaging tools treat
+any file with that name as a package build script and may run it. For
+example, "pip install ." would execute this installer and hang waiting
+for input.)
 """
 
 # These are built-in Python tools we need. They come with Python, no install needed.
@@ -67,7 +68,7 @@ def _camoufox_fetch():
     """
     Download the camoufox browser (~300MB). camoufox needs PyYAML's fast C
     loader, which some Linux/Mac Pythons ship without ("cannot import name
-    'CLoader'") -- so install pip's own copy of PyYAML first when it's missing.
+    'CLoader'"). So this first installs pip's own copy of PyYAML when it's missing.
     """
     try:
         from yaml import CLoader  # noqa: F401 -- only checking it exists
@@ -75,8 +76,8 @@ def _camoufox_fetch():
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "-q", "--ignore-installed", "pyyaml"])
     subprocess.check_call([sys.executable, "-m", "camoufox", "fetch"])
-    # "fetch" can report an error and still exit normally -- check the
-    # browser is really there before saying it's ready
+    # "fetch" can report an error and still exit normally, so check that the
+    # browser is there before saying it's ready
     if subprocess.call(
             [sys.executable, "-c", "from camoufox.pkgman import installed_verstr; installed_verstr()"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
@@ -85,7 +86,7 @@ def _camoufox_fetch():
 
 
 def main():
-    """This is the main function. Everything happens inside here."""
+    """Runs every setup step, from installing packages to the final test."""
 
     # Print a welcome banner so the user knows what's happening
     print("=" * 60)                          # Print a line of 60 "=" characters
@@ -107,7 +108,7 @@ def main():
 
     # Homebrew's Python (the usual "python3" on a developer's Mac) refuses to
     # install packages into itself. Make a private environment in .venv and
-    # run this installer again inside it -- the launcher uses it from then on.
+    # run this installer again inside it. The launcher uses .venv from then on.
     if _externally_managed():
         print("   This Python doesn't allow installing packages into it (Homebrew or")
         print("   system Python), so the toolkit gets its own private copy in .venv ...")
@@ -128,9 +129,9 @@ def main():
     # STEP 1: INSTALL ALL THE LIBRARIES (packages) THE TOOLKIT NEEDS
     # ════════════════════════════════════════════════════════════════════
     #
-    # Python by itself is like an empty kitchen. "Packages" (also called
-    # "libraries") are like appliances -- each one does a specific job.
-    # We need to install about 25 of them. This step does that automatically.
+    # "Packages" (also called "libraries") are code that Python doesn't
+    # include by default, such as pandas for data tables. Each one does a
+    # specific job. This step installs about 25 of them automatically.
 
     print("━" * 50)
     print("STEP 1: Installing Python packages...")
@@ -142,9 +143,9 @@ def main():
 
     # --- Group 1: Basic tools ---
     core = [
-        "requests",    # Makes web requests (like opening a URL in a browser, but in code)
-        "pandas",      # Works with data tables (like Excel but in Python)
-        "langdetect",  # Detects what language a text is written in (English? French? Japanese?)
+        "requests",    # Downloads web pages from code (the same request a browser sends for a URL)
+        "pandas",      # Works with data tables (rows and columns, as in Excel)
+        "langdetect",  # Detects what language a text is written in (e.g. English, French, Japanese)
     ]
 
     # --- Group 2: Web searching and reading web pages ---
@@ -161,7 +162,7 @@ def main():
         "python-hn",        # Searches Hacker News (a popular developer discussion site)
     ]
 
-    # --- Group 4: AI/NLP tools (BIG downloads -- ~2-3 GB total) ---
+    # --- Group 4: AI/NLP tools (large downloads: ~2-3 GB total) ---
     # PyTorch alone is ~2GB. On slow WiFi this can take 30+ minutes.
     # We ask the user if they want the full install or a light version.
     print("\n    The NLP tools (Hugging Face + PyTorch) are ~2-3 GB to download.")
@@ -181,7 +182,7 @@ def main():
         nlp_choice = "n"
 
     if nlp_choice == "n":
-        # Light install: just TextBlob (tiny, fast, English-only but functional)
+        # Light install: TextBlob only (small and fast; works for English only)
         nlp = [
             "textblob",  # Simple sentiment analysis (fallback)
         ]
@@ -190,7 +191,7 @@ def main():
         # Full install: HF transformers + PyTorch + BERTopic
         nlp = [
             "transformers",  # Hugging Face: pretrained AI models for text analysis
-            "torch",         # PyTorch: the engine that runs those AI models (~2GB!)
+            "torch",         # PyTorch: the library that runs those AI models (~2GB)
             "sentencepiece", # Tokenizer the multilingual zero-shot + NER models need
             "protobuf",      # Needed by sentencepiece-based tokenizers
             "bertopic",      # Neural topic modeling (discovers themes in texts)
@@ -200,7 +201,7 @@ def main():
     # --- Group 5: Statistics and chart-making ---
     stats_viz = [
         "scipy",        # Scientific computing: statistical tests (chi-squared, etc.)
-        "pingouin",     # Statistics made easy: effect sizes, power analysis, Bayes Factor
+        "pingouin",     # Ready-made statistics: effect sizes, power analysis, Bayes Factor
         "researchpy",   # Research-formatted statistical output (ready for papers)
         "statsmodels",  # Advanced stats: logistic regression, time series
         "matplotlib",   # Makes charts and graphs (the classic Python chart library)
@@ -242,7 +243,7 @@ def main():
 
         for pkg in packages:
             try:
-                # This is the key line: it runs "pip install <package>" in the background.
+                # This line runs "pip install <package>" in the background.
                 # subprocess.check_call runs a terminal command from Python.
                 # sys.executable is the path to the Python you're using right now.
                 # "-m pip install -q" means "use pip to install quietly (less output noise)."
@@ -253,11 +254,12 @@ def main():
                     stderr=subprocess.PIPE,     # Keep errors, to show why it failed
                     text=True, check=True,
                 )
-                print(f"      {pkg}")  # Success!
+                print(f"      {pkg}")  # Installed
 
             except subprocess.CalledProcessError as e:
                 # If the install fails (bad internet, incompatible package, etc.)
-                # we note it but DON'T crash. The toolkit can work without most packages.
+                # the package goes on the failed list and the installer keeps going.
+                # The toolkit can work without most packages.
                 failed.append(pkg)
                 print(f"      {pkg} (failed -- will work without it)")
                 # pip's last error line says why (skipping its "notice"/warning lines)
@@ -277,9 +279,9 @@ def main():
     # STEP 2: SAVE YOUR API KEY
     # ════════════════════════════════════════════════════════════════════
     #
-    # An API key is like a password that lets your code talk to an AI service.
-    # OpenRouter is the service we use -- it gives access to many AI models
-    # (Claude, GPT, Llama, Mistral, etc.) with one key.
+    # An API key is a secret string that identifies you to an AI service and
+    # lets your code send it requests. The toolkit uses OpenRouter, which gives
+    # access to many AI models (Claude, GPT, Llama, Mistral, etc.) with one key.
     #
     # We save the key in a file called ".env" so you only type it once.
     # Every time the toolkit runs, it reads the key from that file.
@@ -289,7 +291,7 @@ def main():
     print("━" * 50)
 
     # Figure out where to save the .env file (same folder as this script)
-    # os.path.abspath(__file__) = the full path to THIS file (install.py)
+    # os.path.abspath(__file__) = the full path to this file (install.py)
     # os.path.dirname(...) = the folder containing this file
     # os.path.join(..., ".env") = add ".env" to that folder path
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -318,7 +320,7 @@ def main():
     # Wait for the user to type or paste something
     try:
         new_key = input("   > ").strip()   # .strip() removes extra spaces/newlines
-    except (EOFError, KeyboardInterrupt):  # Handle Ctrl+C or weird input
+    except (EOFError, KeyboardInterrupt):  # Handle Ctrl+C or a closed input
         new_key = ""
 
     # Decide which key to use
@@ -337,7 +339,7 @@ def main():
         print("   Key saved to .env")
 
         # Also set it for the current session (so testing works right away)
-        # os.environ is a dictionary of "environment variables" -- system-wide settings
+        # os.environ is a dictionary of "environment variables" (system-wide settings)
         os.environ["OPENROUTER_API_KEY"] = key
 
     # ════════════════════════════════════════════════════════════════════
@@ -357,9 +359,9 @@ def main():
     # importlib.util.find_spec() looks for a package without loading it.
     # If it finds the package, it returns info about it. If not, it returns None.
     if importlib.util.find_spec("camoufox"):
-        # The Python package alone isn't enough -- the browser itself is a
+        # The Python package alone isn't enough. The browser itself is a
         # separate ~300MB download (e.g. when camoufox came in through
-        # requirements.txt). "fetch" is a no-op if it's already there.
+        # requirements.txt). "fetch" does nothing if the browser is already there.
         print("   Camoufox package found -- making sure the browser is downloaded...")
         try:
             _camoufox_fetch()
@@ -382,7 +384,7 @@ def main():
                 # Install the package
                 subprocess.check_call(
                     [sys.executable, "-m", "pip", "install", "-q", "camoufox[geoip]"])
-                # Download the actual browser binary (~300MB)
+                # Download the browser program itself (~300MB)
                 _camoufox_fetch()
                 print("   Camoufox installed!")
             except Exception as e:
@@ -392,7 +394,7 @@ def main():
 
     # ── Browser for simulate's page check (~150MB) ──────────────────────
     # simulate opens every AI-generated page in an invisible browser to see
-    # whether it actually works. Playwright needs its own copy of Chromium
+    # whether it works. Playwright needs its own copy of Chromium
     # (it can also use Google Chrome or Microsoft Edge if you have them).
     if importlib.util.find_spec("playwright"):
         print("\n   Downloading the browser simulate uses to test pages (~150MB)...")
@@ -414,7 +416,7 @@ def main():
             print("\n   Downloading Chrome for saving charts as images (~150MB)...")
             # This download uses Python's own HTTPS, which on a Mac with
             # Python from python.org has no certificates until "Install
-            # Certificates.command" is run -- use certifi's instead
+            # Certificates.command" is run. So this uses certifi's certificates.
             env = dict(os.environ)
             try:
                 import certifi
@@ -447,7 +449,7 @@ def main():
         "pandas": "pandas",
         "trafilatura": "trafilatura",
         "ddgs": "ddgs",
-        "multi_search_engine": "multi_search",  # Note: install ≠ import name!
+        "multi_search_engine": "multi_search",  # Install name ≠ import name
         "HF transformers": "transformers",
         "sentencepiece": "sentencepiece",
         "BERTopic": "bertopic",
@@ -469,7 +471,7 @@ def main():
             print(f"   {name} (not critical)")
 
     # ════════════════════════════════════════════════════════════════════
-    # DONE!
+    # DONE
     # ════════════════════════════════════════════════════════════════════
 
     print("\n" + "=" * 60)
@@ -494,8 +496,8 @@ def main():
 
 
 # ════════════════════════════════════════════════════════════════════════
-# This is the "entry point" -- the very first thing Python runs.
-# It says: "if this file is being run directly (not imported by another
+# This is the "entry point": the code that starts the program.
+# It means: "if this file is being run directly (not imported by another
 # file), call the main() function."
 # ════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

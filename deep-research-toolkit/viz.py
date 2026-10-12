@@ -1,24 +1,24 @@
 """
-viz.py -- Mode 3: Generate charts in two formats.
+viz.py: Mode 3, generates charts in two formats.
 ==================================================
 Run: python agent.py viz
 Or:  launcher.py → option 6
 
-Generates every chart TWICE:
+Generates every chart twice:
   Paper version: information-dense, with axis labels, figure caption,
      and statistical annotations. Goes in the written paper.
   Slide version: minimal, big font, finding as the title, one accent
      color for the point, gray for everything else. Goes in the 5-slide
      presentation.
 
-Chart type selection follows data-to-viz.com logic -- we pick the chart
-type based on what KIND of data we have, not based on habit:
-  - Numeric grouped by categorical → box plot (shows spread, not just averages)
+The chart type follows the data-to-viz.com guide, which picks a chart
+from the kind of data being shown:
+  - Numeric grouped by categorical → box plot (shows the spread as well as the average)
   - Two categoricals → heatmap (shows which combinations are common)
-  - Counts of one categorical → lollipop chart (cleaner than bars)
-  - Part of a whole → treemap (more intuitive than pie chart)
+  - Counts of one categorical → lollipop chart (less ink than bars)
+  - Part of a whole → treemap (easier to read than a pie chart)
 
-Uses plotly (interactive, polished) for all charts.
+All charts use plotly, which produces interactive HTML charts as well as PNG images.
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -69,30 +69,30 @@ def run_viz(args):
         sys.exit("Run 'python agent.py analyze' first.")
 
     df = pd.read_csv(csv_path)  # Load into a DataFrame
-    charts = 0                  # Counter for how many charts we've made
+    charts = 0                  # Counts how many charts have been saved
 
     # ── Color palette ───────────────────────────────────────────────
-    # Design principle: ONE accent color draws the eye to the point.
-    # Everything else is gray or muted. The audience sees the important
-    # thing first because it's the only thing that's not gray.
+    # Design rule: a single accent color marks the main point.
+    # Everything else is gray or muted, so the audience sees the main
+    # point first because it is the only colored element.
     #
     # These are hex color codes (like HTML colors):
     # "#E63946" = a strong red, "#A8DADC" = soft blue, "#B0B0B0" = gray
-    ACCENT = "#E63946"     # Strong red -- for THE point (the thing to notice)
-    MUTED = "#A8DADC"      # Soft blue -- for context (supporting data)
-    GRAY = "#B0B0B0"       # Gray -- for everything non-focal
-    DARK = "#1D3557"       # Dark navy -- for text and strong lines
+    ACCENT = "#E63946"     # Strong red: the main point (the thing to notice)
+    MUTED = "#A8DADC"      # Soft blue: context (supporting data)
+    GRAY = "#B0B0B0"       # Gray: everything else
+    DARK = "#1D3557"       # Dark navy: text and strong lines
 
     # ── Save function (generates both paper and slide versions) ─────
     def save(fig, name, title_paper, title_slide):
         """
-        Save one chart in BOTH formats.
+        Save one chart in both formats (paper and slide).
 
         Parameters:
-            fig          -- the plotly figure object
-            name         -- filename (without extension)
-            title_paper  -- descriptive caption for the paper
-            title_slide  -- finding-as-title for the slide
+            fig:          the plotly figure object
+            name:         filename (without extension)
+            title_paper:  descriptive caption for the paper
+            title_slide:  the finding, used as the slide title
 
         'nonlocal charts' lets us modify the 'charts' counter from
         inside this nested function. Without it, Python would create
@@ -110,12 +110,12 @@ def run_viz(args):
             template="plotly_white",  # Clean white template with gridlines
         )
         # Save as PNG image at 2× resolution (high quality for printing).
-        # width/height in pixels -- 900×550 fits well in a paper.
-        # WRAPPED IN TRY/EXCEPT: write_image needs the 'kaleido' package
-        # to convert plotly charts to static PNG images. If kaleido isn't
-        # installed (common on ARM Macs), this would crash the entire
-        # viz mode. Instead, we catch the error, warn the user, and
-        # continue with just HTML output (which always works).
+        # width/height are in pixels. 900×550 fits well in a paper.
+        # The try/except is there because write_image needs the 'kaleido'
+        # package to turn plotly charts into static PNG images. Without
+        # kaleido (common on ARM Macs), the error would stop the whole
+        # viz mode. So the code catches the error, warns the user once,
+        # and saves HTML files, which need no extra package.
         try:
             fig.write_image(
                 os.path.join(paper_dir, f"{name}.png"),
@@ -124,7 +124,7 @@ def run_viz(args):
                 height=550,
             )
         except Exception as e:
-            # PNG export failed -- save HTML fallback for paper too
+            # PNG export failed, so save an HTML copy for the paper too
             fig.write_html(os.path.join(paper_dir, f"{name}.html"))
             if not hasattr(save, "_warned"):
                 print(f"   PNG export failed -- saving HTML instead ({type(e).__name__})")
@@ -133,15 +133,15 @@ def run_viz(args):
                     print("      Install Google Chrome, or run: plotly_get_chrome")
                 else:
                     print("      pip install kaleido  (for static PNG export)")
-                save._warned = True  # Only warn once, not for every chart
+                save._warned = True  # Warn on the first failed chart only
 
         # ── Slide version ───────────────────────────────────────────
-        # Presentation style: the title IS the finding, big font,
-        # no gridlines, no legend, numbers annotated directly on the chart.
-        # The audience reads the title, glances at the shape, moves on.
+        # Presentation style: the title states the finding, big font,
+        # no gridlines, no legend, numbers written directly on the chart.
+        # The audience reads the title, looks briefly at the shape, and moves on.
         fig.update_layout(
             title=title_slide,         # The finding itself ("Vendor sources skew positive")
-            title_font_size=22,        # Big -- readable from the back of the room
+            title_font_size=22,        # Big enough to read from the back of the room
             title_x=0.02,             # Align title to the left (not centered)
             font_size=14,              # Larger body text for projection
             plot_bgcolor="white",      # White chart area
@@ -159,34 +159,34 @@ def run_viz(args):
                 scale=2, width=1200, height=700,  # Wider for widescreen slides
             )
         except Exception:
-            pass  # Already warned above; HTML below always works
+            pass  # Already warned above; the HTML file below is still saved
 
-        # HTML version: audience can hover over data points, zoom in, etc.
-        # This ALWAYS works (no kaleido needed).
+        # HTML version: the audience can hover over data points, zoom in, etc.
+        # Needs no kaleido, so this file is always saved.
         fig.write_html(os.path.join(slide_dir, f"{name}.html"))
 
         charts += 1
         print(f"   {name}")
 
     # ════════════════════════════════════════════════════════════════
-    # CHART 1: Sentiment by source type (BOX PLOT)
+    # CHART 1: Sentiment by source type (box plot)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHY A BOX PLOT (not a bar chart of averages)?
-    # A bar chart shows one number per group (the average). It hides:
+    # Why a box plot instead of a bar chart of averages:
+    # a bar chart shows one number per group (the average). It hides:
     #   - How spread out the data is within each group
     #   - Whether there are outliers
     #   - Whether the data is skewed
     #
-    # A box plot shows ALL of this:
+    # A box plot shows all three:
     #   - The box = middle 50% of the data (25th to 75th percentile)
     #   - The line in the box = the median (middle value)
     #   - The whiskers = the range (excluding outliers)
     #   - Individual dots = each data point (points="all")
     #
-    # This tells a richer story: "vendor sources are not just more
-    # positive ON AVERAGE -- they're CONSISTENTLY positive (tight box),
-    # while forum sources are all over the place (wide box)."
+    # This supports findings such as: "vendor sources are more positive
+    # on average and also consistently positive (narrow box), while forum
+    # sources vary widely (wide box)."
     #
     # data-to-viz.com: numeric (sentiment) × categorical (quality) → box plot
 
@@ -205,7 +205,7 @@ def run_viz(args):
         # Create a horizontal box plot
         # x = numeric values (sentiment scores)
         # y = categories (quality tiers)
-        # category_orders forces the order we calculated above
+        # category_orders forces the order calculated above
         # color_discrete_sequence sets the box color
         # points="all" shows every individual data point as a dot
         fig = px.box(
@@ -221,8 +221,8 @@ def run_viz(args):
 
         n_total = len(df)
 
-        # Slide title: THE FINDING itself -- computed from the data, so the
-        # slide can't claim a result the corpus doesn't show.
+        # Slide title: the finding itself. It is computed from the data, so
+        # the slide can't claim a result the corpus doesn't show.
         # (Plotly titles use <br> for line breaks, not \n.)
         is_vendor = df["quality"].str.contains("vendor", case=False, na=False)
         if is_vendor.any() and (~is_vendor).any():
@@ -239,26 +239,26 @@ def run_viz(args):
              slide_title)
 
     # ════════════════════════════════════════════════════════════════
-    # CHART 2: Sentiment by language (LOLLIPOP CHART)
+    # CHART 2: Sentiment by language (lollipop chart)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHY A LOLLIPOP (not a bar chart)?
-    # A lollipop chart is a bar chart where the bar is replaced by a
-    # thin line + dot. It looks cleaner and the dot draws the eye to
-    # the actual value. Less visual clutter.
+    # Why a lollipop chart instead of a bar chart:
+    # a lollipop chart is a bar chart where each bar is replaced by a
+    # thin line and a dot. It uses less ink, and the dot marks the exact
+    # value.
     #
     # Each language gets a horizontal line from 0 to its mean sentiment,
     # with a dot at the end showing the value and sample size.
     #
-    # Languages with strong sentiment (far from 0) get the ACCENT color.
-    # Languages near 0 get GRAY. This draws attention to the interesting ones.
+    # Languages with strong sentiment (more than 0.1 away from 0) get the
+    # ACCENT color. Languages near 0 get GRAY, so the strong ones stand out.
     #
     # data-to-viz.com: one numeric per category → lollipop
 
     if "sentiment" in df.columns and "lang" in df.columns:
 
         # Calculate mean sentiment and count per language.
-        # .agg() lets us compute multiple statistics at once:
+        # .agg() computes multiple statistics at once:
         # m = mean of sentiment, n = count of sentiment
         data = df.groupby("lang").agg(
             m=("sentiment", "mean"),   # Mean sentiment
@@ -270,7 +270,7 @@ def run_viz(args):
 
         if len(data) >= 2:  # Need at least 2 languages to compare
 
-            # Create an empty figure (we'll add traces manually)
+            # Create an empty figure (traces are added one by one below)
             # A "trace" in plotly is one visual element (a line, a set of dots, etc.)
             fig = go.Figure()
 
@@ -293,7 +293,7 @@ def run_viz(args):
                 fig.add_trace(go.Scatter(
                     x=[row["m"]],                             # Position: the mean sentiment
                     y=[row["lang"]],                          # Position: the language name
-                    mode="markers+text",                      # Draw a dot AND text
+                    mode="markers+text",                      # Draw a dot and a text label
                     marker=dict(size=14, color=color),        # Dot size and color
                     # Label shows the value and sample size: "+0.15 (n=12)"
                     text=[f"{row['m']:+.2f} (n={int(row['n'])})"],
@@ -317,14 +317,14 @@ def run_viz(args):
                  f"least positive: {lo['lang']} ({lo['m']:+.2f})")
 
     # ════════════════════════════════════════════════════════════════
-    # CHART 3: Language coverage (TREEMAP)
+    # CHART 3: Language coverage (treemap)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHY A TREEMAP (not a pie chart or bar chart)?
-    # A treemap shows part-of-a-whole as nested rectangles. Bigger
-    # rectangles = more sources in that language. It's more intuitive
-    # than a pie chart (humans are bad at comparing angles) and more
-    # compact than a bar chart.
+    # Why a treemap instead of a pie chart or bar chart:
+    # a treemap shows parts of a whole as nested rectangles. Bigger
+    # rectangles = more sources in that language. It is easier to read
+    # than a pie chart (people compare areas better than angles) and
+    # takes less space than a bar chart.
     #
     # data-to-viz.com: counts of one categorical → treemap
 
@@ -351,14 +351,14 @@ def run_viz(args):
              f"{df['lang'].nunique()} languages -- not just English")
 
     # ════════════════════════════════════════════════════════════════
-    # CHART 4: Topic × Language (HEATMAP)
+    # CHART 4: Topic × Language (heatmap)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHY A HEATMAP?
-    # Two categorical variables (language × topic) crossed together.
-    # A heatmap shows the count in each cell as a color: dark = many,
-    # light = few. You can instantly see patterns: "Japanese sources
-    # cluster in the 'workforce' topic, English in 'productivity'."
+    # Why a heatmap: the chart crosses two categorical variables
+    # (language × topic). A heatmap shows the count in each cell as a
+    # color: dark = many, light = few. Patterns show up at a glance, for
+    # example "Japanese sources cluster in the 'workforce' topic, English
+    # in 'productivity'."
     #
     # data-to-viz.com: two categoricals → heatmap/mosaic
 
@@ -369,7 +369,7 @@ def run_viz(args):
 
         # Build a cross-tabulation (contingency table):
         # rows = languages, columns = topics, cells = counts
-        # (sources with no usable evidence have no theme -- leave them out)
+        # (sources with no usable evidence have no theme, so they are left out)
         sub = df[df[topic_col].notna() & (df[topic_col] != "no usable evidence")]
         ct = pd.crosstab(sub["lang"], sub[topic_col])
 
@@ -399,12 +399,12 @@ def run_viz(args):
                  "Which languages discuss which themes")
 
     # ════════════════════════════════════════════════════════════════
-    # CHART 5: Source quality breakdown (LOLLIPOP)
+    # CHART 5: Source quality breakdown (lollipop)
     # ════════════════════════════════════════════════════════════════
     #
-    # Same idea as chart 2: lollipop instead of bar. Shows how many
-    # sources we have in each quality tier. Vendor/SEO sources get
-    # the ACCENT color to draw attention to potential bias.
+    # A lollipop chart, as in chart 2. Shows how many sources there are
+    # in each quality tier. Vendor/SEO sources get the ACCENT color
+    # because they may be biased.
 
     if "quality" in df.columns:
 
@@ -414,7 +414,7 @@ def run_viz(args):
         fig = go.Figure()
 
         for q, c in counts.items():
-            # Highlight vendor and SEO sources (these are the ones to watch out for)
+            # Highlight vendor and SEO sources (the ones most likely to be biased)
             color = ACCENT if "vendor" in q.lower() or "SEO" in q else MUTED
 
             # The stick (horizontal line from 0 to the count)
@@ -469,9 +469,9 @@ def run_viz(args):
 
             if level_col in sim_df.columns and "pro_met" in sim_df.columns:
 
-                # Box plot: share of the PROFESSIONAL (senior) spec each page
-                # met, by prompt level -- tested in a browser by simulate.
-                # This is the experiment's real measure: lines of code say
+                # Box plot: share of the professional (senior) spec each page
+                # met, by prompt level, as tested in a browser by simulate.
+                # This is the experiment's main measure. Lines of code say
                 # little about whether a page does what a product needs.
                 sim_df = sim_df[sim_df["pro_total"].notna() & (sim_df["pro_total"] > 0)].copy()
                 sim_df["spec_pct"] = 100 * sim_df["pro_met"] / sim_df["pro_total"]
@@ -498,7 +498,7 @@ def run_viz(args):
                 # Older simulate results (no browser test): code length instead
                 # Box plot: code length (lines) by skill level
                 # color_discrete_map assigns specific colors to each level:
-                #   layman = gray (not interesting), senior = red (the point)
+                #   layman = gray (baseline), senior = red (the main point)
                 fig = px.box(
                     sim_df, x=level_col, y="lines",
                     color=level_col,
@@ -525,7 +525,7 @@ def run_viz(args):
                      slide_title)
 
         # ── Chart 7: Guardrail behavior ─────────────────────────────
-        # Shows which models handle security risks properly
+        # Shows which models write secure code for each security task
         gr = sim.get("guardrail_results", [])
 
         if gr:
@@ -561,8 +561,8 @@ def run_viz(args):
 
     # ── Note about BERTopic charts ──────────────────────────────────
     # BERTopic generates its own plotly charts during analyze mode.
-    # They're already saved in scratchpad/charts/. We just remind
-    # the user they're there.
+    # They are already saved in scratchpad/charts/. This step only prints
+    # a reminder of where they are.
     bt_dir = os.path.join(args.corpus, "charts")
     existing_bt = (
         [f for f in os.listdir(bt_dir) if f.startswith("bertopic")]
@@ -571,7 +571,7 @@ def run_viz(args):
     if existing_bt:
         print(f"   BERTopic charts already in {bt_dir}/: {', '.join(existing_bt)}")
 
-    # ── Done! ───────────────────────────────────────────────────────
+    # ── Done ────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"{charts} charts generated in two formats:")
     print(f"   Paper:  {paper_dir}/ (captioned, axis labels)")

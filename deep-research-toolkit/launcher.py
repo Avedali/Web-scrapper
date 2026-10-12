@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# ↑ Standard header: "run this with Python 3"
+# ↑ Standard header: tells the computer to run this file with Python 3
 
 """
-launcher.py -- The friendly front door.
-========================================
-Open this in Thonny and click Run. Or double-click it.
-Type a number. That's it.
+launcher.py: a numbered menu that runs each toolkit mode.
+=========================================================
+Open this in Thonny and click Run, or double-click it.
+Type a number to pick a mode.
 """
 
 # Built-in Python tools (no install needed)
@@ -18,8 +18,8 @@ import subprocess  # Run other scripts/commands from inside this one
 
 def use_toolkit_venv():
     """
-    If install.py had to put the packages in a private environment (.venv --
-    it does that for Homebrew's Python on a Mac), run this script with that
+    If install.py had to put the packages in a private environment (.venv,
+    which it does for Homebrew's Python on a Mac), run this script with that
     environment's Python instead, so every package is found.
     """
     venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
@@ -32,16 +32,16 @@ def load_key():
     """
     Load the API key from the .env file that install.py created.
 
-    An API key is like a password that lets our code talk to AI services.
-    We saved it to a file called ".env" during setup so you don't have
-    to type it every time.
+    An API key is a secret string that identifies you to an AI service and
+    lets the code send it requests. install.py saved it to a file called
+    ".env" during setup so you don't have to type it every time.
 
     Returns the key as a text string, or "" if no key was found.
     """
 
     # Build the path to the .env file (same folder as this script)
-    # os.path.abspath(__file__) = full path to THIS file (launcher.py)
-    # os.path.dirname(...)     = just the folder part (without the filename)
+    # os.path.abspath(__file__) = full path to this file (launcher.py)
+    # os.path.dirname(...)     = only the folder part (without the filename)
     # os.path.join(..., ".env")= stick ".env" onto the end of that folder path
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
@@ -57,7 +57,8 @@ def load_key():
 
                     # Also store it as an "environment variable" so other
                     # Python scripts in this session can find it automatically.
-                    # Think of environment variables as system-wide sticky notes.
+                    # Environment variables are named text values that every
+                    # program started from this one can read.
                     os.environ["OPENROUTER_API_KEY"] = key
 
                     return key  # Hand the key back to whoever called this function
@@ -72,29 +73,30 @@ def run_mode(mode, extra_args=None, log=None):
     """
     Run one of the toolkit's modes (explore, analyze, stats, etc.)
 
-    Under the hood, this calls: python agent.py <mode>
-    It's like typing that command in a terminal, but the launcher does it for you.
+    This runs the command: python agent.py <mode>
+    That is the same command you could type in a terminal.
     The API key reaches the mode through the OPENROUTER_API_KEY environment
-    variable (which child processes inherit), NOT through a --key argument:
-    command-line arguments are visible to other programs and users on the
-    machine (Task Manager, ps), environment variables are not.
+    variable, which child processes inherit. It is not passed as a --key
+    argument because command-line arguments are visible to other programs
+    and users on the machine (Task Manager, ps), and environment variables
+    are not.
 
     Parameters:
-        mode       -- which mode to run (e.g., "explore", "analyze", "ask")
-        extra_args -- any additional arguments to pass (e.g., a question for ask mode)
-        log        -- an open file: run unattended and copy all output into it
+        mode       : which mode to run (e.g., "explore", "analyze", "ask")
+        extra_args : any additional arguments to pass (e.g., a question for ask mode)
+        log        : an open file; if given, run unattended and copy all output into it
 
     Returns the mode's exit code (0 = it finished without crashing).
     """
 
     # Build the command as a list of strings.
-    # sys.executable = the path to the Python that's running THIS script
+    # sys.executable = the path to the Python that's running this script
     # "agent.py"     = the router script that dispatches to the right mode
     # mode           = which mode to run (e.g., "explore")
     cmd = [sys.executable, "agent.py", mode]
 
-    # Load the API key into os.environ (load_key does that for us);
-    # the subprocess below inherits it.
+    # load_key() puts the API key into os.environ, and the subprocess
+    # below inherits it.
     load_key()
 
     # Add any extra arguments (like a question for ask mode)
@@ -104,23 +106,23 @@ def run_mode(mode, extra_args=None, log=None):
     # Show the user what we're about to run
     print(f"\n   Running: {' '.join(cmd)}\n")
 
-    # Actually run the command.
+    # Run the command.
     # subprocess.run() starts a new process and waits for it to finish.
-    # cwd = "current working directory" -- we set it to the toolkit folder
+    # cwd = "current working directory". It is set to the toolkit folder
     # so the scripts can find each other.
     here = os.path.dirname(os.path.abspath(__file__))
 
     # On a Mac, "caffeinate -i" keeps the computer awake while the mode runs:
     # explore and analyze take 30-60 minutes, and a Mac that goes to sleep
-    # pauses them. (Closing the lid still sleeps it -- keep it open.)
+    # pauses them. (Closing the lid still puts it to sleep, so keep it open.)
     if sys.platform == "darwin" and shutil.which("caffeinate"):
         cmd = ["caffeinate", "-i", *cmd]
 
     if log is None:
         return subprocess.run(cmd, cwd=here, check=False).returncode
 
-    # Unattended: no keyboard (every question takes its default answer), and
-    # everything printed is also saved to the log file for later reading
+    # Unattended: no keyboard input (every question takes its default answer),
+    # and all printed output is also saved to the log file for later reading
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
     proc = subprocess.Popen(cmd, cwd=here, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=env, text=True,
@@ -140,8 +142,8 @@ FULL_RUN = ["explore", "analyze", "stats", "synthesize", "simulate", "viz"]
 
 def _brief_verdict(scratchpad):
     """
-    "" if the fact-check gate passed the brief synthesize just wrote, else
-    why it needs review (from scratchpad/brief_verdict.json).
+    Returns "" if the fact-check gate passed the brief that synthesize wrote
+    in this run, else the reason it needs review (from scratchpad/brief_verdict.json).
     """
     import json
     try:
@@ -178,7 +180,7 @@ def run_everything():
                 note = _brief_verdict(os.path.join(here, "scratchpad"))
             results.append((mode, code, minutes, note))
             if code != 0:
-                break   # Later steps need this one's output -- stop here
+                break   # Later steps need this one's output, so stop here
 
         summary = "\n" + "=" * 50 + "\n  RUN EVERYTHING -- SUMMARY\n" + "=" * 50 + "\n"
         for mode, code, minutes, note in results:
@@ -203,8 +205,8 @@ def main():
     Shows options, waits for the user to type a number, runs the
     corresponding mode, then shows the menu again.
 
-    "while True" means "keep doing this forever" -- we break out
-    of the loop when the user types 0 (quit).
+    "while True" means "repeat forever". The loop ends with "break"
+    when the user types 0 (quit).
     """
 
     while True:
@@ -247,7 +249,7 @@ def main():
         except (EOFError, KeyboardInterrupt):
             # EOFError: the input stream ended unexpectedly
             # KeyboardInterrupt: the user pressed Ctrl+C (force quit)
-            # In both cases, just exit the loop gracefully.
+            # In both cases, leave the loop without an error message.
             break
 
         # ── Handle each choice ─────────────────────────────────────
@@ -268,7 +270,7 @@ def main():
             # Ask for confirmation before starting a long process
             confirm = input("  Start? (y/n) → ").strip().lower()
             if confirm == "y":
-                run_mode("explore")  # Calls: python agent.py explore --key ...
+                run_mode("explore")  # Calls: python agent.py explore
 
         # --- Option 2: Analyze (NLP on collected sources) ---
         elif choice == "2":
@@ -287,12 +289,12 @@ def main():
             has_csv = input("  → ").strip().lower()
 
             if has_csv == "y":
-                # They have a CSV -- ask for the file path
+                # They have a CSV, so ask for the file path
                 csv_path = input("  Path to the CSV file: → ").strip()
                 # Pass the file path as an extra argument: --data path/to/file.csv
                 run_mode("stats", ["--data", csv_path])
             else:
-                # No external data -- just run stats on what analyze produced
+                # No external data: run stats on what analyze produced
                 run_mode("stats")
 
         # --- Option 4: Synthesize (the research brief) ---
@@ -397,17 +399,17 @@ def main():
 
 
 # ════════════════════════════════════════════════════════════════════════
-# ENTRY POINT -- what happens when you run this file
+# ENTRY POINT: what happens when you run this file
 # ════════════════════════════════════════════════════════════════════════
 #
-# "if __name__ == '__main__'" means "if this file is being run directly."
-# (As opposed to being imported by another file, which we don't do here.)
+# "if __name__ == '__main__'" means "if this file is being run directly"
+# rather than imported by another file. No other file imports launcher.py.
 
 if __name__ == "__main__":
     use_toolkit_venv()   # Packages may live in .venv (see install.py)
 
     # Before showing the menu, check if setup has been done.
-    # We do this by looking for the .env file -- if it doesn't exist,
+    # The check looks for the .env file. If it doesn't exist,
     # install.py hasn't been run yet (because install.py creates .env).
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
@@ -423,7 +425,7 @@ if __name__ == "__main__":
             answer = "n"
 
         if answer == "y":
-            # Run install.py as a subprocess (just like run_mode does).
+            # Run install.py as a subprocess (the same way run_mode does).
             # This installs packages, asks for the API key, etc.
             subprocess.run(
                 [sys.executable, "install.py"],

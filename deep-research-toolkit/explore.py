@@ -1,20 +1,21 @@
 """
-explore.py -- Mode 1.a: Purely exploratory research.
+explore.py: Mode 1.a, exploratory research.
 =====================================================
 Run: python agent.py explore --key KEY
 Or:  launcher.py → option 1
 
-This is the FIRST mode you run. It gathers raw material -- no opinions,
-no thesis, no sections. Just: find everything relevant to the topic.
+This is the first mode you run. It gathers raw material about the topic:
+every relevant source it can find. It forms no opinion or thesis and
+writes no sections.
 
 It works in 7 phases:
   P1: Define key terms (so we know what we're talking about)
-  P2: Decompose into search queries (in 9 languages, natively framed)
+  P2: Decompose into search queries (in 9 languages, phrased as native speakers would)
   P3: Search the web for each query and read the pages
   P4: Hunt for authoritative sources (surveys, academic papers)
   P5: Hunt for experiential sources (developer forums, blogs)
   P6: Red-team the corpus (find weaknesses, gaps, bad sources)
-  P6.5: Bias check (is the corpus geographically/ideologically skewed?)
+  P6.5: Bias check (whether the corpus is skewed geographically or ideologically)
   P7: Fill gaps identified by the red team and bias check
 
 Everything is saved to the scratchpad/ folder for downstream modes.
@@ -55,11 +56,11 @@ from core import (
 )
 
 # ════════════════════════════════════════════════════════════════════════
-# DEFAULT TOPIC -- used if the user doesn't specify one
+# DEFAULT TOPIC: used if the user doesn't specify one
 # ════════════════════════════════════════════════════════════════════════
 
 # ════════════════════════════════════════════════════════════════════════
-# HOW DEEP TO SEARCH -- raise for a bigger corpus (explore takes longer)
+# HOW DEEP TO SEARCH: raise for a bigger corpus (explore takes longer)
 # ════════════════════════════════════════════════════════════════════════
 #
 # Was 5 queries x 3 results per language: at most 15 pages per language,
@@ -80,7 +81,7 @@ DEFAULT_TOPIC = (
 
 
 # ════════════════════════════════════════════════════════════════════════
-# QUERY PARSING -- turn the AI's answer into a clean list of search queries
+# QUERY PARSING: turn the AI's answer into a clean list of search queries
 # ════════════════════════════════════════════════════════════════════════
 #
 # Models rarely return bare queries. Real output looks like:
@@ -90,9 +91,9 @@ DEFAULT_TOPIC = (
 #   (The future of programming in Russia)             ← translation line
 # Every one of those lines used to become a "query".
 
-# Characters that MUST appear in a real query for non-Latin languages.
-# A Korean "query" with no Hangul is English commentary (or a model that
-# dropped the native script -- some providers do).
+# Characters that must appear in a real query for non-Latin languages.
+# A Korean "query" with no Hangul is English commentary, or comes from a
+# model that dropped the native script (some providers do).
 NATIVE_SCRIPT = {
     "ja": r"[\u3040-\u30ff\u4e00-\u9fff]",  # Hiragana, Katakana, Kanji
     "ko": r"[\uac00-\ud7a3]",                # Hangul
@@ -108,16 +109,16 @@ def _parse_queries(resp, n, lang=None):
     """Extract at most n search queries from an AI response."""
     lines = []
     for raw_line in (resp or "").splitlines():
-        # Strip list markers: "1." "2)" "-" "•" "* " -- but not a leading year,
-        # and not the "**" of bold text (a marker needs a space after it)
+        # Strip list markers: "1." "2)" "-" "•" "* ". A leading year and the
+        # "**" of bold text stay (a marker needs a space after it).
         line = re.sub(r"^\s*(?:\d+[.)]|[-•*])\s+", "", raw_line).strip()
-        # Only markup at the START of a line marks a query: a commentary
-        # line that merely quotes a term ('such as "автокодирование"') or a
-        # translation line ('(Translation: "...")') is not a query.
+        # Only markup at the start of a line marks a query. A commentary
+        # line that quotes a term ('such as "автокодирование"') and a
+        # translation line ('(Translation: "...")') are skipped.
         m = _MARKED.match(line)
         lines.append((line, next(g for g in m.groups() if g) if m else None))
 
-    # If the model marked its queries, ONLY marked text counts -- the
+    # If the model marked its queries, only marked text counts. The
     # unmarked lines around them are explanations.
     if any(marked for _, marked in lines):
         lines = [(marked, marked) for _, marked in lines if marked]
@@ -141,12 +142,12 @@ def _parse_queries(resp, n, lang=None):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# GATHERING -- search, then read the new pages, many at a time
+# GATHERING: search, then read the new pages, many at a time
 # ════════════════════════════════════════════════════════════════════════
 
 def _gather(jobs, sources, quality=None):
     """
-    Run searches and add every NEW readable page to `sources`.
+    Run searches and add every readable page not already in `sources`.
 
     jobs: list of (query, n_results, region, search_lang). All searches run
     first (a few at a time), then all new pages are downloaded in parallel
@@ -184,7 +185,7 @@ def _gather(jobs, sources, quality=None):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# MAIN FUNCTION -- this is what runs when you choose "Explore" in the launcher
+# MAIN FUNCTION: this is what runs when you choose "Explore" in the launcher
 # ════════════════════════════════════════════════════════════════════════
 
 def run_explore(args):
@@ -192,8 +193,8 @@ def run_explore(args):
     Run the full exploratory research pipeline.
 
     'args' is an object containing the command-line arguments
-    (or launcher choices) -- things like the API key, model name,
-    topic, etc. Python creates this from argparse in agent.py.
+    (or launcher choices), such as the API key, model name and
+    topic. agent.py creates it with argparse.
     """
 
     # ── Setup ───────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ def run_explore(args):
     # if it's empty/None, use the second one.
     api_key = args.key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")  # Stop here -- can't do anything without a key
+        sys.exit("No API key found -- run install.py to add one (or pass --key KEY)")  # Stop here: nothing can run without a key
 
     model = args.model               # Which AI model to use
     topic = args.topic or DEFAULT_TOPIC  # User's topic, or the default
@@ -215,7 +216,7 @@ def run_explore(args):
     print(f"   Topic: {topic[:60]}...")      # Show first 60 chars of topic
     print("=" * 60)
 
-    # This dictionary will hold ALL sources we find.
+    # This dictionary holds every source found.
     # The key is the URL (so we don't store duplicates).
     # The value is a dictionary with title, content, quality, language, etc.
     sources = {}
@@ -223,12 +224,12 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 1: DEFINE KEY TERMS
     # ════════════════════════════════════════════════════════════════
-    # Before searching, we ask the AI to define every key term in the
-    # topic. This grounds the research -- if "coding assistant" has 3
-    # different meanings, we need to know that upfront.
+    # Before searching, the AI defines every key term in the topic.
+    # If "coding assistant" has 3 different meanings, the research needs
+    # to know that before it starts.
     #
-    # temp=0.3 means low creativity -- we want factual definitions,
-    # not imaginative ones.
+    # temp=0.3 means low randomness, which gives factual definitions
+    # instead of imaginative ones.
 
     print(f"\n{'─'*50}\nDEFINE\n{'─'*50}")
 
@@ -244,14 +245,14 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 2: NATIVE DECOMPOSITION (9 languages)
     # ════════════════════════════════════════════════════════════════
-    # This is the multilingual doctrine. For each language, we ask the
-    # AI to generate search queries AS A NATIVE SPEAKER of that language
-    # would frame them -- NOT translations of English queries.
+    # For each language, the AI writes search queries the way a native
+    # speaker of that language would phrase them. They are not
+    # translations of English queries.
     #
-    # Why? Because translating "AI coding assistant" into Japanese gives
-    # you the English concept in Japanese characters. But Japanese devs
-    # discussing this among themselves use different terms, different
-    # framing, different concerns (e.g., engineer shortage vs job loss).
+    # Translating "AI coding assistant" into Japanese gives the English
+    # concept in Japanese characters. Japanese developers talking among
+    # themselves use different terms, framing and concerns (e.g.,
+    # engineer shortage instead of job loss).
     #
     # LANGUAGES.items() gives us pairs: ("en", {"name":"English",...}),
     # ("fr", {"name":"French",...}), etc.
@@ -264,13 +265,13 @@ def run_explore(args):
         # lc = language code ("en", "fr", "ja", etc.)
         # info = {"name": "English", "why": "Primary global tech language"}
 
-        # EQUALIZED QUERY COUNT: every language gets the same number of
+        # Equal query count: every language gets the same number of
         # queries (QUERIES_PER_LANGUAGE, see the top of this file).
         #
         # A much older version gave English 8 queries and other languages 3,
-        # creating an English-heavy corpus by design. English still gets
-        # more in practice (more English content exists on the web), but
-        # the SEARCH EFFORT is equal.
+        # which made the corpus English-heavy by design. English still ends
+        # up with more sources (more English content exists on the web), but
+        # each language gets the same number of searches.
         n_queries = QUERIES_PER_LANGUAGE
 
         if lc == "en":
@@ -283,9 +284,9 @@ def run_explore(args):
                 f"No numbering, no commentary."
             )
         else:
-            # Non-English: same number of queries, in NATIVE SCRIPT.
-            # The prompt asks the AI to think AS a developer from that
-            # language community, not as a translator.
+            # Non-English: same number of queries, in the language's own script.
+            # The prompt asks the AI to answer as a developer from that
+            # language community would.
             prompt = (
                 f"You are a {info['name']}-speaking developer. How does YOUR "
                 f"community discuss this topic? What concerns, terms, and "
@@ -302,8 +303,8 @@ def run_explore(args):
         resp = call_ai(prompt, api_key, model, temp=0.5)
         qs = _parse_queries(resp, n_queries, lc)
 
-        # Nothing usable (e.g. the model dropped the native script)?
-        # Try once more -- a second sample usually comes back fine.
+        # If nothing is usable (e.g. the model dropped the native script),
+        # try once more. A second sample usually comes back fine.
         if not qs:
             resp = call_ai(prompt, api_key, model, temp=0.7)
             qs = _parse_queries(resp, n_queries, lc)
@@ -323,7 +324,7 @@ def run_explore(args):
     # PHASE 3: WEB SEARCH SWEEP
     # ════════════════════════════════════════════════════════════════
     # For every query in every language, search the web and read the
-    # pages we find. This is the bulk of the research gathering.
+    # pages found. This phase gathers most of the sources.
 
     print(f"\n{'─'*50}\nSEARCH\n{'─'*50}")
     print(f"   {sum(len(q) for q in all_queries.values())} queries x {RESULTS_PER_QUERY} results, "
@@ -342,18 +343,17 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 4: AUTHORITATIVE + ACADEMIC SOURCES
     # ════════════════════════════════════════════════════════════════
-    # Phase 3 casts a wide net. Phase 4 specifically hunts for
-    # high-authority sources: major surveys, institutional reports,
-    # and academic papers. These carry more weight in a paper.
+    # Phase 3 searches broadly. Phase 4 searches for high-authority
+    # sources: major surveys, institutional reports, and academic papers.
+    # These carry more weight in a paper.
     #
-    # Note the Japanese (AIコーディング...) and Chinese (中国AI编程...)
-    # queries -- these search for Asian-language institutional reports,
-    # not just English ones.
+    # The Japanese (AIコーディング...) and Chinese (中国AI编程...) queries
+    # look for Asian-language institutional reports as well as English ones.
 
     print(f"\n{'─'*50}\n AUTHORITATIVE\n{'─'*50}")
 
     # Targeted web searches for known high-quality sources
-    # (query, search region) -- see LANGUAGES in core.py for the regions
+    # (query, search region); see LANGUAGES in core.py for the regions
     added = _gather([(q, 3, region, "mixed") for q, region in [
         ("Stack Overflow developer survey AI tools 2025 2026", "us-en"),
         ("JetBrains developer ecosystem survey AI", "us-en"),
@@ -366,8 +366,8 @@ def run_explore(args):
     print(f"   {added} authoritative sources")
 
     # Academic paper search (Semantic Scholar + arXiv)
-    # These are separate from web search -- they search dedicated
-    # academic databases directly using their APIs.
+    # These are separate from web search. They query dedicated
+    # academic databases directly through their APIs.
     for q in ["AI code generation productivity", "GitHub Copilot study", "LLM code quality"]:
         for p in search_academic(q, n=3):
             if p["url"] not in sources:
@@ -375,7 +375,7 @@ def run_explore(args):
                     "title": p["title"],
                     "domain": p["domain"],
                     "snippet": p["snippet"],
-                    "content": p["snippet"],  # For papers, the snippet IS the abstract
+                    "content": p["snippet"],  # For papers, the snippet is the abstract
                     "queries": [q],
                     "quality": "academic",     # Papers are always academic quality
                     "year": p.get("year"),     # Publication year (for APA references)
@@ -386,10 +386,10 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 5: EXPERIENTIAL SOURCES (developer voices)
     # ════════════════════════════════════════════════════════════════
-    # Academic papers tell you what researchers found in controlled
-    # settings. But what do actual developers say when talking to
-    # each other? Forum discussions, blog posts, personal experiences.
-    # These are less rigorous but capture real-world sentiment.
+    # Academic papers report what researchers found in controlled
+    # settings. This phase collects what developers say to each other:
+    # forum discussions, blog posts, personal experiences. These are
+    # less rigorous but show how developers feel in day-to-day work.
 
     print(f"\n{'─'*50}\n EXPERIENTIAL\n{'─'*50}")
 
@@ -419,12 +419,9 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 6: RED TEAM (find weaknesses in our research)
     # ════════════════════════════════════════════════════════════════
-    # The red team is an AI playing critic. We show it everything
-    # we collected and ask: "what's wrong with this? what's missing?
-    # what's unreliable?" This catches blind spots.
-    #
-    # It's like asking a friend to poke holes in your essay before
-    # you submit it.
+    # The red team is an AI asked to criticize the corpus. It gets a
+    # summary of the sources collected and lists what is wrong, missing
+    # or unreliable, so gaps in the search show up before analysis.
 
     print(f"\n{'─'*50}\nRED TEAM\n{'─'*50}")
 
@@ -434,7 +431,7 @@ def run_explore(args):
     lc = defaultdict(int)  # Language counts
     qc = defaultdict(int)  # Quality counts
 
-    # .values() gives us just the source data (not the URLs)
+    # .values() gives only the source data (not the URLs)
     for s in sources.values():
         lc[s.get("source_lang", "?")] += 1   # Count by language
         qc[s["quality"]] += 1                 # Count by quality
@@ -467,10 +464,10 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # Separate from the red team because bias is a different concern.
     # The red team checks source quality and gaps.
-    # The bias check asks: is the corpus systematically skewed?
-    #   - Too US-centric? (most sources in English from US domains)
-    #   - Too optimistic? (mostly vendor-published "AI is great" pieces)
-    #   - Missing demographics? (only covers senior devs in big companies)
+    # The bias check looks for systematic skew in the corpus, such as:
+    #   - US-centric (most sources in English from US domains)
+    #   - too optimistic (mostly vendor-published "AI is great" pieces)
+    #   - missing groups of people (only covers senior devs in big companies)
 
     print(f"\n{'─'*50}\n BIAS CHECK\n{'─'*50}")
 
@@ -502,19 +499,19 @@ def run_explore(args):
     print(f"   {added} sources added")
 
     # ════════════════════════════════════════════════════════════════
-    # SAVE -- write everything to the scratchpad for downstream modes
+    # SAVE: write everything to the scratchpad for downstream modes
     # ════════════════════════════════════════════════════════════════
-    # We save two files:
-    #   1. corpus.json -- all sources with their content (for analyze mode)
-    #   2. sources_meta.json -- all sources WITHOUT content (for reference)
+    # This saves two files:
+    #   1. corpus.json: all sources with their content (for analyze mode)
+    #   2. sources_meta.json: all sources without content (for reference)
     #
-    # BACKUP: Before overwriting, we copy the existing corpus to a
+    # BACKUP: Before overwriting, the existing corpus is copied to a
     # timestamped backup file. If explore runs twice and the second run
     # fails halfway, the first run's 80 good sources are preserved.
     # Backup format: corpus-YYYY.MM.DD.HH.MM.SS.json (seconds included so
     # two runs in the same minute don't overwrite each other's backup)
     #
-    # This also prevents two teammates from accidentally clobbering
+    # This also stops two teammates from accidentally overwriting
     # each other's work if they run modes at the same time.
 
     # Nothing found (no internet, or every search engine blocked us): stop
@@ -539,10 +536,10 @@ def run_explore(args):
             shutil.copy2(existing_file, backup)  # copy2 preserves timestamps
             print(f"   Backed up: {os.path.basename(backup)}")
 
-    # Build the corpus list. This is a "list comprehension" -- a compact
+    # Build the corpus list. This is a "list comprehension": a compact
     # way to build a list by transforming another collection.
     #
-    # enumerate(sources.items()) gives us: (0, (url1, data1)), (1, (url2, data2)), ...
+    # enumerate(sources.items()) gives: (0, (url1, data1)), (1, (url2, data2)), ...
     # i = the index (0, 1, 2, ...), url = the URL, s = the source data
     corpus = [
         {
@@ -553,7 +550,7 @@ def run_explore(args):
             "lang": s.get("source_lang", "?"),
             "url": url,
             "year": s.get("year"),                 # Known for academic papers only
-            "content": s["content"][:CONTENT_CHARS],  # Truncate very long pages
+            "content": s["content"][:CONTENT_CHARS],  # Cut long pages to CONTENT_CHARS
         }
         for i, (url, s) in enumerate(sources.items())
     ]
@@ -571,7 +568,7 @@ def run_explore(args):
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
 
-    # ── Done! ───────────────────────────────────────────────────────
+    # ── Done ────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"EXPLORATION COMPLETE -- {len(sources)} sources gathered")
     print("   No thesis yet. Run 'analyze' and 'stats' next,")
