@@ -45,7 +45,7 @@ from collections import defaultdict  # Auto-initializing dictionary (for countin
 from core import (
     pad,                   # Scratchpad saving
     call_ai,               # AI calls (naming themes)
-    build_evidence_cards,  # 1-2 sentence English summary per source
+    build_evidence_cards,  # English summary per source, 1-6 sentences
     NO_EVIDENCE,           # Card text for sources with nothing usable
 )
 
@@ -227,7 +227,7 @@ def run_analyze(args):
     if ANALYZE_CHARS:
         df["content"] = df["content"].str.slice(0, ANALYZE_CHARS)
 
-    # ── Evidence cards: a 1-2 sentence English summary per source ───
+    # ── Evidence cards: an English summary per source (1-6 sentences) ─
     # (see core.build_evidence_cards). Used for zero-shot topics and
     # themes below. They are cached, so synthesize later reuses them
     # without new AI calls.
@@ -625,7 +625,7 @@ def run_analyze(args):
     # On raw pages in 9 languages, topics came out labelled with words like
     # "die / der / de" (German, French and Spanish filler words), and the
     # page boilerplate (menus, "h2", cookie text) diluted the meaning.
-    # Evidence cards (core.build_evidence_cards) are 1-2 sentence English
+    # Evidence cards (core.build_evidence_cards) are 1-6 sentence English
     # summaries of each source's findings. Clustering them groups sources
     # by what they say, whatever language they are in. An AI call then
     # names each theme in plain English.

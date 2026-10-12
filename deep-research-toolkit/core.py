@@ -1149,8 +1149,8 @@ def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
 # EVIDENCE CARDS: one short English summary per source
 # ════════════════════════════════════════════════════════════════════════
 #
-# A card is 1-2 sentences of the concrete findings, numbers and claims in a
-# source, written in English whatever the source's language, tagged with
+# A card is 1-6 sentences (one per 3,000 characters of the source) of the
+# concrete findings, numbers and claims in a source, written in English whatever the source's language, tagged with
 # the source number: "[44] Korean survey: Copilot raised PR completions 26%..."
 #
 # Reason: the corpus is ~150 sources in 9 languages, ~400,000 characters.
@@ -1163,6 +1163,14 @@ def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
 
 CARDS_FILE = "evidence_cards.json"
 NO_EVIDENCE = "NO EVIDENCE"  # Card text for pages with nothing usable
+CARD_VERSION = "v2"          # Change when the card prompt changes, so old cards are rewritten
+CHARS_PER_CARD_SENTENCE = 3000   # A source gets one card sentence per 3,000 characters of text...
+MAX_CARD_SENTENCES = 6           # ...up to 6 (a 30,000-character report gets 6, a short news item 1)
+
+
+def _card_sentences(item):
+    """How many sentences the card of a source may have, from its length."""
+    return max(1, min(MAX_CARD_SENTENCES, 1 + len(item.get("content", "")) // CHARS_PER_CARD_SENTENCE))
 
 
 def _content_key(item):
@@ -1183,9 +1191,11 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
         with open(cache_path, encoding="utf-8") as f:
             cache = json.load(f)
 
-    # Sources with no card yet, or whose text changed since the card was made
-    todo = [s for s in corpus
-            if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
+    # Sources with no card yet, whose text changed since the card was made,
+    # or whose card was written by an older prompt (CARD_VERSION)
+    def key(item):
+        return f"{CARD_VERSION}:{_content_key(item)}"
+    todo = [s for s in corpus if cache.get(str(s["idx"]), {}).get("key") != key(s)]
 
     # Two passes: the second retries sources the AI skipped the first time
     for attempt in range(2):
@@ -1193,20 +1203,26 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
             break
         if attempt == 0:
             print(f"   Writing evidence cards for {len(todo)} sources...")
-        parts = [(f"[{s['idx']}] ({s.get('lang', '?')}) {s.get('title', '')} -- {s.get('domain', '')}",
+        # Each source's label says how many sentences its card may have, so a
+        # long report keeps its several findings and a short page isn't padded
+        parts = [(f"[{s['idx']}] ({s.get('lang', '?')}) {s.get('title', '')} -- {s.get('domain', '')}"
+                  f" -- up to {_card_sentences(s)} sentence{'s' if _card_sentences(s) > 1 else ''}",
                   s.get("content", "")) for s in todo]   # the whole stored text
         answers = ai_map(
             # ~80,000 characters per call (~20k tokens): big enough that a
             # source is never split across calls (sources are <= CONTENT_CHARS)
             make_batches(parts, batch_chars=80000),
             lambda batch: (
-                "Below are research sources about AI coding assistants, each "
-                "starting with its number like [12].\n"
-                "For EACH source write ONE line: its number, then 1-2 sentences "
-                "IN ENGLISH with its concrete findings, numbers, claims and who "
-                "says them (translate non-English sources). Example:\n"
-                "[12] Stack Overflow survey of 65,000 developers: 76% use or plan "
-                "to use AI tools, but only 43% trust their accuracy.\n"
+                "Below are research sources, each starting with its number like [12] and "
+                "the number of sentences its summary may have.\n"
+                "For EACH source write ONE line: its number, then its concrete findings IN "
+                "ENGLISH (translate non-English sources): one sentence per distinct finding, "
+                "with its numbers, who found or says it, and the sample or scope. Use up to "
+                "the number of sentences its label allows; a source with fewer distinct "
+                "findings gets fewer sentences. Example:\n"
+                "[12] A 2024 survey of 1,200 nurses in Spain by the national nursing council "
+                "found 40% work unpaid overtime every week. Overtime was highest in public "
+                "hospitals. The council links it to unfilled posts but gives no figure.\n"
                 f"If a source has nothing usable (navigation, ads, error page), "
                 f"write: [12] {NO_EVIDENCE}\n"
                 "One line per source, nothing else.\n\n" + batch),
@@ -1217,8 +1233,8 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
             m = re.match(r"^\s*\**\[(\d+)\]\**\s*[:.\-]?\s*(.+)$", line)
             if m and int(m.group(1)) in wanted:
                 s = wanted[int(m.group(1))]
-                cache[str(s["idx"])] = {"key": _content_key(s), "card": m.group(2).strip()}
-        todo = [s for s in todo if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
+                cache[str(s["idx"])] = {"key": key(s), "card": m.group(2).strip()}
+        todo = [s for s in todo if cache.get(str(s["idx"]), {}).get("key") != key(s)]
 
     if todo:
         print(f"   {len(todo)} sources still have no card (AI calls failed or skipped them)")

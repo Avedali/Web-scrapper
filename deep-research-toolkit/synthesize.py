@@ -42,7 +42,7 @@ import verify   # The fact-check gate
 from core import (
     call_ai,               # Send prompts to the AI model
     pad,                   # Save work to the scratchpad
-    build_evidence_cards,  # 1-2 sentence English summary per source
+    build_evidence_cards,  # English summary per source, 1-6 sentences
     NO_EVIDENCE,           # Card text for sources with nothing usable
     LANGUAGES,             # The 9-language config (for APA language notes)
     BANNED_PHRASES,        # LLM-speak phrases to remove (used by _plain_words)
@@ -68,7 +68,7 @@ from core import (
 # Everything written goes through the fact-check gate (verify.py).
 
 AUDIENCE = "financial industry professionals"   # Who the implications are written for
-FRAMING_CONTEXT_CHARS = 120000  # Findings + all evidence cards shown to the framing step
+FRAMING_CONTEXT_CHARS = 600000  # Findings + all evidence cards shown to the framing step (~150k tokens)
 UNCITED_MATCH = 0.75          # An uncited sentence this close to a finding gets its sources
 NEAR_REPEAT = 0.92            # Sentences this alike in meaning count as a repeat
 CLAIMS_PER_PASS = 12           # Findings per writing call. A long section takes
@@ -125,7 +125,7 @@ def run_synthesize(args):
     print(f"   Loaded {len(context)} chars of evidence from scratchpad/")
 
     # ── One evidence card per source ────────────────────────────────
-    # A card is a 1-2 sentence English summary of one source (see
+    # A card is a 1-6 sentence English summary of one source (see
     # core.build_evidence_cards). All cards fit in one prompt, so the
     # framing step sees every source, in every language. Analyze already
     # built them, so this step reads them from the cache with no new AI calls.
@@ -592,6 +592,10 @@ def _frame_brief(topic, context, evidence, api_key, model):
     AI's answer). If the answer can't be read, the themes come from
     analyze's topic model, or a fixed list as a last resort.
     """
+    material = context + "\n\n" + evidence
+    if len(material) > FRAMING_CONTEXT_CHARS:
+        print(f"   Framing reads the first {FRAMING_CONTEXT_CHARS:,} of {len(material):,} characters "
+              "of evidence (raise FRAMING_CONTEXT_CHARS to read all)")
     reply = call_ai(
         f"You are preparing a research brief on this topic: {topic}\n\n"
         "Below is everything the study found: its own analysis and statistics, then one "
@@ -605,7 +609,7 @@ def _frame_brief(topic, context, evidence, api_key, model):
         "QUESTION: <the research question>\n"
         "THEME 1: <short title, 2-6 words> | <the sub-question it answers>\n"
         "THEME 2: ...\n\n"
-        f"EVIDENCE:\n{(context + chr(10) * 2 + evidence)[:FRAMING_CONTEXT_CHARS]}",
+        f"EVIDENCE:\n{material[:FRAMING_CONTEXT_CHARS]}",
         api_key, model, temp=0.3) or ""
     m = re.search(r"^\W*QUESTION\W*:?\s*(.+)$", reply, re.M | re.I)
     question = m.group(1).strip() if m else topic

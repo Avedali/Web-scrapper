@@ -9,7 +9,7 @@ every relevant source it can find. It forms no opinion or thesis and
 writes no sections.
 
 It works in 7 phases:
-  P1: Define key terms (so we know what we're talking about)
+  P1: Look up key terms in dictionaries (so we know what we're talking about)
   P2: Decompose into search queries (in 9 languages, phrased as native speakers would)
   P3: Search the web for each query and read the pages
   P4: Hunt for authoritative sources (surveys, academic papers)
@@ -81,6 +81,180 @@ DEFAULT_TOPIC = (
 
 
 # ════════════════════════════════════════════════════════════════════════
+# KEY TERMS: definitions quoted from dictionaries, never written by the AI
+# ════════════════════════════════════════════════════════════════════════
+#
+# A definition the AI writes from memory reflects its training data, and the
+# framing of the brief then follows it. So the AI only lists the terms. Each
+# term is searched with "definition", and only results from dictionaries and
+# reference works are kept, quoted as the search engine shows them (for
+# these sites that is the page's own definition), with the URL.
+
+REFERENCE_DOMAINS = [
+    # General dictionaries
+    "merriam-webster.com", "dictionary.cambridge.org", "oxfordlearnersdictionaries.com",
+    "oed.com", "collinsdictionary.com", "dictionary.com", "britannica.com",
+    "wiktionary.org", "thefreedictionary.com",
+    # Encyclopedias and technical glossaries
+    "wikipedia.org", "csrc.nist.gov", "iso.org", "gartner.com/en/information-technology/glossary",
+    "techtarget.com", "investopedia.com", "oecd.org",
+]
+DEFINITIONS_PER_TERM = 4   # Quoted definitions kept per term (one per site)
+MAX_TERMS = 12             # Terms looked up
+
+
+# The sites' own sales lines at the end of a search snippet
+_SITE_TAIL = re.compile(r"(\s*(Learn more|See examples of .*? used in a sentence|How to use .*? in a "
+                        r"sentence|See more|Read more)\.?(\.\.\.)?)+\s*$", re.I)
+
+
+def _reference_site(url):
+    """The reference work a URL belongs to ("merriam-webster.com"), or None."""
+    u = url.lower().split("://")[-1]
+    return next((d for d in REFERENCE_DOMAINS if u.startswith(d) or f".{d}" in u.split("/")[0]
+                 or ("/" in d and d in u)), None)
+
+
+def define_terms(topic, api_key, model):
+    """
+    Look up the topic's key terms in dictionaries and reference works.
+    Returns the Markdown saved as scratchpad/01_definitions.md: for each term,
+    the definitions that match the topic's sense, each quoted with its URL,
+    then any other senses found. A term no reference work defines is listed
+    as such, without a definition.
+    """
+    reply = call_ai(
+        "List the key terms of this research topic: the words and phrases a reader must "
+        "understand to research it. Write each as it would appear as a dictionary or "
+        "encyclopedia entry (e.g. 'machine learning', not 'ML-driven'). For a phrase that is "
+        "not a common entry, also list its parts that are. One term per line. Do not define "
+        f"them.\n\nTOPIC: {topic}",
+        api_key, model, temp=0)
+    terms = []
+    for line in (reply or "").splitlines():
+        t = re.sub(r"^[\s\-*•\d.)]+", "", line).strip().strip('"*').strip()
+        if 2 <= len(t) <= 60 and t.lower() not in {x.lower() for x in terms}:
+            terms.append(t)
+    terms = terms[:MAX_TERMS]
+
+    # Search each term; keep one result per reference site. A term with no
+    # result is searched again without quotes (an exact phrase like "coding
+    # assistant" can miss an entry titled differently).
+    def lookup(results):
+        kept, sites = [], set()
+        for r in results or []:
+            site = _reference_site(r.get("url", ""))
+            text = re.sub(r"\s+", " ", r.get("snippet", "")).strip()
+            text = _SITE_TAIL.sub("", text).strip()
+            if site and site not in sites and len(text) > 20:
+                sites.add(site)
+                kept.append({"site": site, "text": text, "url": r["url"]})
+        return kept[:DEFINITIONS_PER_TERM]
+
+    found = search_many([(f'"{t}" definition', 10, "us-en") for t in terms])
+    senses = {t: lookup(r) for t, r in zip(terms, found)}
+    missing = [t for t in terms if not senses[t]]
+    for t, r in zip(missing, search_many([(f"{t} definition", 10, "us-en") for t in missing])):
+        senses[t] = lookup(r)
+
+    # The AI picks, by number, the quoted definitions that match the topic's
+    # sense ("assistant" as software, not as a shop assistant). It chooses
+    # among the quotes and writes nothing that goes in the file.
+    numbered, ref = [], {}
+    for term, kept in senses.items():
+        for d in kept:
+            ref[str(len(ref) + 1)] = (term, d)
+            numbered.append(f"D{len(ref)} [{term}] {d['text']}")
+    match = set()
+    if numbered:
+        pick = call_ai(
+            f"TOPIC: {topic}\n\nBelow are dictionary definitions of the topic's key terms. "
+            "List the numbers of the definitions that match how the term is used in the topic, "
+            "e.g. 'D1, D4, D5'. Nothing else.\n\n" + "\n".join(numbered),
+            api_key, model, temp=0) or ""
+        match = set(re.findall(r"D\s*(\d+)", pick))
+        if not match:                    # The call failed: keep every definition as matching
+            match = set(ref)
+
+    out = ["Each definition is quoted from the reference work named, as its search "
+           "result shows it. None is written by the AI.\n"]
+    for term, kept in senses.items():
+        out.append(f"## {term}\n")
+        if not kept:
+            out.append("No dictionary or reference definition found.\n")
+            continue
+        nums = [n for n, (t, _) in ref.items() if t == term]
+        fit = [ref[n][1] for n in nums if n in match]
+        other = [ref[n][1] for n in nums if n not in match]
+        for d in fit:
+            out.append(f"- \"{d['text']}\" ({d['site']}, {d['url']})")
+        if other:
+            out.append("\nOther senses:")
+            out += [f"- \"{d['text']}\" ({d['site']}, {d['url']})" for d in other]
+        out.append("")
+    found_n = sum(1 for k in senses.values() if k)
+    print(f"   {found_n} of {len(terms)} terms found in dictionaries or reference works")
+    return "\n".join(out)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# SEARCH QUERY PROMPTS: the same request, written in each language
+# ════════════════════════════════════════════════════════════════════════
+# {n} is the number of queries and {topic} the topic in that language.
+# Each asks for neutral queries ("effect of X on Y", not "how X improves Y")
+# written the way people type them into a search engine.
+
+QUERY_PROMPTS = {
+    "en": ("Write {n} web search queries to research this topic. Keep them neutral: each should "
+           "look for evidence (for example \"effect of X on Y\"), not assume a conclusion (for "
+           "example \"how X improves Y\"). Cover different aspects of the topic. Write them the "
+           "way people type them into a search engine.\nOutput exactly {n} lines, one query per "
+           "line, with no numbering and no commentary.\n\nTOPIC: {topic}"),
+    "fr": ("Rédigez {n} requêtes de recherche web pour étudier ce sujet. Restez neutre : chaque "
+           "requête doit chercher des données (par exemple « effet de X sur Y »), sans présupposer "
+           "de conclusion (par exemple « comment X améliore Y »). Couvrez différents aspects du "
+           "sujet. Écrivez-les comme on les tape dans un moteur de recherche.\nRépondez par "
+           "exactement {n} lignes, une requête par ligne, sans numérotation ni commentaire."
+           "\n\nSUJET : {topic}"),
+    "de": ("Schreiben Sie {n} Suchanfragen für eine Websuche, um dieses Thema zu recherchieren. "
+           "Bleiben Sie neutral: Jede Anfrage soll nach Belegen suchen (zum Beispiel „Auswirkung "
+           "von X auf Y“), ohne ein Ergebnis vorwegzunehmen (zum Beispiel „wie X Y verbessert“). "
+           "Decken Sie verschiedene Aspekte des Themas ab. Formulieren Sie die Anfragen so, wie man "
+           "sie in eine Suchmaschine eingibt.\nAntworten Sie mit genau {n} Zeilen, eine "
+           "Suchanfrage pro Zeile, ohne Nummerierung und ohne Kommentar.\n\nTHEMA: {topic}"),
+    "ja": ("このテーマを調べるためのウェブ検索クエリを{n}個作成してください。中立を保ってください。"
+           "各クエリは根拠となるデータを探すものとし（例：「XがYに与える影響」）、結論を前提にしないで"
+           "ください（例：「XはどのようにYを改善するか」）。テーマのさまざまな側面を取り上げてください。"
+           "検索エンジンに実際に入力する形で書いてください。\nちょうど{n}行で答えてください。"
+           "1行に1つのクエリとし、番号や説明は付けないでください。\n\nテーマ：{topic}"),
+    "ko": ("이 주제를 조사하기 위한 웹 검색어를 {n}개 작성하세요. 중립을 지키세요. 각 검색어는 근거 "
+           "자료를 찾는 것이어야 하며(예: 'X가 Y에 미치는 영향'), 결론을 전제해서는 안 됩니다(예: "
+           "'X는 어떻게 Y를 개선하는가'). 주제의 여러 측면을 다루세요. 검색 엔진에 실제로 입력하는 "
+           "형태로 쓰세요.\n정확히 {n}줄로 답하세요. 한 줄에 검색어 하나씩, 번호나 설명 없이 "
+           "쓰세요.\n\n주제: {topic}"),
+    "zh": ("请为研究这个主题写出{n}个网络搜索查询。保持中立：每个查询都应寻找证据（例如“X对Y的影响”），"
+           "而不是预设结论（例如“X如何改善Y”）。涵盖该主题的不同方面。按照人们在搜索引擎中实际输入的"
+           "方式来写。\n请恰好回答{n}行，每行一个查询，不要编号，也不要任何说明。\n\n主题：{topic}"),
+    "pt": ("Escreva {n} consultas de pesquisa na web para investigar este tema. Mantenha a "
+           "neutralidade: cada consulta deve buscar evidências (por exemplo, \"efeito de X sobre "
+           "Y\"), sem pressupor uma conclusão (por exemplo, \"como X melhora Y\"). Cubra "
+           "diferentes aspectos do tema. Escreva as consultas do jeito que as pessoas digitam num "
+           "buscador.\nResponda com exatamente {n} linhas, uma consulta por linha, sem numeração "
+           "e sem comentários.\n\nTEMA: {topic}"),
+    "es": ("Escribe {n} consultas de búsqueda web para investigar este tema. Mantén la "
+           "neutralidad: cada consulta debe buscar datos (por ejemplo, «efecto de X en Y») sin dar "
+           "por hecha una conclusión (por ejemplo, «cómo X mejora Y»). Cubre distintos aspectos "
+           "del tema. Escríbelas como se escriben en un buscador.\nResponde con exactamente {n} "
+           "líneas, una consulta por línea, sin numeración ni comentarios.\n\nTEMA: {topic}"),
+    "ru": ("Составьте {n} поисковых запросов, чтобы исследовать эту тему. Сохраняйте "
+           "нейтральность: каждый запрос должен искать данные (например, «влияние X на Y»), а не "
+           "предполагать вывод (например, «как X улучшает Y»). Охватите разные аспекты темы. "
+           "Пишите запросы так, как их вводят в поисковую систему.\nОтветьте ровно {n} строками, "
+           "по одному запросу в строке, без нумерации и комментариев.\n\nТЕМА: {topic}"),
+}
+
+
+# ════════════════════════════════════════════════════════════════════════
 # QUERY PARSING: turn the AI's answer into a clean list of search queries
 # ════════════════════════════════════════════════════════════════════════
 #
@@ -126,7 +300,7 @@ def _parse_queries(resp, n, lang=None):
     queries = []
     for line, _ in lines:
         q = line.strip(' *"\u201c\u201d\u300c\u300d')
-        if len(q) <= 8:
+        if len(q) <= (3 if lang in ("ja", "ko", "zh") else 8):   # CJK queries are short
             continue
         if re.fullmatch(r"[(\uff08].*[)\uff09]", q):        # "(translation)"
             continue
@@ -224,20 +398,14 @@ def run_explore(args):
     # ════════════════════════════════════════════════════════════════
     # PHASE 1: DEFINE KEY TERMS
     # ════════════════════════════════════════════════════════════════
-    # Before searching, the AI defines every key term in the topic.
-    # If "coding assistant" has 3 different meanings, the research needs
-    # to know that before it starts.
-    #
-    # temp=0.3 means low randomness, which gives factual definitions
-    # instead of imaginative ones.
+    # Before searching, the key terms of the topic are looked up in
+    # dictionaries and reference works (see define_terms). If "coding
+    # assistant" has 3 different meanings, the research needs to know that
+    # before it starts. The framing of the brief reads this file.
 
     print(f"\n{'─'*50}\nDEFINE\n{'─'*50}")
 
-    defs = call_ai(
-        f"List every key term in this topic with a neutral definition, "
-        f"type, and disambiguation note.\n\nTOPIC: {topic}",
-        api_key, model, temp=0.3,
-    )
+    defs = define_terms(topic, api_key, model)
 
     # Save the definitions to scratchpad/01_definitions.md
     pad("01_definitions", f"# Definitions\n\n{defs}")
@@ -261,6 +429,16 @@ def run_explore(args):
 
     all_queries = {}  # Will hold: {"en": [query1, query2, ...], "fr": [...], ...}
 
+    # The topic in each language. A plain translation, kept in the
+    # decomposition file so it can be checked.
+    topics = {"en": topic}
+    for lc, info in LANGUAGES.items():
+        if lc != "en":
+            t = call_ai(f"Translate this research topic into {info['name']}. Keep product and "
+                        f"company names as they are. Output only the translation.\n\n{topic}",
+                        api_key, model, temp=0).strip()
+            topics[lc] = t if t and (lc not in NATIVE_SCRIPT or re.search(NATIVE_SCRIPT[lc], t)) else topic
+
     for lc, info in LANGUAGES.items():
         # lc = language code ("en", "fr", "ja", etc.)
         # info = {"name": "English", "why": "Primary global tech language"}
@@ -274,29 +452,11 @@ def run_explore(args):
         # each language gets the same number of searches.
         n_queries = QUERIES_PER_LANGUAGE
 
-        if lc == "en":
-            prompt = (
-                f"Break this topic into {n_queries} open-ended research questions. "
-                f"Do NOT steer toward a conclusion. Each question should be "
-                f"genuinely exploratory -- 'what does the evidence show about X' "
-                f"not 'how is X improving Y.'\n\nTOPIC: {topic}\n\n"
-                f"Output exactly {n_queries} search queries, one per line. "
-                f"No numbering, no commentary."
-            )
-        else:
-            # Non-English: same number of queries, in the language's own script.
-            # The prompt asks the AI to answer as a developer from that
-            # language community would.
-            prompt = (
-                f"You are a {info['name']}-speaking developer. How does YOUR "
-                f"community discuss this topic? What concerns, terms, and "
-                f"framing are native to {info['name']}-language discourse?\n\n"
-                f"TOPIC: {topic}\nWhy {info['name']}: {info['why']}\n\n"
-                f"Generate {n_queries} search queries in {info['name'].upper()} "
-                f"using native framing. Native script only.\n\n"
-                f"Output exactly {n_queries} lines, one search query per line. "
-                f"No numbering, no translations, no explanations."
-            )
+        # The prompt is written in the language itself (QUERY_PROMPTS), the
+        # same neutral request each time, and the topic is translated first.
+        # A prompt in English that asks for "Japanese queries" gets English
+        # thinking put into Japanese words.
+        prompt = QUERY_PROMPTS[lc].format(n=n_queries, topic=topics[lc])
 
         # Send the prompt to the AI and get back the response, then parse
         # it into clean queries (see _parse_queries above for the rules).
@@ -315,6 +475,7 @@ def run_explore(args):
     # Save the decomposition to the scratchpad
     doc = "# Native Decomposition\n\n"
     for lc, qs in all_queries.items():
+        doc += f"Topic as given to the {LANGUAGES[lc]['name']} prompt: {topics[lc]}\n\n" if lc != "en" else ""
         # f"## {X}\n" creates a Markdown heading
         # "\n".join(f"- {q}" for q in qs) turns the list into bullet points
         doc += f"## {LANGUAGES[lc]['name']}\n" + "\n".join(f"- {q}" for q in qs) + "\n\n"
