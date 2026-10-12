@@ -14,7 +14,8 @@ argue for a position:
                     where sources agree and where they conflict
   Disagreements     findings that contradict each other, and why
   Gaps              what this evidence cannot tell the reader
-  Implications      what it means for the reader
+  Business stakes   what is at play for the reader (cost, risk, competition,
+                    people, regulation): the evidence, then the authors' view
   Method            how the brief was made (written by code, with no AI call)
 
 Every fact comes from the claim ledger (claims.py) and every sentence goes
@@ -67,7 +68,7 @@ from core import (
 # more words.
 # Everything written goes through the fact-check gate (verify.py).
 
-AUDIENCE = "financial industry professionals"   # Who the implications are written for
+AUDIENCE = "financial industry professionals"   # Who the business stakes are written for
 FRAMING_CONTEXT_CHARS = 600000  # Findings + all evidence cards shown to the framing step (~150k tokens)
 UNCITED_MATCH = 0.75          # An uncited sentence this close to a finding gets its sources
 NEAR_REPEAT = 0.92            # Sentences this alike in meaning count as a repeat
@@ -99,7 +100,7 @@ def run_synthesize(args):
     Write the research brief. Steps:
     framing (question and themes) → claim ledger → theme sections →
     disagreements → gaps → fact-check gate → bottom line, key findings and
-    implications (checked too) → method → save.
+    business stakes (checked too) → method → save.
     """
 
     # ── Setup ───────────────────────────────────────────────────────
@@ -372,13 +373,13 @@ def run_synthesize(args):
     checked_text = dict(body)
 
     # ════════════════════════════════════════════════════════════════
-    # 8. BOTTOM LINE, KEY FINDINGS, IMPLICATIONS (from the checked text)
+    # 8. BOTTOM LINE, KEY FINDINGS, BUSINESS STAKES (from the checked text)
     # ════════════════════════════════════════════════════════════════
     # Written last, from sections the gate already checked, so the summary
     # can only repeat what passed. The gate then checks these too.
-    print(f"\n{'─'*50}\n8. BOTTOM LINE, KEY FINDINGS, IMPLICATIONS\n{'─'*50}")
+    print(f"\n{'─'*50}\n8. BOTTOM LINE, KEY FINDINGS, BUSINESS STAKES\n{'─'*50}")
     bottom_line, key_findings = _summarize(question, themes, checked_text, api_key, model)
-    implications = _implications(question, bottom_line, key_findings, api_key, model)
+    stakes = _business_stakes(question, bottom_line, key_findings, checked_text, api_key, model)
     # The summary writer often drops the [n] citations it was told to keep.
     # Each uncited summary sentence borrows the citations of the checked
     # sentences it matches best (its own theme's section for a key finding,
@@ -387,10 +388,10 @@ def run_synthesize(args):
     bottom_line = _cite_from_sections(bottom_line, all_checked)
     key_findings = [_cite_from_sections(k, checked_text.get(t, "")) if k else ""
                     for k, (t, _) in zip(key_findings, themes)]
-    implications = _cite_from_sections(implications, all_checked)
+    stakes = _cite_from_sections(stakes, all_checked)
     summary = [("Bottom line", bottom_line),
                ("Key findings", "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1) if k)),
-               (f"Implications for {AUDIENCE}", implications)]
+               ("Business stakes and our view", stakes)]
     summary_checked, summary_log, summary_verdict = verify.gate(
         [(t, c) for t, c in summary if c], by_idx, gate_facts, api_key, run_audit=False)
     verdict = verify.merge_verdicts(verdict, summary_verdict)
@@ -447,9 +448,12 @@ def run_synthesize(args):
     for title in ("Where the evidence disagrees", "Gaps in the evidence"):
         if checked_text.get(title):
             lines.append(f"## {title}\n\n{checked_text[title]}\n")
-    impl_title = f"Implications for {AUDIENCE}"
-    if summary_text.get(impl_title):
-        lines.append(f"## {impl_title}\n\n{summary_text[impl_title]}\n")
+    if summary_text.get("Business stakes and our view"):
+        # The opening line is written here, so readers know what is fact and what is view
+        lines.append("## Business stakes and our view\n\n"
+                     f"*For {AUDIENCE}. The stakes and the views are the authors' reading of the "
+                     "evidence above; every fact is cited and was checked.*\n\n"
+                     f"{summary_text['Business stakes and our view']}\n")
     lines.append(f"## Method\n\n{method}\n")
     lines.append(f"## References\n\n{apa_text}")
 
@@ -769,18 +773,41 @@ def _summarize(question, themes, checked_text, api_key, model):
     return bottom_line, [keys.get(str(n), "").strip() for n in all_numbers]
 
 
-def _implications(question, bottom_line, key_findings, api_key, model):
-    """Implications for AUDIENCE, reasoned from the bottom line and key findings only."""
+def _business_stakes(question, bottom_line, key_findings, checked_text, api_key, model):
+    """
+    The section 'Business stakes and our view': the 4-6 business stakes
+    (what is at play for AUDIENCE: money, risk, competitive position,
+    people, regulation) that the evidence raises, each with the cited
+    evidence, what it means in business terms, and the authors' view.
+    Written from the checked sections only, so every fact it uses has
+    already passed the gate; the gate then checks this section too.
+    """
     keys = "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1) if k)
-    if not keys:
+    sections = "\n\n".join(f"{t.upper()}:\n{c}" for t, c in checked_text.items() if c)
+    if not sections:
         return ""
     return call_ai(
-        f"RESEARCH QUESTION: {question}\n\nBOTTOM LINE:\n{bottom_line}\n\nKEY FINDINGS:\n{keys}\n\n"
-        f"Write the section 'Implications for {AUDIENCE}' of a research brief: 4-6 short "
-        "paragraphs. Start each with one sentence in bold (the implication), then 2-3 "
-        "sentences of reasoning from the findings. No new facts: a fact you use must come "
-        "from the key findings, with its [n]. No advice the findings don't support. Plain "
-        "words, no dashes as punctuation, no headings.",
+        f"RESEARCH QUESTION: {question}\nREADERS: {AUDIENCE}\n\n"
+        f"BOTTOM LINE:\n{bottom_line}\n\nKEY FINDINGS:\n{keys}\n\n"
+        "Write the section 'Business stakes and our view' of this research brief, for the "
+        "readers above. First decide the 4-6 business stakes this evidence raises for them: "
+        "decisions or exposures where money, risk, competitive position, people or regulation "
+        "is at play, for their own organisation, for the firms they invest in or lend to, or "
+        "for the clients they advise. Choose only stakes the evidence speaks to, most important "
+        "first.\n"
+        "For each stake, write exactly:\n"
+        "### <the stake as a business question, at most 12 words>\n"
+        "Evidence: <2-4 sentences: the findings from the sections below that bear on it, each "
+        "with its [n] citations as given, including findings that cut the other way and what "
+        "stays uncertain>\n"
+        "At stake: <1-3 sentences: what this means for the readers in business terms (cost, "
+        "revenue, risk, competitive position, people, regulation). No new facts or numbers.>\n"
+        "Our view: <1-3 sentences: a clear position on what the readers should do, expect or "
+        "watch; how confident we are (high, medium or low, from how strong the evidence is); "
+        "and what evidence would change the view.>\n\n"
+        "A fact must come from the sections below, with its [n]; never from memory. Plain "
+        "words, no dashes as punctuation.\n\n"
+        f"SECTIONS OF THE BRIEF:\n{sections}",
         api_key, model, temp=0.3) or ""
 
 
@@ -854,7 +881,7 @@ def _cite_from_sections(text, sections_text, most=3, need=0.6):
     in `sections_text` that mean the most nearly the same (the two best
     matches with similarity >= need, at most `most` sources). Sentences with
     no close match stay uncited. Used for the bottom line, key findings and
-    implications, which summarize sections the gate already checked.
+    business stakes, which use sections the gate already checked.
     """
     model = verify._match_model()
     if model is None or not text:
