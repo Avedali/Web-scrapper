@@ -52,6 +52,34 @@ explore → analyze → stats → synthesize → deepen → analyze → viz → 
 
 Opinion comes AFTER data, not before.
 
+## How the brief stays tied to its sources
+
+Synthesize doesn't write from memory, and nobody has to check it by hand:
+
+1. **Claim ledger** (`claims.py`). Every usable source's claims are listed,
+   each with the sentence of the source that states it. Code checks the
+   quote is really in the source (a made-up quote drops the claim), and a
+   local model checks the quote supports the claim *by meaning*. A claim
+   that overstates its quote ("the sky is blue" from "often perceived as
+   blue") is corrected to the quote's hedge and scope, not deleted. Reports
+   of the same finding from several sources are merged, and each finding
+   goes to one section. Cached in `scratchpad/claims.json`.
+2. **Writing.** Each section is written from its own findings, citing them
+   by ID; code turns the IDs into the right source numbers. There's no word
+   quota: hard findings get explained, simple ones get a sentence, and a
+   finding the writer doesn't use must be skipped with a reason
+   (`scratchpad/synthesis_03b_coverage.md`).
+3. **Fact-check gate** (`verify.py`). Rules in code (every number must be
+   in the cited sources, at most 3 sources per claim, no repeats), the local
+   judge, an AI review that corrects or removes what fails, then an
+   independent audit of 20 random sentences against their sources' full
+   text. The verdict -- **PASS** or **NEEDS REVIEW**, with the reasons -- is
+   at the top of the brief, in `scratchpad/brief_verdict.json`, and in the
+   "Run everything" summary. Details: `scratchpad/synthesis_05_fact_check.md`.
+
+Edited a brief by hand? `python agent.py verify brief.md` (or launcher
+option **V**) runs the gate on it and writes a checked copy and a report.
+
 ## Files
 
 | File | What it does |
@@ -68,6 +96,8 @@ Opinion comes AFTER data, not before.
 | `viz.py` | Charts (plotly, dual paper/slide format) |
 | `ask_agent.py` | Teammate Q&A (with conversation memory) |
 | `simulate.py` | Visual coding benchmark |
+| `claims.py` | Claim ledger: checked claims the brief is written from |
+| `verify.py` | Fact-check gate (also `python agent.py verify brief.md`) |
 | `requirements.txt` | All dependencies |
 
 ## Important Notes

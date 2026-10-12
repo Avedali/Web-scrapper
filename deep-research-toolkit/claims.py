@@ -129,6 +129,10 @@ def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_
                 c["status"] = "dropped: quote not in source"
             else:
                 to_judge.append(c)
+    if to_judge and not verify.judge_available():
+        for c in to_judge:   # Quote verified; meaning not checked (light install)
+            c["status"] = "ok"
+        to_judge = []
     if to_judge:
         print(f"   Checking {len(to_judge)} claims against their quotes (local judge)...")
         verdicts = verify.judge_with_passages([(c["claim"], [c["quote"]]) for c in to_judge])

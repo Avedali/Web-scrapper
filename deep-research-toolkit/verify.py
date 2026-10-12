@@ -88,9 +88,26 @@ CONTRADICTED = 0.5     # Probability of "contradiction" that counts as contradic
 _nli = {}   # The loaded model, kept so it's loaded once
 
 
+def judge_available():
+    """
+    True if the local judge can run (PyTorch and transformers installed --
+    the full install). Without it, the other checks still run.
+    """
+    if "available" not in _nli:
+        try:
+            import torch  # noqa: F401
+            import transformers  # noqa: F401
+            _nli["available"] = True
+        except Exception:
+            _nli["available"] = False
+            print("   (local judge unavailable -- PyTorch/transformers not installed; "
+                  "the other checks still run)")
+    return _nli["available"]
+
+
 def _load_nli():
     """Load the model once; on an Apple Silicon Mac, on its GPU if that works."""
-    if not _nli:
+    if "model" not in _nli:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL)
@@ -274,6 +291,7 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
     study's own results -- in the research findings); not a repeat.
     Judge (local model): the cited passages support the sentence's meaning.
     """
+    use_judge = use_judge and judge_available()
     findings_numbers = numbers(findings)
     seen, reports, to_judge = set(), [], []
     for s in statements(text):

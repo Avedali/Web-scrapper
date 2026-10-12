@@ -227,6 +227,7 @@ def main():
         print()
         print("  TEAM")
         print("    8 → Ask          Ask a question about the research")
+        print("    V → Verify       Fact-check a brief (e.g. after editing it by hand)")
         print()
         print("    R → Run everything  1, 2, 3, 4, 7, 6 in a row, no questions (~2.5 hours)")
         print()
@@ -339,6 +340,13 @@ def main():
                 # can ask multiple questions in a row
                 run_mode("ask")
 
+        # --- Option V: run the fact-check gate on a brief ---
+        elif choice.lower() == "v":
+            print("\n  Checks every claim in a brief against its sources, fixes or")
+            print("  removes what isn't supported, and writes a checked copy.")
+            path = input("  Brief to check (Enter = the newest one): → ").strip()
+            run_mode("verify", [path] if path else None)
+
         # --- Option R: everything, unattended ---
         elif choice.lower() == "r":
             print("\n  Runs Explore, Analyze, Stats, Synthesize, Simulate and Charts")
@@ -381,7 +389,7 @@ def main():
 
         # --- Anything else: not a valid option ---
         else:
-            print(f"\n  '{choice}' isn't an option. Type a number 0-9, or R.\n")
+            print(f"\n  '{choice}' isn't an option. Type a number 0-9, R or V.\n")
 
         # After any mode finishes, pause so the user can read the output
         # before the menu reappears and pushes it off screen.
