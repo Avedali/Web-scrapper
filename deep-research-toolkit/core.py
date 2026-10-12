@@ -1,7 +1,7 @@
 """
-core.py -- The shared toolbox that every mode uses.
+core.py: the shared functions that every mode uses.
 ====================================================
-This file contains all the reusable functions:
+This file contains the reusable functions:
   - Searching the web (Google/DuckDuckGo/Brave/SearXNG)
   - Reading web pages (extracting article text)
   - Talking to AI models (via OpenRouter API)
@@ -10,17 +10,17 @@ This file contains all the reusable functions:
   - Detecting what language a text is in
   - Configuration (which languages to search, which phrases to ban)
 
-No mode runs without this file. It's the foundation.
+Every mode imports from this file, so no mode runs without it.
 """
 
 # ════════════════════════════════════════════════════════════════════════
-# IMPORTS -- built-in Python tools (no install needed)
+# IMPORTS: built-in Python tools (no install needed)
 # ════════════════════════════════════════════════════════════════════════
 
-import json       # Read and write JSON files (a structured data format, like a spreadsheet
-                  # but for computers -- {"name": "Alice", "age": 30})
+import json       # Read and write JSON files. JSON is a text format for structured data,
+                  # for example {"name": "Alice", "age": 30}
 
-import re         # "Regular expressions" -- a way to search for patterns in text.
+import re         # "Regular expressions": patterns for searching text.
                   # For example, re.sub(r"\s+", " ", text) replaces multiple spaces with one.
 
 import sys        # Stop with a clear message when a required package is missing
@@ -28,33 +28,33 @@ import os         # Work with files and folders: check if a file exists, create 
                   # read environment variables (system-wide settings like your API key)
 
 import importlib.util  # Check whether optional packages are installed without
-                       # actually importing them (used for citationlib check below)
+                       # importing them (used for the citationlib check below)
 
-import requests   # THE library for making web requests. When you visit a URL in your
-                  # browser, your browser sends an "HTTP request." This library does the
-                  # same thing from Python code: requests.get("https://example.com")
+import requests   # The most widely used library for web requests. When you visit a URL,
+                  # your browser sends an "HTTP request." This library does the same
+                  # from Python code: requests.get("https://example.com")
 
 from urllib.parse import urlparse  # Break a URL into parts:
                                    # urlparse("https://www.bbc.com/news/tech")
                                    #   → scheme="https", netloc="www.bbc.com", path="/news/tech"
                                    # We use this to extract the domain name from URLs.
 
-from pathlib import Path  # A nicer way to work with file paths than raw strings.
+from pathlib import Path  # Handles file paths as objects instead of plain strings.
                           # Path("folder").mkdir(exist_ok=True) creates a folder if it
                           # doesn't exist, and does nothing if it already does.
 
 
 # ════════════════════════════════════════════════════════════════════════
-# LIBRARY LOADING -- try to import each optional library
+# LIBRARY LOADING: try to import each optional library
 # ════════════════════════════════════════════════════════════════════════
 #
-# Each library below was installed by install.py. But some might have failed
-# to install (bad internet, wrong OS, etc.). So we use try/except:
+# install.py installs each library below, but some installs can fail (no
+# internet connection, unsupported OS, etc.). So each import uses try/except:
 #   try:    → try to load the library
-#   except: → if it fails, note that it's missing and move on
+#   except: → if it fails, record that it's missing and move on
 #
-# This way the toolkit still runs even if some libraries are missing --
-# it just skips the features that need them.
+# This way the toolkit still runs when some libraries are missing, and it
+# skips the features that need them.
 #
 # We use "flag variables" (like _TRAF = True/False) so other parts of
 # the code can check "is trafilatura available?" before trying to use it.
@@ -70,17 +70,17 @@ try:
     _SEARCH_DDG = True
 except ImportError:
     try:
-        from duckduckgo_search import DDGS  # Old name -- likely returns nothing
+        from duckduckgo_search import DDGS  # Old name; likely returns nothing
         _SEARCH_DDG = True
     except ImportError:
         _SEARCH_DDG = False
 
 # multi_search_engine is the fallback: if DDG returns nothing (which happens
 # with some non-English queries), we try Google via this package.
-# NOTE: the install name is multi_search_engine but the import name is
-# multi_search (yes, they're different -- not ideal but it works).
-# Google's index is significantly deeper for Japanese, Chinese, Korean content,
-# so this fallback matters for the multilingual doctrine.
+# The package installs as multi_search_engine but is imported as
+# multi_search (the two names differ).
+# Google's index holds many more Japanese, Chinese and Korean pages, so this
+# fallback matters for the toolkit's searches in 9 languages.
 try:
     from multi_search import search as _google_search
     _SEARCH_GOOGLE = True
@@ -91,25 +91,26 @@ except ImportError:
 if _SEARCH_DDG or _SEARCH_GOOGLE:
     _SEARCH = "available"
 else:
-    _SEARCH = "none"  # No search at all -- install: pip install ddgs
+    _SEARCH = "none"  # No search library. Install one with: pip install ddgs
 
 # --- Trafilatura (article text extraction from web pages) ---
 try:
     import trafilatura  # Extracts the article text from a web page,
     from trafilatura.settings import use_config as _traf_config
                         # ignoring navigation, ads, footers, sidebars.
-                        # Best-in-class for this job (benchmarked).
+                        # It scored best at this task in benchmarks.
     _TRAF = True
 except ImportError:
     _TRAF = False
 
-# Give up on a page after 15 seconds instead of trafilatura's default 30 --
-# one very slow site shouldn't hold up a batch of downloads.
+# Give up on a page after 15 seconds instead of trafilatura's default of 30,
+# so one slow site doesn't hold up a batch of downloads.
 if _TRAF:
     _TRAF_CONFIG = _traf_config()
     _TRAF_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", "15")
-    # A page that won't download is normal (we count them); without this,
-    # trafilatura logs several lines per failed page and buries the progress
+    # Some pages always fail to download (the toolkit counts them). Without
+    # these lines, trafilatura logs several lines per failed page and the
+    # progress messages are hard to find among them.
     import logging
     logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
     logging.getLogger("urllib3").setLevel(logging.ERROR)
@@ -117,8 +118,8 @@ if _TRAF:
 # --- Camoufox (stealth browser for bot-protected sites) ---
 try:
     from camoufox.sync_api import Camoufox  # A modified Firefox browser that
-                                             # looks like a real human browsing,
-                                             # not a bot. Bypasses anti-scraping.
+                                             # websites take for a person browsing.
+                                             # It gets past anti-scraping blocks.
     from camoufox.pkgman import installed_verstr
     installed_verstr()   # Raises if the browser itself (~300MB) isn't downloaded
     _CAMO = True
@@ -127,8 +128,8 @@ except Exception:        # Not installed, browser missing, or a broken install
 
 # --- Language detection ---
 try:
-    from langdetect import detect as _detect_lang  # Feed it text, it tells you
-                                                    # what language: "en", "fr", "ja"
+    from langdetect import detect as _detect_lang  # Takes text and returns its
+                                                    # language: "en", "fr", "ja"
     _LANG = True
 except ImportError:
     _LANG = False
@@ -136,7 +137,7 @@ except ImportError:
     def _detect_lang(t):
         return "unknown"
 
-# --- Semantic Scholar (academic paper search -- 200M+ papers) ---
+# --- Semantic Scholar (academic paper search, 200M+ papers) ---
 try:
     from semanticscholar import SemanticScholar  # Search academic papers by keyword,
                                                   # get citation counts, abstracts, etc.
@@ -144,7 +145,7 @@ try:
 except ImportError:
     _S2 = False
 
-# --- arXiv (preprint paper search -- where scientists post new research) ---
+# --- arXiv (preprint search: the site where scientists post new research) ---
 try:
     import arxiv as _arxiv  # "as _arxiv" renames it to avoid conflicts.
                             # arXiv hosts millions of research papers, mostly
@@ -153,7 +154,7 @@ try:
 except ImportError:
     _ARXIV = False
 
-# --- Hacker News (developer discussion forum -- via Algolia search API) ---
+# --- Hacker News (developer discussion forum, searched via the Algolia API) ---
 try:
     from hn import search_by_date as _hn_search  # Search HN stories and comments
                                                    # by keyword, date, and points.
@@ -164,24 +165,25 @@ except ImportError:
 # --- Citation formatting (generates APA references from URLs) ---
 # Check whether citationlib is installed without importing it.
 # importlib.util.find_spec returns a spec object if the package exists,
-# or None if it doesn't -- no side effects, no import needed.
+# or None if it doesn't. The package is not imported, so none of its code runs.
 _CITE = importlib.util.find_spec("citationlib") is not None
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CONFIGURATION -- settings used across all modes
+# CONFIGURATION: settings used across all modes
 # ════════════════════════════════════════════════════════════════════════
 
 # Where all intermediate work is saved. Every mode reads from and writes
 # to this folder, so they can share data without passing it directly.
 SCRATCHPAD = "scratchpad"
 
-# The 9 languages we search in. Each gets its OWN native decomposition
-# (not translated English -- the AI generates queries as a native speaker
-# of that language would frame them).
+# The 9 languages the toolkit searches in. For each language the AI writes
+# its own queries, phrased the way a native speaker would ask, instead of
+# translating the English queries.
 #
-# "why" explains why this language adds a perspective English misses.
-# This isn't decoration -- developer culture is genuinely different in each.
+# "why" says what perspective this language adds that English sources miss.
+# explore puts it in the prompt that asks for queries, because developer
+# culture differs from one country to the next.
 #
 # "region" tells the search engines which country's results to favor.
 # Without it every search runs as US-English, and e.g. Chinese queries
@@ -200,7 +202,7 @@ LANGUAGES = {
 }
 
 # Phrases the voice cleaner will strip from AI-generated text.
-# These are "LLM-speak" -- filler phrases that AI models overuse.
+# These are "LLM-speak": filler phrases that AI models overuse.
 # They make text sound generic and untrustworthy in academic writing.
 # The voice cleaner in synthesize.py searches for these and removes them.
 BANNED_PHRASES = [
@@ -231,7 +233,7 @@ BANNED_PHRASES = [
     "synergy", "leverage the power",
 
     # ── Non-English LLM-speak ───────────────────────────────────────
-    # AI models produce filler in every language, not just English.
+    # AI models produce filler in other languages too.
     # These are the French, German, Japanese, Spanish, and Portuguese
     # equivalents of the English patterns above.
     #
@@ -258,7 +260,7 @@ BANNED_PHRASES = [
 
 
 # ════════════════════════════════════════════════════════════════════════
-# SEARCH -- functions that find things on the internet
+# SEARCH: functions that find things on the internet
 # ════════════════════════════════════════════════════════════════════════
 
 def init_search(serper_key=None, brave_key=None):
@@ -268,7 +270,7 @@ def init_search(serper_key=None, brave_key=None):
     The serper_key/brave_key parameters are kept for future expansion
     but are not used with the current DDG-only setup.
     """
-    pass  # ddgs needs no setup -- it just works
+    pass  # ddgs needs no setup
 
 
 def search_web(query, n=5, region="us-en"):
@@ -280,13 +282,13 @@ def search_web(query, n=5, region="us-en"):
       - "title":   the page title
       - "url":     the full URL
       - "snippet": a preview of the page content
-      - "domain":  just the domain name (e.g., "bbc.com")
+      - "domain":  the domain name alone (e.g., "bbc.com")
 
     Two-tier search:
-      1. ddgs (primary -- free, no API key, queries several engines)
-      2. Google via multi_search_engine (fallback -- used when DDG returns
-         empty, which happens with some non-English queries. Google's index
-         is deeper for Japanese, Chinese, Korean content.)
+      1. ddgs (primary: free, no API key, queries several engines)
+      2. Google via multi_search_engine (fallback, used when DDG returns
+         nothing, which happens with some non-English queries. Google's index
+         has more Japanese, Chinese and Korean pages.)
 
     Returns an empty list if both engines fail.
     """
@@ -307,22 +309,22 @@ def search_web(query, n=5, region="us-en"):
                     "snippet": r.get("body", ""),              # DDG uses "body"
                 })
         except Exception as e:
-            # Log the error instead of silently swallowing it.
+            # Print the error (after the second failure) instead of hiding it.
             if attempt == 1:
                 print(f"      Web search error: {type(e).__name__}: {e}")
 
     # ── Tier 2: Google fallback (when DDG returns empty) ────────────
-    # DDG sometimes returns nothing for non-English queries or very
-    # specific searches. Google's index is significantly deeper,
-    # especially for Japanese, Chinese, Korean, and Russian content.
-    # We only try Google if DDG returned zero results (not as a
-    # supplement -- we don't want duplicate results).
+    # DDG sometimes returns nothing for non-English queries or narrow
+    # searches. Google's index has many more pages, especially in
+    # Japanese, Chinese, Korean and Russian.
+    # Google is tried only when DDG returned zero results. Running it on
+    # every search as well would add duplicate results.
     if not results and _SEARCH_GOOGLE:
         try:
             # _google_search is the search() function from multi_search.
             # search_engine="google" uses Google without an API key (scrapes HTML).
-            # The return format is a list, but the exact structure varies --
-            # we handle both dict-style and tuple-style results.
+            # The return format is a list, but the structure of each item
+            # varies, so the code handles both dict-style and tuple-style results.
             raw = _google_search(query, num_results=n, search_engine="google")
 
             for r in (raw or [])[:n]:
@@ -353,8 +355,8 @@ def search_web(query, n=5, region="us-en"):
     for r in results:
         r["domain"] = urlparse(r.get("url", "")).netloc
 
-    # Drop results without a usable web address (some engines occasionally
-    # return an empty or relative link -- there's nothing to fetch there)
+    # Drop results without a usable web address (some engines sometimes
+    # return an empty or relative link, which can't be fetched)
     return [r for r in results if r["domain"] and r["url"].startswith("http")]
 
 
@@ -372,20 +374,20 @@ def search_academic(query, n=5):
     """
     papers = []
 
-    # ── Semantic Scholar (200M+ papers, great for CS/AI) ────────────
+    # ── Semantic Scholar (200M+ papers, strong in CS/AI) ────────────
     if _S2:
         try:
             # Create a Semantic Scholar client and search
             # retry=False: without an API key Semantic Scholar often answers
             # "too many requests", and its built-in retries back off for
-            # minutes per query. Fail fast instead -- arXiv still runs.
+            # minutes per query. It fails at once instead, and arXiv still runs.
             for p in SemanticScholar(retry=False, timeout=20).search_paper(query, limit=n):
                 papers.append({
                     "title": p.title or "",
                     "domain": "semanticscholar.org",
                     # Build a URL to the paper's page
                     "url": p.url or f"https://www.semanticscholar.org/paper/{p.paperId}",
-                    # The whole abstract -- for papers, it IS the content
+                    # The whole abstract, used as the paper's content
                     "snippet": p.abstract or "",
                     # getattr(p, "year", None) means: get p.year if it exists,
                     # otherwise return None (nothing). Safer than p.year which
@@ -396,7 +398,7 @@ def search_academic(query, n=5):
         except Exception as e:
             print(f"      Semantic Scholar error: {type(e).__name__}: {e}")
 
-    # ── arXiv (preprints -- very recent, not yet peer-reviewed) ──────
+    # ── arXiv (preprints: recent, not yet peer-reviewed) ────────────
     if _ARXIV:
         try:
             client = _arxiv.Client()   # Create an arXiv API client
@@ -409,7 +411,7 @@ def search_academic(query, n=5):
                     "domain": "arxiv.org",
                     "url": p.entry_id,           # arXiv's unique URL for this paper
                     "snippet": p.summary or "",   # The whole abstract
-                    # p.published is a datetime object; .year extracts just the year
+                    # p.published is a datetime object; .year extracts only the year
                     "year": p.published.year if p.published else None,
                 })
         except Exception as e:
@@ -423,9 +425,9 @@ def search_hn(query, n=10):
     Search Hacker News for developer discussions about a topic.
 
     Hacker News is a forum where developers discuss tech. It's run by
-    Y Combinator (a famous startup incubator). The discussions are often
-    high-quality and represent what developers actually think, not what
-    companies want them to think.
+    Y Combinator (a well-known startup incubator). The discussions are often
+    high-quality and show developers' own opinions, which can differ from
+    what the companies selling the tools say.
 
     Returns a list of stories with title, URL, snippet, and upvote count.
     """
@@ -462,7 +464,7 @@ def search_hn(query, n=10):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CONTENT EXTRACTION -- reading the actual text from web pages
+# CONTENT EXTRACTION: reading the text of web pages
 # ════════════════════════════════════════════════════════════════════════
 
 # How much text to keep per source. Measured on 40 real corpus pages: median
@@ -480,15 +482,15 @@ def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
 
     This is a three-tier system:
       Tier 1: trafilatura (fast, no browser, works ~80% of the time)
-      Tier 2: camoufox (stealth browser, beats bot detection, slower)
+      Tier 2: camoufox (stealth browser, gets past bot detection, slower)
       Tier 3: give up and return None
 
     Returns the extracted text (up to max_chars), or None if it fails.
 
-    Why two tiers? Most websites serve their content as plain HTML,
-    which trafilatura can read directly. But some sites (Reddit, LinkedIn,
+    Reason for two tiers: most websites serve their content as plain HTML,
+    which trafilatura can read directly. Some sites (Reddit, LinkedIn,
     news paywalls) detect automated access and block it. Camoufox opens
-    a real browser that looks like a human, so these sites let it through.
+    a real browser that these sites take for a person, so they let it through.
     """
 
     # ── Tier 1: trafilatura (fast, no browser needed) ───────────────
@@ -498,17 +500,17 @@ def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
             html = trafilatura.fetch_url(url, config=_TRAF_CONFIG)
 
             if html:
-                # Step 2: Extract just the article text from all that HTML
+                # Step 2: Extract the article text from the HTML
                 # include_tables=True: keep data tables (useful for research)
-                # favor_recall=True: get more content even if some noise sneaks in
+                # favor_recall=True: keep more text, even if some non-article text comes with it
                 text = trafilatura.extract(html, include_tables=True, favor_recall=True)
 
-                # Only return it if we got something substantial (100+ chars)
-                # A page that returns only 10 characters probably failed
+                # Return it only if it has more than 100 characters.
+                # A result of 10 characters probably means extraction failed.
                 if text and len(text.strip()) > 100:
                     return text[:max_chars]  # Truncate to max length
         except Exception:
-            pass  # trafilatura failed -- fall through to Tier 2
+            pass  # trafilatura failed; go on to Tier 2
 
     # ── Tier 2: camoufox (stealth browser, for protected sites) ─────
     if _CAMO and use_browser:
@@ -525,7 +527,7 @@ def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
     return None  # Couldn't read the page with any method
 
 
-# JavaScript run INSIDE the page to get its main text: remove navigation,
+# JavaScript run inside the page to get its main text: remove navigation,
 # headers, footers and sidebars, then take the main content area.
 _EXTRACT_JS = """() => {
     for (const s of ['nav','header','footer','aside','.sidebar'])
@@ -536,7 +538,7 @@ _EXTRACT_JS = """() => {
 
 
 def _read_with_browser(browser, url, max_chars):
-    """Open url in an already-running camoufox browser; its text or None."""
+    """Open url in an already-running camoufox browser; return its text, or None."""
     page = browser.new_page()                  # Open a new tab
     try:
         page.goto(url, timeout=20000)          # 20 second timeout
@@ -554,13 +556,13 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     """
     Fetch many pages at once. Returns {url: text} for the pages that worked.
 
-    Tier 1 (trafilatura) runs `workers` downloads in parallel -- most of the
-    time is spent waiting on websites, so this is ~6x faster than one by
+    Tier 1 (trafilatura) runs `workers` downloads in parallel. Most of the
+    time goes to waiting on websites, so this is ~6x faster than one by
     one. Pages that fail are then retried one at a time with the camoufox
     browser (tier 2), which can't safely run in parallel.
     """
-    # Without a page reader every page "fails" and only search snippets are
-    # kept -- stop now rather than run for half an hour and save nothing
+    # Without a page reader every page fails and only search snippets are
+    # kept. Stopping here avoids a half-hour run that saves nothing.
     if urls and not (_TRAF or _CAMO):
         sys.exit("\n   No page reader is installed (trafilatura). "
                  "Run install.py, or: pip install trafilatura")
@@ -572,7 +574,7 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     texts = _read_pages_isolated(urls, max_chars, workers)
     pages = {u: texts[u] for u in urls if texts.get(u)}
 
-    # Retry the failures in ONE browser (opening a browser per page is slow)
+    # Retry the failures in a single browser (opening one per page is slow)
     failed = [u for u in urls if u not in pages]
     if _CAMO and failed:
         print(f"      retrying {len(failed)} blocked pages in the stealth browser...")
@@ -584,7 +586,7 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
                         if text:
                             pages[u] = text
                     except Exception:
-                        continue  # This page still won't load -- skip it
+                        continue  # This page still won't load; skip it
         except Exception as e:
             print(f"      camoufox unavailable: {type(e).__name__}")
 
@@ -597,12 +599,12 @@ def _read_pages_isolated(urls, max_chars, workers):
     Read pages with trafilatura, `workers` at a time, in a helper process.
     Returns {url: text or None}.
 
-    Why a helper process: a crash inside a C library (the HTML parser
-    lxml/libxml2 -- "double free or corruption", "segmentation fault") kills
-    the whole program it happens in -- it once ended an unattended run two
-    minutes into explore. Here it only kills the helper: the few
-    pages it was reading at that moment are skipped, and a new helper
-    carries on with the rest.
+    Reason for a helper process: a crash inside a C library (the HTML parser
+    lxml/libxml2, with errors such as "double free or corruption" or
+    "segmentation fault") kills the whole program it happens in. It once
+    ended an unattended run two minutes into explore. Here it kills only the
+    helper: the few pages it was reading at that moment are skipped, and a
+    new helper continues with the rest.
     """
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
@@ -620,7 +622,7 @@ def _read_pages_isolated(urls, max_chars, workers):
             try:
                 msg = json.loads(line)
             except ValueError:
-                continue  # Some library printed a line of its own -- not ours
+                continue  # A line some library printed on its own; skip it
             if "start" in msg:
                 reading.add(msg["start"])
             elif "done" in msg:
@@ -642,7 +644,7 @@ def _read_pages_isolated(urls, max_chars, workers):
         crashes += 1
         rest = [u for u in todo if u not in results and u not in reading]
         if n_workers == 1 and reading:
-            # One page at a time, so this is the page that crashes it -- skip it
+            # The helper read one page at a time, so this page caused the crash. Skip it.
             results.update(dict.fromkeys(reading))
             print(f"      skipped a page that crashes the page reader: {next(iter(reading))[:80]}",
                   flush=True)
@@ -653,7 +655,7 @@ def _read_pages_isolated(urls, max_chars, workers):
                   flush=True)
             jobs.insert(0, (sorted(reading), 1))
         else:
-            # It crashed before reading anything (a broken install?) -- give up
+            # It crashed before reading any page (possibly a broken install). Give up.
             print(f"      the page reader won't start (exit code {exit_code})", flush=True)
             break
         if rest:
@@ -664,9 +666,9 @@ def _read_pages_isolated(urls, max_chars, workers):
 def _read_pages_worker():
     """
     The helper process of _read_pages_isolated: reads the job (JSON) from
-    stdin and prints one JSON line per page -- "start" before reading it,
-    "done" with its text after -- so the main program knows, if this
-    process crashes, which pages were being read at that moment.
+    stdin and prints one JSON line per page: "start" before reading it and
+    "done" with its text afterwards. If this process crashes, the main
+    program then knows which pages were being read at that moment.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -711,8 +713,8 @@ def search_many(jobs, workers=3):
     """
     from concurrent.futures import ThreadPoolExecutor  # Run searches in parallel
 
-    # Without a search library every search "finds nothing" -- stop with
-    # the real reason instead of reporting 0 results and carrying on
+    # Without a search library every search finds nothing. Stop and print
+    # the reason instead of reporting 0 results and continuing.
     if jobs and _SEARCH == "none":
         sys.exit("\n   No web search library is installed (ddgs). "
                  "Run install.py, or: pip install ddgs")
@@ -721,38 +723,39 @@ def search_many(jobs, workers=3):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# AI -- talking to AI models via the OpenRouter API
+# AI: sending prompts to AI models through the OpenRouter API
 # ════════════════════════════════════════════════════════════════════════
 
 def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
     """
     Send a prompt to an AI model and get back its response.
 
-    This is the core of what makes the toolkit "AI-powered."
+    Every AI step in the toolkit goes through this function.
     It sends a message to a model (Claude, GPT, Llama, Mistral, etc.)
-    via the OpenRouter API and returns what the model says.
+    through the OpenRouter API and returns the model's reply.
 
     Parameters:
-        prompt   -- what you want the AI to do (the question/instruction)
-        api_key  -- your OpenRouter API key (the password)
-        model    -- which AI model to use (e.g., "google/gemini-2.5-flash-lite")
-        temp     -- "temperature" -- controls randomness. 0 = very predictable,
-                   1 = very creative. 0.6 is a good middle ground for research.
-        system   -- optional "system prompt" that tells the AI how to behave
-                   (e.g., "you are an academic researcher, be precise")
-        max_tokens -- cap on the length of the reply. The default (16,000
-                   tokens, ~12,000 words) is far above any real answer, but
-                   stops a model stuck in a loop: one once wrote 270 KB of
-                   made-up search queries into the bias audit.
+        prompt:     what you want the AI to do (the question/instruction)
+        api_key:    your OpenRouter API key (it works as a password)
+        model:      which AI model to use (e.g., "google/gemini-2.5-flash-lite")
+        temp:       "temperature", which controls randomness. 0 = most
+                    predictable, 1 = most varied. 0.6 is a middle setting
+                    that suits research.
+        system:     optional "system prompt" that tells the AI how to behave
+                    (e.g., "you are an academic researcher, be precise")
+        max_tokens: cap on the length of the reply. The default (16,000
+                    tokens, ~12,000 words) is far above any normal answer,
+                    and it stops a model stuck in a loop: one once wrote
+                    270 KB of made-up search queries into the bias audit.
 
     Returns the AI's response as a text string, or "" if something went wrong.
 
-    HOW AN API CALL WORKS (ELI5):
+    How an API call works:
     Your code sends a message over the internet to OpenRouter's server.
     OpenRouter forwards it to the AI model you chose.
-    The AI thinks and generates a response.
+    The model generates a response.
     OpenRouter sends that response back to your code.
-    The whole trip takes 2-30 seconds depending on how much you asked for.
+    The whole trip takes 2-30 seconds, depending on how much you asked for.
     """
 
     # Build the messages list. AI APIs use a "conversation" format:
@@ -763,20 +766,21 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
     if system:
         msgs.append({"role": "system", "content": system})
 
-    # The "user" message is your actual question/instruction
+    # The "user" message is your question/instruction
     msgs.append({"role": "user", "content": prompt})
 
     import time
 
-    # Temporary failures -- "too many requests" (429), a busy or timed-out
-    # server (5xx), a dropped connection -- are retried after a growing wait:
-    # an unattended run shouldn't lose a step to a 20-second hiccup.
+    # Temporary failures ("too many requests" (429), a busy or timed-out
+    # server (5xx), a dropped connection) are retried after waits of 5, 20
+    # and 60 seconds, so an unattended run doesn't lose a step to a
+    # 20-second outage.
     # Permanent ones (bad key, no credit left, bad request) fail at once.
     waits = [5, 20, 60]
     for attempt in range(len(waits) + 1):
         try:
-            # requests.post sends data to a web server -- here, OpenRouter's
-            # chat endpoint, with our key and the conversation as JSON
+            # requests.post sends data to a web server: here, OpenRouter's
+            # chat endpoint, with the API key and the conversation as JSON
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -805,7 +809,7 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
             r.raise_for_status()
 
             # The AI's text is nested inside: choices -> [first] -> message -> content
-            # (a model can return an empty reply as null -- treat it as "")
+            # (a model can return an empty reply as null, which becomes "")
             return r.json()["choices"][0]["message"]["content"] or ""
 
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -824,22 +828,22 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# SCRATCHPAD -- saving and loading intermediate work
+# SCRATCHPAD: saving and loading intermediate work
 # ════════════════════════════════════════════════════════════════════════
 #
 # The scratchpad is a folder where every mode saves its output.
-# Think of it like a shared notebook: explore writes its findings,
-# analyze reads them and adds NLP results, stats reads those and
-# adds statistical tests, synthesize reads everything and writes
-# the thesis. Each mode reads from the previous mode's work.
+# explore writes its findings there, analyze reads them and adds NLP
+# results, stats reads those and adds statistical tests, and synthesize
+# reads everything and writes the thesis. Each mode reads the previous
+# mode's output.
 
 def pad(name, content):
     """
     Save a piece of work to the scratchpad folder as a .md file.
 
     Parameters:
-        name    -- filename (without .md extension)
-        content -- the text to save
+        name:    filename (without .md extension)
+        content: the text to save
 
     Example: pad("01_definitions", "# Definitions\n\n...")
     Creates: scratchpad/01_definitions.md
@@ -852,7 +856,7 @@ def pad(name, content):
     p = os.path.join(SCRATCHPAD, f"{name}.md")
 
     # Open the file for writing ("w") with UTF-8 encoding
-    # (UTF-8 handles all languages -- Japanese, Chinese, Arabic, etc.)
+    # (UTF-8 handles all languages: Japanese, Chinese, Arabic, etc.)
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)  # Write the content to the file
 
@@ -909,7 +913,7 @@ def load_corpus_texts():
 
 
 # ════════════════════════════════════════════════════════════════════════
-# SOURCE CLASSIFICATION -- what kind of source is this?
+# SOURCE CLASSIFICATION: labelling each source by type
 # ════════════════════════════════════════════════════════════════════════
 #
 # Not all sources are equally trustworthy. An academic paper from arxiv.org
@@ -929,13 +933,14 @@ def classify_source(domain):
     it's academic. If it contains "techcrunch", it's journalism.
 
     any(x in d for x in [...]) means:
-    "is ANY of these strings found inside d?"
+    "is at least one of these strings found inside d?"
     It returns True if at least one match is found.
     """
     d = domain.lower()  # Lowercase so "ArXiv.org" and "arxiv.org" both match
 
-    # Country-style endings (".edu", ".go.jp") are checked as SUFFIXES --
-    # "edu" as a plain substring would also match e.g. "education-news.com".
+    # Country-style endings (".edu", ".go.jp") are checked as suffixes (the
+    # end of the name). Checking "edu" anywhere in the name would also match
+    # e.g. "education-news.com".
     def ends(*suffixes):
         return d.endswith(suffixes)
 
@@ -952,20 +957,20 @@ def classify_source(domain):
 
     if any(x in d for x in ["capgemini", "rolandberger", "nomura", "deloitte", "kpmg", "mckinsey",
                             "pwc", "accenture", "bcg.com", "bain.com", "gartner"]):
-        return "consulting"  # Note: consulting firms have their own biases
+        return "consulting"  # Consulting firms have their own biases
 
-    # Companies that SELL AI coding tools. Plain github.com is NOT here:
-    # most of it is user repositories, not GitHub's own publications.
+    # Companies that sell AI coding tools. Plain github.com is left out:
+    # most of it is user repositories, which GitHub does not write itself.
     if any(x in d for x in ["github.blog", "docs.github.com", "microsoft.com", "openai.com",
                             "jetbrains", "stackoverflow.blog", "anthropic.com", "cursor.com",
                             "ibm.com", "tabnine", "codeium", "windsurf", "replit.com",
                             "sourcegraph", "kimi.ai", "aliyun.com"]):
-        return "vendor/primary"  # These companies SELL the tools being studied
+        return "vendor/primary"  # These companies sell the tools being studied
 
     if any(x in d for x in ["news.ycombinator", "dev.to", "lobste.rs", "reddit.com", "qiita.com",
                             "zenn.dev", "note.com", "tistory.com", "brunch.co.kr", "velog.io",
                             "habr.com"]):
-        return "experiential/forum"  # Real developer discussions
+        return "experiential/forum"  # Discussions written by developers
 
     if any(x in d for x in ["reuters", "ft.com", "nytimes", "bloomberg", "techcrunch", "wired",
                             "lemonde", "lesechos", "heise.de", "golem.de", "zdnet", "theverge",
@@ -987,22 +992,22 @@ def detect_lang(text):
     "ja" for Japanese, etc. Returns "unknown" if detection fails
     or the text is too short to detect reliably.
 
-    We only try if the text is at least 50 characters long --
-    shorter text doesn't give the detector enough to work with.
+    It only tries when the text is longer than 50 characters. Shorter
+    text doesn't give the detector enough to work with.
     """
     if _LANG and text and len(text) > 50:
         try:
             # Only analyze first 500 chars (faster). langdetect returns
-            # regional codes like "zh-cn" / "zh-tw"; keep just the base
+            # regional codes like "zh-cn" / "zh-tw"; keep only the base
             # code so it matches the keys in LANGUAGES ("zh").
             return _detect_lang(text[:500]).split("-")[0]
         except Exception:
-            pass  # Detection failed -- return 'unknown'
+            pass  # Detection failed; return 'unknown'
     return "unknown"
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CAPABILITIES -- show what's installed and working
+# CAPABILITIES: show what's installed and working
 # ════════════════════════════════════════════════════════════════════════
 
 def print_capabilities():
@@ -1028,8 +1033,8 @@ def extract_quoted_queries(text, min_len=10):
     """
     Pull search queries out of AI text where they appear in quotes.
 
-    We match EVERY quoted string first (short ones included) and only then
-    filter by length. Matching just long strings (r'"([^"]{10,})"') pairs
+    It matches every quoted string first (short ones included) and then
+    filters by length. Matching only long strings (r'"([^"]{10,})"') pairs
     the wrong quote marks after a short quote: 'try "AI" or "junior dev
     adoption"' would yield ' or ' as a "query". Curly quotes are handled
     too, and a query never spans lines.
@@ -1049,8 +1054,8 @@ def extract_search_queries(text, min_len=10):
 
     Prompts ask for lines like "QUERY: junior developer AI adoption 2025"
     (see QUERY_FORMAT). Grabbing every quoted string instead also grabbed
-    quoted CLAIMS ("superficial", "cognitive load eroding,") and quoted
-    source TITLES, which then got searched as if they were queries. Quoted
+    quoted claims ("superficial", "cognitive load eroding,") and quoted
+    source titles, which then got searched as if they were queries. Quoted
     text is only used as a fallback when the model ignored the format.
     Near-duplicates ("cognitive load eroding," vs "...eroding.") are dropped.
     """
@@ -1068,10 +1073,10 @@ def extract_search_queries(text, min_len=10):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# BATCHING -- let the AI read more text than fits in one prompt
+# BATCHING: let the AI read more text than fits in one prompt
 # ════════════════════════════════════════════════════════════════════════
 #
-# Used by ask_agent (answer from ALL research), analyze (topic clustering)
+# Used by ask_agent (answers from all the research), analyze (topic clustering)
 # and synthesize (read every source before writing).
 
 def make_batches(parts, batch_chars=12000):
@@ -1107,7 +1112,7 @@ def make_batches(parts, batch_chars=12000):
 def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
     """
     Send one prompt per batch, several at a time, and return the answers
-    IN BATCH ORDER. make_prompt(batch) builds each prompt. A failed call
+    in batch order. make_prompt(batch) builds each prompt. A failed call
     gives "" (call_ai already printed why). Lower workers if rate-limited.
     """
     from concurrent.futures import ThreadPoolExecutor  # Run calls in parallel
@@ -1120,18 +1125,18 @@ def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# EVIDENCE CARDS -- one short English summary per source
+# EVIDENCE CARDS: one short English summary per source
 # ════════════════════════════════════════════════════════════════════════
 #
 # A card is 1-2 sentences of the concrete findings, numbers and claims in a
 # source, written in English whatever the source's language, tagged with
 # the source number: "[44] Korean survey: Copilot raised PR completions 26%..."
 #
-# Why: the corpus is ~150 sources in 9 languages, ~400,000 characters.
-# Cards shrink it ~10x while keeping every source, so:
-#   - synthesize can show the AI EVERY source (not the first 10)
-#   - analyze can cluster sources by THEME (clustering raw multilingual text
-#     gives topics labelled "die / der / de")
+# Reason: the corpus is ~150 sources in 9 languages, ~400,000 characters.
+# Cards make it ~10x smaller and still cover every source, so:
+#   - synthesize can show the AI all sources instead of the first 10
+#   - analyze can cluster sources by theme (clustering the raw multilingual
+#     text gives topics labelled "die / der / de")
 # Cards are cached in scratchpad/evidence_cards.json, so re-runs (e.g. after
 # deepen adds sources) only pay for new or changed sources.
 
@@ -1168,7 +1173,7 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
         if attempt == 0:
             print(f"   Writing evidence cards for {len(todo)} sources...")
         parts = [(f"[{s['idx']}] ({s.get('lang', '?')}) {s.get('title', '')} -- {s.get('domain', '')}",
-                  s.get("content", "")) for s in todo]   # the WHOLE stored text
+                  s.get("content", "")) for s in todo]   # the whole stored text
         answers = ai_map(
             # ~80,000 characters per call (~20k tokens): big enough that a
             # source is never split across calls (sources are <= CONTENT_CHARS)

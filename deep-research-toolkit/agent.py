@@ -3,7 +3,7 @@
 Deep Research Toolkit
 ======================
 Usage:
-    python agent.py explore    --key KEY    # 1.a  Exploratory research (no opinion, just gather)
+    python agent.py explore    --key KEY    # 1.a  Exploratory research (collects sources, takes no position)
     python agent.py synthesize              # 1.b  Read everything → propose thesis → outline
     python agent.py deepen     --key KEY    # 1.c  Targeted research to support the thesis
     python agent.py analyze                 # 2.a  NLP: sentiment, zero-shot, NER, topics
@@ -21,16 +21,16 @@ import os
 import subprocess
 import sys
 
-# If a C library crashes (no Python error, just "Segmentation fault" or
-# "double free"), print where every thread was -- so the log says what broke
+# If a C library crashes (no Python error, only "Segmentation fault" or
+# "double free"), print where every thread was, so the log shows what broke.
 faulthandler.enable()
 
 
 def use_toolkit_venv():
     """
-    If install.py had to put the packages in a private environment (.venv --
-    it does that for Homebrew's Python on a Mac), run this script with that
-    environment's Python instead, so every package is found.
+    If install.py put the packages in a private environment (.venv, which it
+    does for Homebrew's Python on a Mac), run this script again with that
+    environment's Python so every package is found.
     """
     venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
     python = (os.path.join(venv, "Scripts", "python.exe") if os.name == "nt"

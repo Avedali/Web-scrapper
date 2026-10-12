@@ -4,12 +4,11 @@ deepen.py: Mode 1.c, targeted research to fill the brief's gaps.
 Run: python agent.py deepen --key KEY
 Or:  launcher.py → option 5
 
-This mode is the "nag loop" -- it reads what synthesize produced,
-finds the weak spots, and goes back to the internet to fill them.
+This mode reads what synthesize produced, finds the sections with weak
+evidence, and searches the web again to fill them.
 
-Think of it like a professor reading your draft and saying:
-"This claim about junior developers is only supported by one blog post.
-Go find a real study." Then you go find the study.
+Example: if the brief's claim about junior developers rests on one blog
+post, the AI flags it and suggests searches that could find a study.
 
 The process:
   1. Load the research question, themes and brief from the scratchpad
@@ -19,10 +18,10 @@ The process:
   5. Add the new sources to the existing corpus
   6. Red-team the expanded corpus to check if the gaps are filled
 
-After this, you should run analyze → stats → synthesize again
-to rebuild the brief with the stronger evidence base.
+After this, run analyze → stats → synthesize again to rebuild the brief
+with the new sources.
 
-Only run AFTER synthesize (it reads synthesize's output).
+Run it after synthesize, because it reads synthesize's output.
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -98,17 +97,18 @@ def run_deepen(args):
         with open(corpus_path, encoding="utf-8") as f:
             existing = json.load(f)  # List of source dictionaries
 
-        # Build a SET of existing URLs for fast duplicate checking.
-        # A set is like a list but: 1) no duplicates, 2) checking "is X in the set?"
-        # is extremely fast (O(1) vs O(n) for lists -- doesn't matter with 80 items
-        # but it's good practice).
+        # Build a set of the URLs already in the corpus, to check for duplicates.
+        # A set differs from a list in two ways: 1) it holds no duplicates,
+        # 2) checking "is X in the set?" takes the same time however big the set
+        # is (O(1), against O(n) for a list). With 80 items the speed makes no
+        # difference, but a set is the usual tool for this.
         #
-        # {item.get("url","") for item in existing} is a "set comprehension" --
-        # it creates a set by extracting the "url" from each item in existing.
+        # {item.get("url","") for item in existing} is a "set comprehension":
+        # it builds a set from the "url" of each item in existing.
         existing_urls = {item.get("url", "") for item in existing}
     else:
         existing = []      # No existing corpus
-        existing_urls = set()  # Empty set -- set() creates an empty set
+        existing_urls = set()  # set() creates an empty set
 
     # ════════════════════════════════════════════════════════════════
     # STEP 1: FIND THE EVIDENCE GAPS
@@ -120,7 +120,7 @@ def run_deepen(args):
     #   - "Section 3 cites only one vendor study for a major claim"
     #   - "The workforce section has no data from outside the US"
     #   - "Claim [7] says '42% of companies' but source [7] doesn't
-    #      actually contain that number"
+    #      contain that number"
     #
     # For each gap, it suggests specific search queries to fill it.
 
@@ -150,11 +150,10 @@ def run_deepen(args):
     print(gaps[:1500])
 
     # ── Extract search queries from the AI's response ───────────────
-    # The AI typically suggests queries in quotes: 'search for "junior developer
-    # AI tool adoption rates 2025"'. We extract those quoted strings.
-    #
-    # extract_search_queries reads the "QUERY: ..." lines we asked for
-    # (falling back to quoted strings if the model ignored the format).
+    # The prompt asks the AI to write each query on a "QUERY: ..." line, and
+    # extract_search_queries reads those lines. If the model ignored the
+    # format, it falls back to quoted strings such as 'search for "junior
+    # developer AI tool adoption rates 2025"'.
     fix_queries = extract_search_queries(gaps)
 
     print(f"\n   Found {len(fix_queries)} targeted queries")
@@ -170,7 +169,7 @@ def run_deepen(args):
 
     print(f"\n{'─'*50}\nTARGETED SEARCH ({len(fix_queries[:12])} queries)\n{'─'*50}")
 
-    new_sources = []  # Will hold only the NEW sources we find
+    new_sources = []  # Holds the sources that are not already in the corpus
     queries = fix_queries[:12]
 
     def add(item):
@@ -194,7 +193,7 @@ def run_deepen(args):
                 "title": r["title"],
                 "domain": r["domain"],
                 "url": url,
-                "content": pages[url][:CONTENT_CHARS],     # Truncate very long pages
+                "content": pages[url][:CONTENT_CHARS],     # Cut long pages to CONTENT_CHARS
                 "quality": classify_source(r["domain"]),   # academic? vendor? etc.
                 "lang": detect_lang(pages[url]),           # What language?
             })
@@ -235,11 +234,11 @@ def run_deepen(args):
     # ════════════════════════════════════════════════════════════════
     # STEP 4: RED TEAM THE EXPANDED CORPUS
     # ════════════════════════════════════════════════════════════════
-    # Now that we have new sources, check: did they actually fill
-    # the gaps? Or are there still weak claims?
+    # Ask the AI whether the new sources fill the gaps and which claims
+    # are still weak.
     #
-    # This is the "nag loop" from your .md agents -- the depth-warden
-    # that keeps asking "is this actually covered?" until it is.
+    # This repeats the check done by the depth-warden in the .md agents,
+    # which asks whether each claim is covered until it is.
 
     print(f"\n{'─'*50}\nRED TEAM (post-deepen)\n{'─'*50}")
 
@@ -259,7 +258,7 @@ def run_deepen(args):
     # Save the red team critique
     pad("deepen_02_red_team", f"# Post-Deepen Red Team\n\n{critique}")
 
-    # ── Done! ───────────────────────────────────────────────────────
+    # ── Done ────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print("DEEPEN COMPLETE")
     print(f"   Added {len(new_sources)} new sources")
@@ -276,9 +275,9 @@ def _load_pad(name):
     """
     Load a scratchpad file by name.
 
-    This is a simpler version of load_pad from core.py -- it does the
-    same thing but is defined locally because deepen.py only needs
-    this one helper and it's cleaner to keep it self-contained.
+    This is a shorter version of load_pad from core.py. It does the same
+    thing. deepen.py defines its own copy because it needs only this one
+    helper, and a local copy keeps the file self-contained.
 
     Returns the file contents as a string, or "" if the file doesn't exist.
     """
