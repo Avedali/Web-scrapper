@@ -375,8 +375,17 @@ def run_synthesize(args):
     print(f"\n{'─'*50}\n8. BOTTOM LINE, KEY FINDINGS, IMPLICATIONS\n{'─'*50}")
     bottom_line, key_findings = _summarize(question, themes, checked_text, api_key, model)
     implications = _implications(question, bottom_line, key_findings, api_key, model)
+    # The summary writer often drops the [n] citations it was told to keep.
+    # Each uncited summary sentence borrows the citations of the checked
+    # sentences it matches best (its own theme's section for a key finding,
+    # any section for the bottom line), so the gate can check it.
+    all_checked = "\n\n".join(checked_text.values())
+    bottom_line = _cite_from_sections(bottom_line, all_checked)
+    key_findings = [_cite_from_sections(k, checked_text.get(t, "")) if k else ""
+                    for k, (t, _) in zip(key_findings, themes)]
+    implications = _cite_from_sections(implications, all_checked)
     summary = [("Bottom line", bottom_line),
-               ("Key findings", "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1))),
+               ("Key findings", "\n".join(f"{n}. {k}" for n, k in enumerate(key_findings, 1) if k)),
                (f"Implications for {AUDIENCE}", implications)]
     summary_checked, summary_log, summary_verdict = verify.gate(
         [(t, c) for t, c in summary if c], by_idx, gate_facts, api_key, run_audit=False)
@@ -416,11 +425,13 @@ def run_synthesize(args):
 
     # Key findings, each followed by the evidence of its theme, counted in code
     key_text = summary_text.get("Key findings", "")
+    found = {int(n): text.strip() for n, text in re.findall(r"^(\d+)\.[ \t]*(.*)$", key_text, re.M)}
     lines.append("## Key findings\n")
+    shown = 0
     for n, (title, _) in enumerate(themes, 1):
-        m = re.search(rf"^{n}\.\s*(.+)$", key_text, re.M)
-        if m:
-            lines.append(f"{n}. {m.group(1).strip()}  \n   *{title}. "
+        if found.get(n):   # A key finding the gate removed is left out, not shown empty
+            shown += 1
+            lines.append(f"{shown}. {found[n]}  \n   *{title}. "
                          f"{_evidence_line(checked_text.get(title, ''), by_idx)}*")
     lines.append("")
 
@@ -784,6 +795,41 @@ def _method_section(topic, corpus, usable, by_idx, stats, findings, n_assigned, 
         f"judges meaning, and a review by {verify.CHECK_MODEL}. Result: "
         f"{verify.verdict_line(verdict)}.",
     ] + (["**Statistical tests on the corpus.** " + " ".join(tests)] if tests else []))
+
+
+def _cite_from_sections(text, sections_text, most=3, need=0.6):
+    """
+    Give each uncited sentence of `text` the citations of the cited sentences
+    in `sections_text` that mean the most nearly the same (the two best
+    matches with similarity >= need, at most `most` sources). Sentences with
+    no close match stay uncited. Used for the bottom line, key findings and
+    implications, which summarize sections the gate already checked.
+    """
+    model = verify._match_model()
+    if model is None or not text:
+        return text
+    from sentence_transformers import util
+    cited = [s for s in verify.statements(sections_text) if verify.citations(s)]
+    if not cited:
+        return text
+    plain = [re.sub(r"\[[\d,\s]+\]", "", s) for s in cited]
+    emb = model.encode(plain, convert_to_tensor=True)
+    out = []
+    for line in text.split("\n"):
+        fixed = []
+        for sentence in re.split(r"(?<=[.!?])[ \t]+", line):
+            if verify.citations(sentence) or len(re.findall(r"\w+", sentence)) < 8:
+                fixed.append(sentence)
+                continue
+            sims = util.cos_sim(model.encode(sentence, convert_to_tensor=True), emb)[0]
+            best = [i for i in sims.argsort(descending=True)[:2].tolist() if float(sims[i]) >= need]
+            cites = list(dict.fromkeys(n for i in best for n in verify.citations(cited[i])))[:most]
+            if cites:
+                sentence = re.sub(r"([.!?]?)$", " [" + ", ".join(map(str, cites)) + r"]\1",
+                                  sentence.rstrip(), count=1)
+            fixed.append(sentence)
+        out.append(" ".join(fixed))
+    return "\n".join(out)
 
 
 def _claim_groups(findings, size):

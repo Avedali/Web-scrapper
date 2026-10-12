@@ -649,7 +649,7 @@ def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL, run_audit=True)
         fixed = sum(1 for o in outcomes if o.startswith("CORRECTED"))
         n_reviewed += len(outcomes)
         n_deleted += deleted
-        print(f"   {title}: {len(outcomes)} flagged -- {fixed} corrected, {deleted} deleted, "
+        print(f"   {title}: {len(outcomes)} flagged: {fixed} corrected, {deleted} deleted, "
               f"{len(outcomes) - fixed - deleted} kept")
         log.append(f"## {title}\n\n" + ("\n".join(f"- {o}" for o in outcomes) or "- Nothing flagged"))
         checked.append((title, new))
