@@ -138,6 +138,23 @@ def run_mode(mode, extra_args=None, log=None):
 FULL_RUN = ["explore", "analyze", "stats", "synthesize", "simulate", "viz"]
 
 
+def _brief_verdict(scratchpad):
+    """
+    "" if the fact-check gate passed the brief synthesize just wrote, else
+    why it needs review (from scratchpad/brief_verdict.json).
+    """
+    import json
+    try:
+        with open(os.path.join(scratchpad, "brief_verdict.json"), encoding="utf-8") as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return "the brief has no fact-check verdict -- check it by hand"
+    if v.get("status") == "PASS":
+        return ""
+    return "brief NEEDS REVIEW: " + "; ".join(v.get("reasons", [])) + \
+           " (see scratchpad/synthesis_05_fact_check.md)"
+
+
 def run_everything():
     """Run FULL_RUN one after another with no questions, stopping at a failure."""
     import time
@@ -156,17 +173,23 @@ def run_everything():
             log.write(banner)
             code = run_mode(mode, log=log)
             minutes = (time.time() - started) / 60
-            results.append((mode, code, minutes))
+            note = ""
+            if mode == "synthesize" and code == 0:
+                note = _brief_verdict(os.path.join(here, "scratchpad"))
+            results.append((mode, code, minutes, note))
             if code != 0:
                 break   # Later steps need this one's output -- stop here
 
         summary = "\n" + "=" * 50 + "\n  RUN EVERYTHING -- SUMMARY\n" + "=" * 50 + "\n"
-        for mode, code, minutes in results:
-            summary += f"  {'OK    ' if code == 0 else 'FAILED'}  {mode:11s} {minutes:5.0f} min\n"
+        for mode, code, minutes, note in results:
+            status = "FAILED" if code else ("WARN  " if note else "OK    ")
+            summary += f"  {status}  {mode:11s} {minutes:5.0f} min\n"
+            if note:
+                summary += f"          {note}\n"
         for mode in FULL_RUN[len(results):]:
             summary += f"  skipped {mode}\n"
         summary += f"\n  Full log: {log_path}\n"
-        if all(code == 0 for _, code, _ in results) and len(results) == len(FULL_RUN):
+        if all(code == 0 for _, code, _, _ in results) and len(results) == len(FULL_RUN):
             summary += "  The brief is in this folder (brief_*.md); charts and simulations\n"
             summary += "  are in scratchpad/. Optional next: 5 (Deepen), then 2 and 4 again.\n"
         print(summary)

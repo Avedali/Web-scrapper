@@ -43,7 +43,7 @@ def main():
     ap = argparse.ArgumentParser(description="Deep Research Toolkit")
     ap.add_argument("mode", choices=[
         "explore", "synthesize", "deepen",
-        "analyze", "stats", "viz", "ask", "simulate",
+        "analyze", "stats", "viz", "ask", "simulate", "verify",
     ])
     ap.add_argument("--key", default=None)
     # Default model: cheap, 1M-token context, and reliable in all 9 languages.
@@ -68,6 +68,7 @@ def main():
         "viz":        ("viz",         "run_viz"),
         "ask":        ("ask_agent",   "run_ask"),
         "simulate":   ("simulate",    "run_simulate"),
+        "verify":     ("verify",      "run_verify"),
     }
     mod_name, fn_name = modes[a.mode]
     module = __import__(mod_name)
