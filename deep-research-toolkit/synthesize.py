@@ -61,6 +61,7 @@ from core import (
 
 BRIEF_WORDS = 6000             # Only tells the outline how big the paper is
 THESIS_CONTEXT_CHARS = 120000  # Findings + ALL evidence cards for the thesis step
+UNCITED_MATCH = 0.75          # An uncited sentence this close to a finding gets its sources
 NEAR_REPEAT = 0.92            # Sentences this alike in meaning count as a repeat
 CLAIMS_PER_PASS = 12           # Findings one writing call turns into prose. Long
                                # sections take several passes, each from DIFFERENT
@@ -807,12 +808,19 @@ def _recite_numbers(text, section_findings, all_findings, by_idx):
             cites = verify.citations(sentence)
             nums = verify.number_readings(sentence)
             pool = set().union(*(numbers_of(c) for c in cites)) if cites else set()
-            if not cites or not nums or all(r & pool for r in nums.values()):
+            plain = re.sub(r"\[[\d,\s]+\]", "", sentence)
+            if cites and (not nums or all(r & pool for r in nums.values())):
+                fixed.append(sentence)      # Cited, and its numbers are in its sources
+                continue
+            if not cites and len(re.findall(r"\w+", plain)) < 8:
                 fixed.append(sentence)
                 continue
-            plain = re.sub(r"\[[\d,\s]+\]", "", sentence)
+            # Uncited: only re-cite a sentence that closely matches one of THIS
+            # section's findings (the writer left off its ID); reasoning stays uncited
+            searches = (section_findings, all_findings) if cites else (section_findings,)
+            need = 0.5 if cites else UNCITED_MATCH
             best = None
-            for candidates in (section_findings, all_findings):
+            for candidates in searches:
                 fitting = [f for f in candidates
                            if all(r & verify.numbers(f["claim"] + " " + " ".join(f["quotes"].values()))
                                   for r in nums.values())
@@ -822,7 +830,7 @@ def _recite_numbers(text, section_findings, all_findings, by_idx):
                     sims = util.cos_sim(model.encode(plain, convert_to_tensor=True),
                                         model.encode([f["claim"] for f in fitting], convert_to_tensor=True))[0]
                     i = int(sims.argmax())
-                    if float(sims[i]) >= 0.5:
+                    if float(sims[i]) >= need:
                         best = fitting[i]
                         break
             if best:

@@ -257,6 +257,12 @@ def best_passages(claim, source_texts, k=PASSAGES):
     return list(dict.fromkeys(candidates[i] for i in top))[:k]   # Best match first
 
 
+def statements(text):
+    """The sentences of a text that say something (not headings, tables or fragments)."""
+    return [s for s in sentences(text)
+            if not s.startswith(("#", "**", "---", "|")) and len(re.findall(r"\w+", s)) >= 4]
+
+
 def check_sentences(text, by_idx, findings="", use_judge=True):
     """
     Check every sentence of `text` (one section, or a whole brief). Returns one
@@ -270,9 +276,7 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
     """
     findings_numbers = numbers(findings)
     seen, reports, to_judge = set(), [], []
-    for s in sentences(text):
-        if s.startswith(("#", "**", "---", "|")) or len(re.findall(r"\w+", s)) < 4:
-            continue   # Headings, the header block, tables, stray fragments
+    for s in statements(text):
         cites = citations(s)
         problems = []
         if len(cites) > MAX_CITES:
@@ -470,12 +474,26 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
     if not items:
         return text, outcomes
 
-    reply = call_ai(_review_prompt(items, findings), api_key, model, temp=0, max_tokens=12000)
-    if not reply:
+    def ask(batch):
+        """{position in batch (1-based): (action, fix)} from one review call (None if it failed)."""
+        reply = call_ai(_review_prompt(batch, findings), api_key, model, temp=0, max_tokens=12000)
+        if not reply:
+            return None
+        got = {}
+        for m in re.finditer(r"^\s*\**S(\d+)\**\s*:\s*(KEEP|DELETE|FILLER|FIX\s*:\s*(.+))\s*$", reply, re.M):
+            got[int(m.group(1))] = (m.group(2).split(":")[0].strip().upper(), (m.group(3) or "").strip())
+        return got
+
+    answers = ask(items)
+    if answers is None:
         return text, None
-    answers = {}
-    for m in re.finditer(r"^\s*\**S(\d+)\**\s*:\s*(KEEP|DELETE|FILLER|FIX\s*:\s*(.+))\s*$", reply, re.M):
-        answers[int(m.group(1))] = (m.group(2).split(":")[0].strip().upper(), (m.group(3) or "").strip())
+    # Sentences the AI skipped get one more, smaller call; still unanswered → deleted
+    unanswered = [i for i in range(1, len(items) + 1) if i not in answers]
+    if unanswered:
+        again = ask([items[i - 1] for i in unanswered]) or {}
+        for pos, i in enumerate(unanswered, 1):
+            if pos in again:
+                answers[i] = again[pos]
 
     for i, it in enumerate(items, 1):
         action, fix = answers.get(i, ("NO ANSWER", ""))
@@ -515,7 +533,7 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
 
 AUDIT_SAMPLE = 20        # Final sentences re-checked against their sources' full text
 PASS_UNSUPPORTED = 0.10  # At most this share of the sample unsupported
-PASS_DELETED = 0.40      # At most this share of reviewed sentences deleted
+PASS_DELETED = 0.20      # At most this share of the draft's statements deleted
 
 
 def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
@@ -549,12 +567,13 @@ def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
         return list(pool.map(one, sample))
 
 
-def make_verdict(audit_results, n_reviewed, n_deleted, not_checked):
+def make_verdict(audit_results, n_reviewed, n_deleted, not_checked, n_statements=0):
     """
     PASS or NEEDS REVIEW, with the reasons and the numbers behind them.
     NEEDS REVIEW: a section wasn't checked, the audit found more than
     PASS_UNSUPPORTED unsupported, or the gate deleted more than PASS_DELETED
-    of what it reviewed (a brief gutted by its own checker is badly written).
+    of the draft's statements (a brief gutted by its own checker is badly
+    written).
     """
     graded = [v for _, v, _ in audit_results if v != "ERROR"]
     counts = {k: graded.count(k) for k in ("SUPPORTED", "PARTLY", "UNSUPPORTED")}
@@ -565,13 +584,14 @@ def make_verdict(audit_results, n_reviewed, n_deleted, not_checked):
         reasons.append("the independent audit could not run")
     elif counts["UNSUPPORTED"] / len(graded) > PASS_UNSUPPORTED:
         reasons.append(f"audit: {counts['UNSUPPORTED']} of {len(graded)} sampled sentences unsupported")
-    if n_reviewed and n_deleted / n_reviewed > PASS_DELETED:
-        reasons.append(f"the gate deleted {n_deleted} of {n_reviewed} sentences it reviewed")
+    total = n_statements or n_reviewed
+    if total and n_deleted / total > PASS_DELETED:
+        reasons.append(f"the gate deleted {n_deleted} of the draft's {total} statements")
     return {
         "status": "NEEDS REVIEW" if reasons else "PASS",
         "reasons": reasons,
         "audit": counts, "audit_sample": len(graded),
-        "reviewed": n_reviewed, "deleted": n_deleted,
+        "reviewed": n_reviewed, "deleted": n_deleted, "statements": total,
     }
 
 
@@ -580,8 +600,9 @@ def verdict_line(v):
     a, n = v["audit"], v["audit_sample"]
     audit_text = (f"independent audit of {n} sentences: {a['SUPPORTED']} supported, "
                   f"{a['PARTLY']} partly, {a['UNSUPPORTED']} unsupported") if n else "no audit"
-    return (f"{v['status']} -- {audit_text}; gate reviewed {v['reviewed']} sentences, "
-            f"deleted {v['deleted']}" + (f". Why: {'; '.join(v['reasons'])}" if v["reasons"] else ""))
+    of = f" of {v['statements']} statements" if v.get("statements") else ""
+    return (f"{v['status']} -- {audit_text}; the gate reviewed {v['reviewed']} sentences and "
+            f"deleted {v['deleted']}{of}" + (f". Why: {'; '.join(v['reasons'])}" if v["reasons"] else ""))
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -594,6 +615,7 @@ def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL):
     (checked sections, log lines, verdict dict).
     """
     checked, log, not_checked, n_reviewed, n_deleted = [], [], [], 0, 0
+    n_statements = sum(len(statements(text)) for _, text in sections)
     for title, text in sections:
         new, outcomes = review_section(text, by_idx, findings, api_key, model)
         if outcomes is None:
@@ -613,7 +635,7 @@ def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL):
     whole = "\n\n".join(t for _, t in checked)
     print(f"   Independent audit of {AUDIT_SAMPLE} sentences against their full sources...")
     results = audit(whole, by_idx, api_key, model)
-    v = make_verdict(results, n_reviewed, n_deleted, not_checked)
+    v = make_verdict(results, n_reviewed, n_deleted, not_checked, n_statements)
     log.append("## Independent audit\n\n" + "\n".join(
         f"- {verdict_}: {sentence}\n  → {reason}" for sentence, verdict_, reason in results))
     return checked, log, v
