@@ -1005,6 +1005,37 @@ def classify_source(domain):
     return "unclassified"  # Doesn't match any pattern
 
 
+def apa_reference(s, retrieved=None):
+    """
+    One source as an APA 7th edition reference. The scraped pages rarely name
+    an author, and APA then puts the title first:
+      Title. (Year). *Site*. [In Japanese]. Retrieved Month Day, Year, from URL
+    An unknown year is "n.d." (no date), never the current year.
+    """
+    from datetime import datetime
+    lang = s.get("lang", "")
+    note = f" [In {LANGUAGES.get(lang, {}).get('name', lang)}]." if lang and lang not in ("en", "unknown") else ""
+    when = retrieved or datetime.now().strftime("%B %d, %Y")
+    return (f"{s.get('title', '').strip() or s.get('domain', '')}. ({s.get('year') or 'n.d.'}). "
+            f"*{s.get('domain', '')}*.{note} Retrieved {when}, from {s.get('url', '')}")
+
+
+def apa_in_text(sources):
+    """
+    APA in-text citation of several sources with no author: the first words
+    of each title in quotes, then the year, separated by semicolons:
+    ("Octoverse 2024 report," 2024; "State of AI in business," n.d.)
+    """
+    def short(title):
+        """The first 5 words, or 40 characters for titles without spaces (Japanese, Chinese)."""
+        words = (title or "").split()
+        text = " ".join(words[:5])
+        text = text[:40] if len(text) > 40 else text
+        return text + ("..." if text != (title or "").strip() else "")
+    return "(" + "; ".join(f"\"{short(s.get('title') or s.get('domain', ''))},\" {s.get('year') or 'n.d.'}"
+                           for s in sources) + ")"
+
+
 def detect_lang(text):
     """
     Detect what language a piece of text is written in.

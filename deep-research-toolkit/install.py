@@ -208,6 +208,7 @@ def main():
         "seaborn",      # Makes prettier statistical charts (built on matplotlib)
         "plotly",       # Makes interactive charts you can zoom/hover (for presentations)
         "kaleido",      # Lets plotly save charts as PNG images (for slides)
+        "wordcloud",    # Draws the word cloud of the brief's findings
     ]
 
     # --- Group 6: Tools that analyze code quality ---
@@ -455,6 +456,7 @@ def main():
         "BERTopic": "bertopic",
         "pingouin": "pingouin",
         "plotly": "plotly",
+        "wordcloud": "wordcloud",
         "bandit": "bandit",
         "langdetect": "langdetect",
         "semanticscholar": "semanticscholar",

@@ -28,11 +28,12 @@ import json
 import os
 import re
 
-from core import call_ai, make_batches, ai_map, _content_key, SCRATCHPAD
+from core import call_ai, make_batches, ai_map, _content_key, detect_lang, SCRATCHPAD
 import verify
 
 CLAIMS_FILE = "claims.json"
 CLAIMS_PER_SOURCE = 10       # Most a source contributes (a long report has more facts)
+TRANSLATE_BATCH = 40         # Claims translated per AI call
 MERGE_SIMILARITY = 0.85      # How alike two claims must be (by meaning) to be one finding
 MIN_RELEVANCE = 0.20         # A claim less related than this to every section is left out
 CLAIMS_IN_BRIEF = 260        # Findings the theme sections use in total: the most
@@ -113,9 +114,53 @@ def extract_claims(corpus, api_key, model, corpus_dir=SCRATCHPAD):
         todo = [s for s in todo if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
     if todo:
         print(f"   {len(todo)} sources have no claims (the AI calls failed or skipped them)")
+    _translate_claims(cache, api_key, model)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=1, ensure_ascii=False)
     return cache
+
+
+def _translate_claims(cache, api_key, model):
+    """
+    Translate into English the claims the AI left in their source's language
+    (it is told to write English, but sometimes copies a Japanese or German
+    sentence). The brief is written in English, so an untranslated claim was
+    read less well, and a word count of the findings left it out. The
+    original stays in "original". A translation is used only if it keeps
+    every number of the original. A source whose claims change is checked
+    again (check_claims compares each claim with its quote).
+    """
+    def foreign(text):
+        # Mostly non-Latin letters (Japanese, Korean, Chinese, Russian), or a
+        # detected language other than English (the detector needs 50+ characters)
+        letters = re.findall(r"[^\W\d_]", text)
+        latin = sum(1 for ch in letters if ch.isascii() or "\u00c0" <= ch <= "\u024f")
+        return (letters and latin / len(letters) < 0.7) or detect_lang(text) not in ("en", "unknown")
+
+    todo = [(entry, c) for entry in cache.values() for c in entry.get("claims", [])
+            if "original" not in c and foreign(c["claim"])]
+    if not todo:
+        return
+    print(f"   Translating {len(todo)} claims written in their source's language...")
+    done = 0
+    for start in range(0, len(todo), TRANSLATE_BATCH):
+        batch = todo[start:start + TRANSLATE_BATCH]
+        reply = call_ai(
+            "Translate each claim below into English. Keep every number, name, hedge (up to, "
+            "often, may) and the scope (which study, sample, company, country, year). One line "
+            "each, starting with its label:\nT1: <translation>\n\n"
+            + "\n".join(f"T{i}: {c['claim']}" for i, (_, c) in enumerate(batch, 1)),
+            api_key, model, temp=0) or ""
+        for m in re.finditer(r"^\W*T(\d+)\W*:\s*(.+)$", reply, re.M):
+            i = int(m.group(1)) - 1
+            if 0 <= i < len(batch):
+                entry, c = batch[i]
+                text = m.group(2).strip()
+                if text and verify.numbers(text) == verify.numbers(c["claim"]):
+                    c["original"], c["claim"] = c["claim"], text
+                    entry["checked"] = False
+                    done += 1
+    print(f"   {done} of {len(todo)} translated (the rest kept their language: a number changed or the call failed)")
 
 
 def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_dir=SCRATCHPAD):

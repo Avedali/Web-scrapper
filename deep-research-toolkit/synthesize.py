@@ -45,7 +45,7 @@ from core import (
     pad,                   # Save work to the scratchpad
     build_evidence_cards,  # English summary per source, 1-6 sentences
     NO_EVIDENCE,           # Card text for sources with nothing usable
-    LANGUAGES,             # The 9-language config (for APA language notes)
+    apa_reference,         # One source as an APA reference
     BANNED_PHRASES,        # LLM-speak phrases to remove (used by _plain_words)
     source_label,          # Plain name of a source type, for readers
 )
@@ -1232,30 +1232,8 @@ def _build_apa(corpus_dir):
     with open(corpus_path, encoding="utf-8") as f:
         corpus = json.load(f)  # List of sources, each with its "idx"
 
-    entries = []  # Will hold formatted APA entries
-
-    for pos, s in enumerate(corpus, 1):
-        i = s.get("idx", pos)  # Same number the evidence block cites
-        url = s.get("url", "")
-
-        # Check if this source is in a non-English language
-        sl = s.get("lang", "")
-        lang_note = ""
-        if sl and sl not in ("en", "unknown"):
-            # LANGUAGES.get(sl, {}).get("name", sl) means:
-            # Look up the language code in our LANGUAGES dictionary.
-            # If found, get its "name" field.
-            # If not found, use the code itself (e.g., "ja").
-            lang_note = f" [In {LANGUAGES.get(sl, {}).get('name', sl)}]."
-
-        # Build the APA entry.
-        # *{domain}* makes the domain italic in Markdown.
-        # datetime.now().strftime('%B %d, %Y') → "October 07, 2026"
-        entries.append(
-            f"[{i}] {s.get('title', '')}. ({s.get('year') or 'n.d.'}). "
-            f"*{s.get('domain', '')}*.{lang_note} "
-            f"Retrieved {datetime.now().strftime('%B %d, %Y')}, from {url}"
-        )
+    # Each entry keeps the source's number, the same "idx" the [n] tags use
+    entries = [f"[{s.get('idx', pos)}] {apa_reference(s)}" for pos, s in enumerate(corpus, 1)]
 
     # Join all entries with double newlines between them
     return "\n\n".join(entries)

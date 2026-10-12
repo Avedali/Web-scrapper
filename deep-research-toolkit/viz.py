@@ -41,7 +41,7 @@ import os    # File/folder operations
 import re    # Reading the AI's chart designs
 import datetime   # This year, to mark forecasts on trend charts
 
-from core import call_ai, source_label   # AI calls; plain names for source types
+from core import call_ai, source_label, apa_reference, apa_in_text   # AI calls; labels; APA citations
 import verify                             # Checks each charted number against its source
 
 
@@ -104,7 +104,7 @@ def run_viz(args):
     # ── Save function (generates both paper and slide versions) ─────
     numbers = {"findings": 0, "appendix": 0}   # Next figure number in each group
 
-    def save(fig, slug, caption, title_slide, appendix=False, keep_legend=False, note=""):
+    def save(fig, slug, caption, title_slide, appendix=False, keep_legend=False, note="", paper_note=""):
         """
         Save one chart in both formats (paper and slide).
 
@@ -117,16 +117,24 @@ def run_viz(args):
                           go in an "appendix" subfolder and are numbered A1, A2...
             keep_legend:  True when the colors carry meaning that isn't written
                           on the chart (stacked bars), so slides keep the legend
-            note:         a line of small print under the chart (where the numbers come from)
+            note:         small print under the slide chart (e.g. its sources, cited APA style)
+            paper_note:   small print under the paper chart (e.g. the full APA references);
+                          the slide note when empty
 
         'nonlocal charts' lets us modify the 'charts' counter from
         inside this nested function. Without it, Python would create
         a new local variable instead of updating the outer one.
         """
         nonlocal charts
-        bottom = (100 if keep_legend else 20) + (30 if note else 0)   # Room under the chart
+        paper_note = paper_note or note
+
+        def room(text):
+            """Height in pixels of a note under the chart (16 per line)."""
+            return 16 * (text.count("<br>") + 1) + 14 if text else 0
+
+        bottom = (100 if keep_legend else 20) + room(paper_note)   # Room under the chart
         if note:
-            fig.add_annotation(text=note, showarrow=False, xref="paper", yref="paper",
+            fig.add_annotation(text=paper_note, showarrow=False, xref="paper", yref="paper", align="left",
                                x=0, y=0, yshift=-bottom - 52, xanchor="left", yanchor="bottom",
                                font=dict(size=11, color="#6B6B6B"))
         group = "appendix" if appendix else "findings"
@@ -162,7 +170,7 @@ def run_viz(args):
                 os.path.join(paper_dir, f"{name}.png"),
                 scale=2,       # 2× resolution (1800×1100 actual pixels)
                 width=900,
-                height=550,
+                height=550 + room(paper_note),   # Taller when the references need room
             )
         except Exception as e:
             # PNG export failed, so save an HTML copy for the paper too
@@ -177,6 +185,9 @@ def run_viz(args):
                 save._warned = True  # Warn on the first failed chart only
 
         # ── Slide version ───────────────────────────────────────────
+        if note:
+            bottom = (100 if keep_legend else 20) + room(note)
+            fig.layout.annotations[-1].update(text=note, yshift=-bottom - 52)
         # Presentation style: the title states the finding, big font,
         # no gridlines, no legend, numbers written directly on the chart.
         # The audience reads the title, looks briefly at the shape, and moves on.
@@ -198,7 +209,7 @@ def run_viz(args):
         try:
             fig.write_image(
                 os.path.join(slide_dir, f"{name}.png"),
-                scale=2, width=1200, height=700,  # Wider for widescreen slides
+                scale=2, width=1200, height=700 + room(note),  # Wider for widescreen slides
             )
         except Exception:
             pass  # Already warned above; the HTML file below is still saved
@@ -236,13 +247,47 @@ def run_viz(args):
             colors = {"accent": ACCENT, "dark": DARK, "muted": MUTED, "gray": GRAY, "blue": "#457B9D"}
             for c in _theme_charts(brief, by_idx, api_key, args.model):
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
-                # Which sources the numbers come from, as the brief cites them ([85])
-                cited = ", ".join(f"[{i}]" for i in dict.fromkeys(p["idx"] for p in c["points"]) if i is not None)
+                # The sources of the numbers, cited APA style: in-text on the
+                # slide, the full references under the paper chart
+                srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
                 save(fig, re.sub(r"\W+", "_", f"{c['theme']} {c['form']}".lower()).strip("_")[:50],
                      f"{c['theme']}: {title}", _wrap(title, 70), keep_legend=legend,
-                     note=f"Sources: {cited} in the brief's references. Each figure is as its source "
-                          "reports it; studies differ in sample and method.")
+                     note=_wrap(f"Sources: {apa_in_text(srcs)}", 150),
+                     paper_note="Sources:<br>" + "<br>".join(
+                         _wrap(re.sub(r"\*([^*]+)\*", r"<i>\1</i>", apa_reference(x)), 160) for x in srcs))
+
+        # ── Word cloud of the findings ──────────────────────────────
+        # The words the brief's findings use most, sized by how often they
+        # appear (frequency, which is not the same as importance). The
+        # research question's own words are left out: every finding uses them.
+        try:
+            from wordcloud import WordCloud, STOPWORDS
+        except ImportError:
+            WordCloud = None
+            print("   pip install wordcloud  (for the word cloud of the findings)")
+        text = " ".join(f["claim"] for f in brief.get("findings", []))   # In English (claims.py translates them)
+        if WordCloud and text:
+            import numpy as np
+            # Also left out: every word with the same stem as a word of the
+            # research question ("coding" in the question removes "code")
+            stems = {_stem(w) for w in re.findall(r"[a-z]{3,}", brief.get("question", "").lower())}
+            words = set(re.findall(r"[a-z]+", text.lower()))
+            skip = (set(STOPWORDS) | WORDCLOUD_SKIP | {w for w in words if _stem(w) in stems}
+                    | set(re.findall(r"[a-z]+", brief.get("question", "").lower())))
+            text = " ".join(w for w in re.findall(r"[A-Za-z][\w-]*", text) if w.lower() not in skip)
+            cloud = WordCloud(width=1800, height=900, background_color="white", stopwords=skip,
+                              collocations=True, max_words=80, min_word_length=3, random_state=1,
+                              color_func=lambda *a, **k: [DARK, "#457B9D", "#7FA7C9"][k["random_state"].randint(0, 2)])
+            cloud.generate(re.sub(r"\d+([.,]\d+)?%?", " ", text))
+            top = list(cloud.words_)[:3]
+            fig = go.Figure(go.Image(z=np.array(cloud.to_image())))
+            fig.update_xaxes(visible=False)
+            fig.update_yaxes(visible=False)
+            fig.update_layout(hovermode=False)
+            save(fig, "word_cloud", "The most frequent words in the brief's findings",
+                 f"The findings talk most about {', '.join(top[:-1])} and {top[-1]}" if len(top) > 1
+                 else "The most frequent words in the findings")
 
     # ════════════════════════════════════════════════════════════════
     # APPENDIX: charts about how the research was done
@@ -596,7 +641,7 @@ def run_viz(args):
                                f"{means.get('layman', 0):.0f}%")
                 save(fig, "prompt_skill_vs_result",
                      "Share of a professional's requirements each AI-built page met, by how "
-                     "skilled the prompt was (each page tested in a browser)",
+                     "skilled the prompt was",
                      slide_title)
 
             elif level_col in sim_df.columns:
@@ -690,6 +735,23 @@ def run_viz(args):
 # ONE CHART PER KEY FINDING (the findings charts)
 # ════════════════════════════════════════════════════════════════════════
 
+# Words left out of the word cloud besides common English ones: the words
+# every finding uses to report a result, which say nothing about the topic
+WORDCLOUD_SKIP = {"according", "study", "studies", "survey", "surveys", "report", "reports", "reported",
+                  "found", "finds", "shows", "showed", "percent", "respondents", "research", "year",
+                  "years", "said", "says", "also", "may", "can", "will", "one", "two", "use", "used",
+                  "using", "new", "many", "much", "including", "based", "per", "approximately",
+                  "must", "making", "make", "entire", "least", "already", "without", "real", "leading",
+                  "help", "result", "results", "modern", "understand", "increased", "increase", "improve",
+                  "suggesting", "tool", "tools", "system", "systems", "within", "across", "among",
+                  "well", "like", "need", "needs", "often", "way", "ways", "even", "still", "however"}
+# Short words of the other Latin-script languages, for a claim whose translation
+# was refused (claims.py keeps the original when a number changed)
+WORDCLOUD_SKIP |= {"der", "die", "das", "und", "mit", "von", "für", "den", "dem", "des", "ist", "sind",
+                   "les", "des", "une", "pour", "dans", "avec", "sur", "est", "sont", "par", "qui",
+                   "los", "las", "una", "para", "con", "por", "que", "del", "como", "más",
+                   "uma", "para", "com", "mais", "não", "dos", "das", "pelo", "pela"}
+
 MAX_NUMBERED = 80     # Findings with numbers shown to the AI for one theme
 MAX_POINTS = 20       # Figures in one table
 TABLES_PER_THEME = 3  # Tables of figures the AI may extract for one theme
@@ -770,7 +832,8 @@ def _theme_charts(brief, by_idx, api_key, model):
             "MEASURE: <the quantity, with its unit in brackets>\n"
             "TITLE: <what the figures show, in plain words, at most 16 words: the range, the "
             "difference, the order or the change, and how far sources agree. Only numbers from "
-            "the table. No cause unless an experiment shows it.>\n"
+            "the table. No cause unless an experiment shows it. Say what the figures show, never "
+            "what the chart is, how it was made or how to read it.>\n"
             "ORDERED: <yes if the categories have a natural order, e.g. age bands or company "
             "sizes; otherwise no>\n"
             "PARTS: <yes if the figures are the parts of one whole from one source that add up "
@@ -869,6 +932,14 @@ def _read_table(reply, found, by_idx):
             "parts": field("PARTS").lower().startswith("y"), "points": points}
 
 
+def _stem(word):
+    """A rough word stem, to match word forms: "coding", "code" → "cod"; "developers" → "develop"."""
+    for end in ("ments", "ment", "ings", "ing", "ers", "er", "ed", "es", "s", "e"):
+        if word.endswith(end) and len(word) - len(end) >= 3:
+            return word[:-len(end)]
+    return word
+
+
 def _country(label):
     """The ISO code of the one country a label names ("Developers in Japan" → "JPN"), or None."""
     hits = {code for name, code in COUNTRIES.items()
@@ -961,7 +1032,8 @@ def _draw(c, go, colors, this_year):
     def value_axis(horizontal=True):
         """Value axis: 0-100 for shares, otherwise from 0 (or the lowest value) with room for labels."""
         lo, hi = min(0, min(p["lo"] for p in pts)), max(p["hi"] for p in pts)
-        rng = [0, 115] if share else [lo - 0.05 * ((hi - lo) or 1), hi + 0.3 * ((hi - lo) or 1)]
+        span = (hi - lo) or 1   # Room beyond each end for the value labels
+        rng = [0, 115] if share else [lo - (0.3 if lo < 0 else 0.05) * span, hi + 0.3 * span]
         (fig.update_xaxes if horizontal else fig.update_yaxes)(range=rng, title=axis)
         if signed:
             (fig.add_vline if horizontal else fig.add_hline)(0, line_color=GRAY, line_width=1)
@@ -1008,8 +1080,7 @@ def _draw(c, go, colors, this_year):
             k = len(typical) // 2
             median = typical[k] if len(typical) % 2 else (typical[k - 1] + typical[k]) / 2
             fig.add_vline(x=median, line_dash="dash", line_color=GRAY, line_width=1,
-                          annotation_text=f"median {_fmt(round(median, 1), unit, signed)} "
-                                          "(figures that aren't 'up to')",
+                          annotation_text=f"median {_fmt(round(median, 1), unit, signed)}",
                           annotation_position="top", annotation_font_color=GRAY)
         legend = True
         if rows:
