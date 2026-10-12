@@ -924,6 +924,27 @@ def load_corpus_texts():
 # sentiment than academic ones?) and in the report (label vendor-funded
 # studies as such).
 
+# Plain names for the source types classify_source returns. Charts and the
+# brief show these, so a reader doesn't have to decode "vendor/primary".
+SOURCE_LABELS = {
+    "academic": "Research papers",
+    "intl institution": "International bodies (OECD, UN, EU)",
+    "government": "Government",
+    "consulting": "Consulting firms",
+    "vendor/primary": "AI tool makers (GitHub, OpenAI...)",
+    "experiential/forum": "Developer forums",
+    "experiential/blog": "Developer blogs",
+    "journalism": "News media",
+    "SEO risk": "Low-quality content sites",
+    "unclassified": "Other websites",
+}
+
+
+def source_label(kind):
+    """The plain name of a source type: "vendor/primary" → "AI tool makers (GitHub, OpenAI...)"."""
+    return SOURCE_LABELS.get(kind or "unclassified", kind or "Other websites")
+
+
 def classify_source(domain):
     """
     Given a domain name (like "arxiv.org" or "techcrunch.com"),

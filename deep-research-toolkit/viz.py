@@ -18,6 +18,14 @@ from the kind of data being shown:
   - Counts of one categorical → lollipop chart (less ink than bars)
   - Part of a whole → treemap (easier to read than a pie chart)
 
+Two groups of charts:
+  Findings (charts_paper/, charts_slide/): what the evidence shows. The
+     spread of figures sources report for the brief's key measures, how
+     much evidence backs each key finding, and the simulation results.
+  Appendix (charts_paper/appendix/, charts_slide/appendix/): how the
+     research was done. Sentiment by source type and language, language
+     coverage, topics by language, the mix of source types.
+
 All charts use plotly, which produces interactive HTML charts as well as PNG images.
 """
 
@@ -25,9 +33,13 @@ All charts use plotly, which produces interactive HTML charts as well as PNG ima
 # IMPORTS
 # ════════════════════════════════════════════════════════════════════════
 
-import json  # For loading simulation results
+import json  # For loading simulation results and the brief's findings
 import sys   # Stop with an error code when a step can't run
 import os    # File/folder operations
+import re    # Reading the AI's list of measures
+
+from core import call_ai, source_label   # AI calls; plain names for source types
+import verify                             # Checks each charted number against its source
 
 
 
@@ -58,10 +70,10 @@ def run_viz(args):
 
     # ── Create output directories ───────────────────────────────────
     # Two separate folders: one for paper-format charts, one for slide-format
-    paper_dir = os.path.join(args.corpus, "charts_paper")
-    slide_dir = os.path.join(args.corpus, "charts_slide")
-    os.makedirs(paper_dir, exist_ok=True)   # Create if doesn't exist
-    os.makedirs(slide_dir, exist_ok=True)
+    paper_root = os.path.join(args.corpus, "charts_paper")
+    slide_root = os.path.join(args.corpus, "charts_slide")
+    os.makedirs(paper_root, exist_ok=True)   # Create if doesn't exist
+    os.makedirs(slide_root, exist_ok=True)
 
     # ── Load the analyzed corpus ────────────────────────────────────
     csv_path = os.path.join(args.corpus, "corpus_analyzed.csv")
@@ -69,6 +81,9 @@ def run_viz(args):
         sys.exit("Run 'python agent.py analyze' first.")
 
     df = pd.read_csv(csv_path)  # Load into a DataFrame
+    # Plain names for the source types ("vendor/primary" → "AI tool makers (GitHub, OpenAI...)")
+    if "quality" in df.columns:
+        df["source_type"] = df["quality"].map(source_label)
     charts = 0                  # Counts how many charts have been saved
 
     # ── Color palette ───────────────────────────────────────────────
@@ -84,21 +99,36 @@ def run_viz(args):
     DARK = "#1D3557"       # Dark navy: text and strong lines
 
     # ── Save function (generates both paper and slide versions) ─────
-    def save(fig, name, title_paper, title_slide):
+    numbers = {"findings": 0, "appendix": 0}   # Next figure number in each group
+
+    def save(fig, slug, caption, title_slide, appendix=False, keep_legend=False):
         """
         Save one chart in both formats (paper and slide).
 
         Parameters:
             fig:          the plotly figure object
-            name:         filename (without extension)
-            title_paper:  descriptive caption for the paper
+            slug:         filename without number or extension ("sentiment_by_type")
+            caption:      descriptive caption for the paper ("Figure 3: " is added)
             title_slide:  the finding, used as the slide title
+            appendix:     True for charts about the research method; they
+                          go in an "appendix" subfolder and are numbered A1, A2...
+            keep_legend:  True when the colors carry meaning that isn't written
+                          on the chart (stacked bars), so slides keep the legend
 
         'nonlocal charts' lets us modify the 'charts' counter from
         inside this nested function. Without it, Python would create
         a new local variable instead of updating the outer one.
         """
         nonlocal charts
+        group = "appendix" if appendix else "findings"
+        numbers[group] += 1
+        number = f"A{numbers[group]}" if appendix else str(numbers[group])
+        name = f"{number}_{slug}" if appendix else f"{numbers[group]:02d}_{slug}"
+        title_paper = f"Figure {number}: {caption}"
+        paper_dir = os.path.join(paper_root, "appendix") if appendix else paper_root
+        slide_dir = os.path.join(slide_root, "appendix") if appendix else slide_root
+        os.makedirs(paper_dir, exist_ok=True)
+        os.makedirs(slide_dir, exist_ok=True)
 
         # ── Paper version ───────────────────────────────────────────
         # Academic style: descriptive title, smaller font, gridlines visible,
@@ -148,8 +178,9 @@ def run_viz(args):
             paper_bgcolor="white",     # White around the chart
             xaxis_showgrid=False,      # No gridlines (cleaner)
             yaxis_showgrid=False,
-            showlegend=False,          # No legend (labels are on the chart itself)
-            margin=dict(l=20, r=20, t=60, b=20),  # Tight margins (more chart, less whitespace)
+            showlegend=keep_legend,    # Usually no legend: labels are on the chart itself
+            legend=dict(orientation="h", yanchor="top", y=-0.12, x=0),
+            margin=dict(l=20, r=20, t=60, b=110 if keep_legend else 20),
         )
         # Save as PNG (larger, for projection) and HTML (interactive, for zooming).
         # Same kaleido guard as above.
@@ -166,7 +197,82 @@ def run_viz(args):
         fig.write_html(os.path.join(slide_dir, f"{name}.html"))
 
         charts += 1
-        print(f"   {name}")
+        print(f"   {'appendix/' if appendix else ''}{name}")
+
+    # ════════════════════════════════════════════════════════════════
+    # FINDINGS CHARTS: what the evidence shows (drawn from the brief)
+    # ════════════════════════════════════════════════════════════════
+    # These come first: they illustrate the brief's findings. The charts
+    # about how the research was done follow, in the appendix folders.
+    brief_path = os.path.join(args.corpus, "brief_findings.json")
+    if not os.path.exists(brief_path):
+        print("   No brief yet (run synthesize first): skipping the findings charts")
+    else:
+        with open(brief_path, encoding="utf-8") as f:
+            brief = json.load(f)
+        with open(os.path.join(args.corpus, "corpus.json"), encoding="utf-8") as f:
+            by_idx = {int(src["idx"]): src for src in json.load(f)}
+
+        # ── The figures sources report for the brief's key measures ──
+        # One chart per measure that several sources report as a number
+        # (e.g. change in coding speed). Each dot is one source's figure.
+        api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            print("   No API key: skipping the charts of reported figures (they need one AI call)")
+        else:
+            for m in _measures(brief, by_idx, api_key, args.model):
+                pts = sorted(m["points"], key=lambda p: p["value"])
+                # A "+" sign only on measures of change ("+55% faster"), not on shares
+                signed = (min(p["value"] for p in pts) < 0 or bool(re.search(
+                    r"change|effect|difference|increase|decrease|reduction|gain", m["name"], re.I)))
+                colors = [ACCENT if p["tool_maker"] else DARK if p["research"] else MUTED for p in pts]
+                labels = _unique([p["label"] for p in pts])
+                fig = go.Figure(go.Scatter(
+                    x=[p["value"] for p in pts], y=labels, mode="markers+text",
+                    marker=dict(size=14, color=colors),
+                    text=[_fmt(p["value"], m["unit"], signed) for p in pts], textposition="middle right",
+                    customdata=[p["source"] for p in pts],
+                    hovertemplate="%{y}: %{text}<br>%{customdata}<extra></extra>",
+                    showlegend=False))
+                lo, hi = min(p["value"] for p in pts), max(p["value"] for p in pts)
+                if lo < 0 < hi:
+                    fig.add_vline(x=0, line_color=GRAY, line_width=1)   # "No change" line
+                span = (hi - lo) or abs(hi) or 1
+                fig.update_xaxes(range=[min(0, lo) - 0.05 * span, max(0, hi) + 0.3 * span],
+                                 title=f"{m['name']} ({m['unit']})<br><sup>Studies differ in "
+                                       "method and sample, so the figures are not directly "
+                                       "comparable.</sup>")
+                save(fig, "reported_" + re.sub(r"\W+", "_", m["name"].lower()).strip("_")[:40],
+                     f"{m['name']}: the figure each source reports ({len(pts)} sources)",
+                     f"{m['name']}: reported figures range<br>from {_fmt(lo, m['unit'], signed)} "
+                     f"to {_fmt(hi, m['unit'], signed)} ({len(pts)} sources)")
+
+        # ── How much evidence backs each key finding ────────────────
+        # One bar per theme of the brief, split by the type of source.
+        themes = [t for t in brief.get("themes", []) if t.get("sources_by_type")]
+        if themes:
+            kinds = sorted({k for t in themes for k in t["sources_by_type"]},
+                           key=lambda k: -sum(t["sources_by_type"].get(k, 0) for t in themes))
+            # A color per type, so the legend can tell them apart. AI tool
+            # makers keep the accent red, as in the other charts.
+            fixed = {"Research papers": DARK, "Other websites": MUTED}
+            others = iter(["#457B9D", "#F4A261", "#2A9D8F", "#8D99AE", "#E9C46A", "#6D597A", GRAY])
+            palette = {k: (ACCENT if k.startswith("AI tool makers") else fixed.get(k) or next(others, GRAY))
+                       for k in kinds}
+            fig = go.Figure()
+            names = [t["title"] for t in themes]
+            for k in kinds:
+                fig.add_trace(go.Bar(
+                    y=names, x=[t["sources_by_type"].get(k, 0) for t in themes], name=k,
+                    orientation="h", marker_color=palette[k]))
+            fig.update_layout(barmode="stack", yaxis_autorange="reversed")
+            fig.update_xaxes(title="Sources cited")
+            totals = {t["title"]: sum(t["sources_by_type"].values()) for t in themes}
+            most, least = max(totals, key=totals.get), min(totals, key=totals.get)
+            save(fig, "evidence_per_finding",
+                 "Sources cited for each theme of the brief, by type of source",
+                 f"{most} rests on the most sources ({totals[most]}),<br>"
+                 f"{least} on the fewest ({totals[least]})", keep_legend=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 1: Sentiment by source type (box plot)
@@ -190,15 +296,15 @@ def run_viz(args):
     #
     # data-to-viz.com: numeric (sentiment) × categorical (quality) → box plot
 
-    if "sentiment" in df.columns and "quality" in df.columns:
+    if "sentiment" in df.columns and "source_type" in df.columns:
 
         # Sort categories by median sentiment (lowest to highest)
         # so the chart reads naturally from negative at top to positive at bottom
         order = (
-            df.groupby("quality")["sentiment"]  # Group by quality tier
+            df.groupby("source_type")["sentiment"]  # Group by type of source
             .median()                            # Get median of each group
             .sort_values()                       # Sort low to high
-            .index                               # Get the quality tier names in that order
+            .index                               # Get the source types in that order
             .tolist()                            # Convert to a plain list
         )
 
@@ -209,8 +315,9 @@ def run_viz(args):
         # color_discrete_sequence sets the box color
         # points="all" shows every individual data point as a dot
         fig = px.box(
-            df, x="sentiment", y="quality",
-            category_orders={"quality": order},
+            df, x="sentiment", y="source_type",
+            category_orders={"source_type": order},
+            labels={"source_type": "Type of source", "sentiment": "Sentiment (-1 negative to +1 positive)"},
             color_discrete_sequence=[MUTED],
             points="all",  # Show each source as a dot
         )
@@ -228,15 +335,14 @@ def run_viz(args):
         if is_vendor.any() and (~is_vendor).any():
             v_mean = df.loc[is_vendor, "sentiment"].mean()
             o_mean = df.loc[~is_vendor, "sentiment"].mean()
-            slide_title = (f"Vendor sources average {v_mean:+.2f} sentiment --<br>"
-                           f"other sources average {o_mean:+.2f}")
+            slide_title = (f"Sources from AI tool makers average {v_mean:+.2f} sentiment.<br>"
+                           f"Other sources average {o_mean:+.2f}")
         else:
             slide_title = "Sentiment by source type"
 
-        save(fig, "01_sentiment_by_type",
-             # Paper title: descriptive, includes N
-             f"Figure 1: Sentiment distribution by source quality tier (N={n_total})",
-             slide_title)
+        save(fig, "sentiment_by_source_type",
+             f"Sentiment of each source, by type of source (N={n_total})",
+             slide_title, appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 2: Sentiment by language (lollipop chart)
@@ -311,10 +417,10 @@ def run_viz(args):
 
             # Slide title from the data: the most and least positive languages
             lo, hi = data.iloc[0], data.iloc[-1]
-            save(fig, "02_sentiment_by_lang",
-                 "Figure 2: Mean sentiment by source language (lollipop chart)",
-                 f"Most positive: {hi['lang']} ({hi['m']:+.2f}) -- "
-                 f"least positive: {lo['lang']} ({lo['m']:+.2f})")
+            save(fig, "sentiment_by_language",
+                 "Average sentiment of the sources in each language",
+                 f"Most positive: {hi['lang']} ({hi['m']:+.2f}). "
+                 f"Least positive: {lo['lang']} ({lo['m']:+.2f})", appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 3: Language coverage (treemap)
@@ -346,9 +452,9 @@ def run_viz(args):
             color_continuous_scale=["#F1FAEE", DARK],  # Light cream to dark navy
         )
 
-        save(fig, "03_language_coverage",
-             f"Figure 3: Source distribution by language (N={len(df)})",
-             f"{df['lang'].nunique()} languages -- not just English")
+        save(fig, "language_coverage",
+             f"Number of sources in each language (N={len(df)})",
+             f"Sources in {df['lang'].nunique()} languages", appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 4: Topic × Language (heatmap)
@@ -394,9 +500,9 @@ def run_viz(args):
                 aspect="auto",
             )
 
-            save(fig, "04_topic_language",
-                 "Figure 4: Theme distribution by source language",
-                 "Which languages discuss which themes")
+            save(fig, "themes_by_language",
+                 "Themes discussed by the sources in each language",
+                 "Which languages discuss which themes", appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 5: Source quality breakdown (lollipop)
@@ -406,16 +512,16 @@ def run_viz(args):
     # in each quality tier. Vendor/SEO sources get the ACCENT color
     # because they may be biased.
 
-    if "quality" in df.columns:
+    if "source_type" in df.columns:
 
-        # Count sources per quality tier, sorted smallest to largest
-        counts = df["quality"].value_counts().sort_values()
+        # Count sources of each type, sorted smallest to largest
+        counts = df["source_type"].value_counts().sort_values()
 
         fig = go.Figure()
 
         for q, c in counts.items():
-            # Highlight vendor and SEO sources (the ones most likely to be biased)
-            color = ACCENT if "vendor" in q.lower() or "SEO" in q else MUTED
+            # Highlight AI tool makers and low-quality sites (the most likely to be biased)
+            color = ACCENT if q.startswith(("AI tool makers", "Low-quality")) else MUTED
 
             # The stick (horizontal line from 0 to the count)
             fig.add_trace(go.Scatter(
@@ -435,9 +541,9 @@ def run_viz(args):
             ))
 
         fig.update_xaxes(range=[0, counts.max() * 1.15])   # Room for the count labels
-        save(fig, "05_source_quality",
-             f"Figure 5: Source inventory by quality tier (N={len(df)})",
-             f"{len(df)} sources -- where did the evidence come from?")
+        save(fig, "source_types",
+             f"Number of sources of each type (N={len(df)})",
+             f"Where the {len(df)} sources come from", appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHARTS 6-7: SIMULATION RESULTS (if simulate mode was run)
@@ -481,16 +587,17 @@ def run_viz(args):
                     color_discrete_map={"layman": GRAY, "junior": MUTED, "senior": ACCENT},
                     category_orders={level_col: ["layman", "junior", "senior"]},
                     points="all",  # Show each page as a dot
-                    labels={"spec_pct": "% of professional spec met"},
+                    labels={"spec_pct": "% of a professional's requirements met"},
                 )
                 fig.update_yaxes(range=[0, 105])
 
                 means = sim_df.groupby(level_col)["spec_pct"].mean()
-                slide_title = (f"Senior prompts met {means.get('senior', 0):.0f}% of a professional "
-                               f"spec -- layman prompts {means.get('layman', 0):.0f}%")
-                save(fig, "06_skill_vs_output",
-                     "Figure 6: Share of professional requirements met, by prompt sophistication "
-                     "(each page tested in a browser)",
+                slide_title = (f"Prompts written like a senior developer met {means.get('senior', 0):.0f}% "
+                               f"of a professional's requirements.<br>A layman's prompts met "
+                               f"{means.get('layman', 0):.0f}%")
+                save(fig, "prompt_skill_vs_result",
+                     "Share of a professional's requirements each AI-built page met, by how "
+                     "skilled the prompt was (each page tested in a browser)",
                      slide_title)
 
             elif level_col in sim_df.columns:
@@ -520,8 +627,8 @@ def run_viz(args):
                 else:
                     slide_title = "Code output length by prompt skill level"
 
-                save(fig, "06_skill_vs_output",
-                     "Figure 6: Code output length by prompt sophistication",
+                save(fig, "prompt_skill_vs_result",
+                     "Length of the code the AI wrote, by how skilled the prompt was",
                      slide_title)
 
         # ── Chart 7: Guardrail behavior ─────────────────────────────
@@ -555,9 +662,9 @@ def run_viz(args):
                 ticktext=["INSECURE", "PARTIAL", "SECURE"],
             )
 
-            save(fig, "07_guardrails",
-                 "Figure 7: Security guardrail behavior by model",
-                 "Not all models warn about insecure code")
+            save(fig, "security_tests",
+                 "How each AI model handled 3 requests for insecure code",
+                 "Not all AI models warn about insecure code", keep_legend=True)
 
     # ── Note about BERTopic charts ──────────────────────────────────
     # BERTopic generates its own plotly charts during analyze mode.
@@ -574,6 +681,104 @@ def run_viz(args):
     # ── Done ────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"{charts} charts generated in two formats:")
-    print(f"   Paper:  {paper_dir}/ (captioned, axis labels)")
-    print(f"   Slides: {slide_dir}/ (minimal, finding as title)")
+    print(f"   Paper:  {paper_root}/ (captioned, axis labels)")
+    print(f"   Slides: {slide_root}/ (minimal, finding as title)")
+    print("   Charts about the research method are in the appendix/ subfolders.")
     print(f"{'='*60}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# THE BRIEF'S KEY MEASURES (for the findings charts)
+# ════════════════════════════════════════════════════════════════════════
+
+MAX_MEASURES = 4      # Charts of reported figures
+MIN_POINTS = 3        # A measure needs figures from at least this many sources
+
+
+def _measures(brief, by_idx, api_key, model):
+    """
+    Group the brief's findings into measures that several sources report as
+    a number ("Change in coding speed with AI assistants (%)"), one AI call.
+    Every figure is then checked in code: the number must appear in the
+    finding AND in one of its sources, or it is left out. Returns
+    [{"name", "unit", "points": [{"value", "label", "source", "tool_maker",
+    "research"}]}], keeping measures with at least MIN_POINTS figures.
+    """
+    findings = {f["id"]: f for f in brief.get("findings", [])}
+    keys = "\n".join(f"- {t['title']}: {t['key_finding']}" for t in brief.get("themes", [])
+                     if t.get("key_finding"))
+    reply = call_ai(
+        f"RESEARCH QUESTION: {brief.get('question', '')}\n\nKEY FINDINGS:\n{keys}\n\n"
+        f"Below are the findings the brief is written from (ID, claim). Choose up to "
+        f"{MAX_MEASURES} MEASURES that best illustrate the key findings and that at least "
+        f"{MIN_POINTS} findings report as a number, for example 'Change in coding speed with "
+        "AI assistants (%)' or 'Share of AI-generated code with security flaws (%)'. Name "
+        "each in plain words a non-specialist understands, with its unit.\n"
+        "Format, exactly:\n"
+        "MEASURE: <plain name, with unit in brackets>\n"
+        "- C12 | <the number; negative if the finding reports a decrease, e.g. 19% slower "
+        "on a speed measure is -19> | <who measured and on whom, at most 8 plain words> | "
+        "<who did the study: tool maker (a company selling AI coding tools, e.g. GitHub, "
+        "Microsoft), independent study, survey, or other>\n\n"
+        "FINDINGS:\n" + "\n".join(f"{i}: {f['claim']}" for i, f in findings.items()),
+        api_key, model, temp=0) or ""
+
+    measures, current = [], None
+    for line in reply.splitlines():
+        m = re.match(r"^\W*MEASURE\W*:?\s*(.+)$", line, re.I)
+        if m:
+            name = m.group(1).strip()
+            unit = re.search(r"\(([^)]*)\)\s*$", name)
+            current = {"name": re.sub(r"\s*\([^)]*\)\s*$", "", name), "unit": unit.group(1) if unit else "",
+                       "points": []}
+            measures.append(current)
+            continue
+        p = re.match(r"^\W*(C\d+)\s*\|\s*([-+−]?\d+(?:[.,]\d+)?)\s*%?\s*\|\s*([^|]+?)"
+                     r"(?:\s*\|\s*(.+))?$", line.strip())
+        if not (p and current and p.group(1) in findings):
+            continue
+        f = findings[p.group(1)]
+        value = float(p.group(2).replace("−", "-").replace(",", "."))
+        # The check: the number must be in the finding and in one of its sources
+        readings = verify._readings(p.group(2).lstrip("+-−").replace(",", "."))
+        sources = [by_idx[s] for s in f["sources"][:3] if s in by_idx]
+        if not (readings & verify.numbers(f["claim"])
+                and any(readings & verify.numbers(s.get("content", "")) for s in sources)):
+            print(f"   left out of the chart (number not found in its source): {p.group(1)} {p.group(2)}")
+            continue
+        lead = sources[0] if sources else {}
+        # Who did the study (the AI reads it from the finding: "A GitHub study
+        # found..."). The website quoting it can be a blog, so the site's
+        # own type is only the fallback.
+        who = (p.group(4) or "").lower()
+        if not who:
+            who = ("tool maker" if "vendor" in (lead.get("quality") or "") else
+                   "independent study" if lead.get("quality") == "academic" else "other")
+        kind = ("AI tool maker" if "tool" in who else "independent study" if "independent" in who
+                else "survey" if "survey" in who else "")
+        current["points"].append({
+            "value": value,
+            "label": p.group(3).strip()[:50] + (f" ({kind})" if kind else ""),
+            "source": f"{lead.get('title', '')[:80]} ({lead.get('domain', '')})",
+            "tool_maker": kind == "AI tool maker",
+            "research": kind == "independent study",
+        })
+    return [m for m in measures if len(m["points"]) >= MIN_POINTS][:MAX_MEASURES]
+
+
+def _fmt(value, unit, signed=False):
+    """
+    A figure as text: 84 with unit "%" → "84%"; with signed=True (a measure
+    of change) → "+84%"; 3.5 with unit "hours" → "3.5 hours".
+    """
+    number = f"{value:+g}" if signed else f"{value:g}"
+    return f"{number}%" if "%" in unit else f"{number} {unit}".strip()
+
+
+def _unique(labels):
+    """Make chart labels unique: a second "GitHub survey" becomes "GitHub survey (2)"."""
+    seen, out = {}, []
+    for label in labels:
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return out

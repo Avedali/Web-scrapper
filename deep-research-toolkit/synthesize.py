@@ -46,6 +46,7 @@ from core import (
     NO_EVIDENCE,           # Card text for sources with nothing usable
     LANGUAGES,             # The 9-language config (for APA language notes)
     BANNED_PHRASES,        # LLM-speak phrases to remove (used by _plain_words)
+    source_label,          # Plain name of a source type, for readers
 )
 
 
@@ -452,6 +453,24 @@ def run_synthesize(args):
     lines.append(f"## Method\n\n{method}\n")
     lines.append(f"## References\n\n{apa_text}")
 
+    # What the charts (viz) are drawn from: the question, each theme's key
+    # finding and the types of sources behind it, and the findings used
+    from collections import Counter
+    with open(os.path.join(args.corpus, "brief_findings.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "question": question,
+            "themes": [{
+                "title": title,
+                "question": sub_question,
+                "key_finding": found.get(n, ""),
+                "sources_by_type": dict(Counter(
+                    _kind(by_idx[c]) for c in set(verify.citations(checked_text.get(title, "")))
+                    if c in by_idx)),
+            } for n, (title, sub_question) in enumerate(themes, 1)],
+            "findings": [{"id": f["id"], "claim": f["claim"], "sources": f["sources"], "theme": t}
+                         for t in titles for f in assignment.get(t, [])],
+        }, f, indent=1, ensure_ascii=False)
+
     fn = args.output or f"brief_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     with open(fn, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -766,17 +785,17 @@ def _corpus_profile(corpus, usable, by_idx):
     from collections import Counter
     langs = Counter(s.get("lang", "?") for s in corpus)
     kinds = Counter(_kind(s) for s in corpus)
-    vendor = sum(n for k, n in kinds.items() if "vendor" in k.lower())
+    vendor = sum(1 for s in corpus if "vendor" in (s.get("quality") or "").lower())
     return (f"Sources: {len(corpus)} found, {len(usable) or len(corpus)} with usable content.\n"
             f"Languages: {', '.join(f'{k} {n}' for k, n in langs.most_common())}.\n"
             f"Source types: {', '.join(f'{k} {n}' for k, n in kinds.most_common())}.\n"
-            f"Vendor sources: {vendor} of {len(corpus)} ({100 * vendor // max(1, len(corpus))}%).")
+            f"Sources from AI tool makers: {vendor} of {len(corpus)} "
+            f"({100 * vendor // max(1, len(corpus))}%).")
 
 
 def _kind(source):
-    """A source's type for the reader: "academic", "vendor/primary", ... or "other"."""
-    kind = source.get("quality") or "other"
-    return "other" if kind in ("unclassified", "?") else kind
+    """A source's type in plain words, e.g. "AI tool makers (GitHub, OpenAI...)"."""
+    return source_label(source.get("quality"))
 
 
 def _evidence_line(text, by_idx):

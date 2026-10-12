@@ -9,7 +9,7 @@ A multilingual, multi-phase Python research pipeline for the Sciences Po capston
 3. **Stats** -- Mann-Whitney U (vendor vs non-vendor sentiment), Kruskal-Wallis (sentiment across languages), Spearman correlations, chi-squared with Fisher's exact fallback for sparse tables, and structural equation modeling (SEM) via semopy with proper dummy coding.
 4. **Synthesize** -- reads ALL evidence and proposes 3 defensible theses ranked by evidence strength. You pick one. It generates a thesis-driven outline and writes each section grounded in cited sources. Voice cleaner strips LLM filler in 6 languages.
 5. **Deepen** -- finds weak spots in the thesis and runs targeted searches to fill evidence gaps.
-6. **Charts** -- generates every chart twice: paper version (captioned, labeled) and slide version (finding as title, one accent color, gray for non-focal).
+6. **Charts**: charts of the findings first: the figures sources report for the brief's key measures (each number checked against its source), how much evidence backs each key finding, and the simulation results. Charts about the research method (sentiment by source type, languages, source mix) go in an `appendix/` folder. Every chart comes in a paper version (caption, axis labels) and a slide version (the finding as the title).
 7. **Simulate** -- gives AI models identical coding tasks (product search page, Kanban board, data explorer) at three skill levels (layman/junior/senior) and compares output quality. User chooses which models to benchmark.
 8. **Ask** -- teammates ask questions about the research in plain language. 5-turn conversation memory.
 
@@ -18,7 +18,7 @@ A multilingual, multi-phase Python research pipeline for the Sciences Po capston
 - **Markdown report** with inline citations and APA 7th references
 - **JSON metadata** (sources, quality breakdown, language breakdown)
 - **Scratchpad** folder with all intermediate work (definitions, decomposition, red-team critiques, bias audit, raw synthesis, voice-cleaned output)
-- **Charts** in paper and slide formats (PNG + interactive HTML)
+- **Charts** of the findings, plus method charts in `appendix/`, in paper and slide formats (PNG + interactive HTML)
 - **Simulation HTML files** -- open in a browser, compare side by side
 
 ## Quick Start (for teammates)
