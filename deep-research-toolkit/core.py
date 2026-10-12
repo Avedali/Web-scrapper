@@ -108,6 +108,11 @@ except ImportError:
 if _TRAF:
     _TRAF_CONFIG = _traf_config()
     _TRAF_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", "15")
+    # A page that won't download is normal (we count them); without this,
+    # trafilatura logs several lines per failed page and buries the progress
+    import logging
+    logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 # --- Camoufox (stealth browser for bot-protected sites) ---
 try:
@@ -554,8 +559,6 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     one. Pages that fail are then retried one at a time with the camoufox
     browser (tier 2), which can't safely run in parallel.
     """
-    from concurrent.futures import ThreadPoolExecutor  # Run downloads in parallel
-
     # Without a page reader every page "fails" and only search snippets are
     # kept -- stop now rather than run for half an hour and save nothing
     if urls and not (_TRAF or _CAMO):
@@ -566,9 +569,8 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     started = time.time()
     urls = list(dict.fromkeys(urls))  # Drop duplicates, keep order
     print(f"      reading {len(urls)} pages ({workers} at a time)...")
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        texts = list(pool.map(lambda u: fetch_page(u, max_chars, use_browser=False), urls))
-    pages = {u: t for u, t in zip(urls, texts, strict=True) if t}
+    texts = _read_pages_isolated(urls, max_chars, workers)
+    pages = {u: texts[u] for u in urls if texts.get(u)}
 
     # Retry the failures in ONE browser (opening a browser per page is slow)
     failed = [u for u in urls if u not in pages]
@@ -588,6 +590,101 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
 
     print(f"      read {len(pages)} of {len(urls)} pages in {time.time() - started:.0f}s")
     return pages
+
+
+def _read_pages_isolated(urls, max_chars, workers):
+    """
+    Read pages with trafilatura, `workers` at a time, in a helper process.
+    Returns {url: text or None}.
+
+    Why a helper process: a crash inside a C library (the HTML parser
+    lxml/libxml2 -- "double free or corruption", "segmentation fault") kills
+    the whole program it happens in -- it once ended an unattended run two
+    minutes into explore. Here it only kills the helper: the few
+    pages it was reading at that moment are skipped, and a new helper
+    carries on with the rest.
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    code = ("import faulthandler, sys; faulthandler.enable(); "
+            f"sys.path.insert(0, {here!r}); import core; core._read_pages_worker()")
+
+    def run_helper(todo, n_workers):
+        """Read `todo` in one helper; returns (pages being read at exit, exit code)."""
+        proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, encoding="utf-8")
+        proc.stdin.write(json.dumps({"urls": todo, "max_chars": max_chars, "workers": n_workers}))
+        proc.stdin.close()
+        reading = set()   # Pages the helper started but hasn't finished
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue  # Some library printed a line of its own -- not ours
+            if "start" in msg:
+                reading.add(msg["start"])
+            elif "done" in msg:
+                reading.discard(msg["done"])
+                results[msg["done"]] = msg["text"]
+        return reading, proc.wait()
+
+    results = {}
+    jobs = [(list(urls), workers)]   # (pages to read, how many at a time)
+    crashes = 0
+    while jobs and crashes < 10:
+        todo, n_workers = jobs.pop(0)
+        todo = [u for u in todo if u not in results]
+        if not todo:
+            continue
+        reading, exit_code = run_helper(todo, n_workers)
+        if exit_code == 0:
+            continue
+        crashes += 1
+        rest = [u for u in todo if u not in results and u not in reading]
+        if n_workers == 1 and reading:
+            # One page at a time, so this is the page that crashes it -- skip it
+            results.update(dict.fromkeys(reading))
+            print(f"      skipped a page that crashes the page reader: {next(iter(reading))[:80]}",
+                  flush=True)
+        elif reading:
+            # One of these crashed it: read them again one at a time to find which
+            print(f"      the page reader crashed (exit code {exit_code}) -- re-reading the "
+                  f"{len(reading)} pages it was on one at a time, then the other {len(rest)}",
+                  flush=True)
+            jobs.insert(0, (sorted(reading), 1))
+        else:
+            # It crashed before reading anything (a broken install?) -- give up
+            print(f"      the page reader won't start (exit code {exit_code})", flush=True)
+            break
+        if rest:
+            jobs.insert(1 if reading and n_workers > 1 else 0, (rest, n_workers))
+    return results
+
+
+def _read_pages_worker():
+    """
+    The helper process of _read_pages_isolated: reads the job (JSON) from
+    stdin and prints one JSON line per page -- "start" before reading it,
+    "done" with its text after -- so the main program knows, if this
+    process crashes, which pages were being read at that moment.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    job = json.loads(sys.stdin.read())
+    lock = threading.Lock()
+
+    def emit(msg):
+        with lock:   # One whole line at a time, even from 8 threads
+            sys.stdout.write(json.dumps(msg) + "\n")
+            sys.stdout.flush()
+
+    def read_one(url):
+        emit({"start": url})
+        emit({"done": url, "text": fetch_page(url, job["max_chars"], use_browser=False)})
+
+    with ThreadPoolExecutor(max_workers=job["workers"]) as pool:
+        list(pool.map(read_one, job["urls"]))
 
 
 def region_for(query):
