@@ -1,22 +1,23 @@
 """
-stats.py -- Mode 2b: Statistical tests.
-========================================
+stats.py: Mode 2b, statistical tests.
+=====================================
 Run: python agent.py stats
 Or:  launcher.py → option 3
 
 This mode runs formal statistical tests on the data that analyze
 mode produced. It answers questions like:
-  - "Are vendor sources SIGNIFICANTLY more positive than forum sources?"
-    (not just 'they look more positive' -- is the difference real?)
-  - "Does sentiment vary across languages, or is the variation just noise?"
+  - "Are vendor sources significantly more positive than forum sources?"
+    (The test checks whether the difference is real or could come from
+    chance. Sources that look more positive do not show that by themselves.)
+  - "Does sentiment vary across languages, or is the variation only noise?"
   - "Is there a causal chain: source type → topic → sentiment?"
 
-Two paths depending on your data:
-  1. NO external data (default): tests run on the corpus analysis results
+Two paths, depending on your data:
+  1. No external data (default): tests run on the corpus analysis results
      (the CSV that analyze mode saved). Tests: Mann-Whitney, Kruskal-Wallis,
      Spearman, chi-squared, SEM (structural equation modeling).
-  2. WITH external data (--data survey.csv): auto-detects columns and runs
-     logistic regression on any binary AI-related variable it finds.
+  2. External data (--data survey.csv): detects the columns automatically
+     and runs logistic regression on any binary AI-related variable it finds.
 
 Uses pingouin if installed (effect sizes, power, Bayes Factor in one call).
 Falls back to scipy if not.
@@ -33,7 +34,7 @@ from core import pad  # Scratchpad saving
 
 
 # ════════════════════════════════════════════════════════════════════════
-# MAIN FUNCTION -- decides which path to take
+# MAIN FUNCTION: decides which path to take
 # ════════════════════════════════════════════════════════════════════════
 
 def run_stats(args):
@@ -52,7 +53,7 @@ def run_stats(args):
     except ImportError:
         sys.exit("pip install pandas")
 
-    # ── Decision: external survey data or corpus data? ──────────────
+    # ── Decision: external survey data or corpus data ───────────────
     if args.data and os.path.exists(args.data):
         # User passed --data survey.csv → analyze that CSV
         print(f"   External data: {args.data}")
@@ -86,13 +87,13 @@ def _corpus_stats(df, args):
     report = "# Statistical Analysis\n\n"  # Will be saved to scratchpad
 
     # ── Try to load pingouin ────────────────────────────────────────
-    # pingouin is the upgrade over raw scipy. Where scipy's ttest gives
-    # you just T and p, pingouin gives you T, p, degrees of freedom,
-    # Cohen's d (effect size), 95% CI, statistical power, AND Bayes Factor.
-    # All in one neat DataFrame. One function call.
+    # pingouin gives more output than raw scipy. scipy's ttest returns
+    # only T and p. pingouin returns T, p, degrees of freedom, Cohen's d
+    # (effect size), 95% CI, statistical power and Bayes Factor, all in
+    # one DataFrame from one function call.
     #
-    # If pingouin isn't installed, we fall back to scipy (still works,
-    # just gives less information per test).
+    # If pingouin isn't installed, the code falls back to scipy, which
+    # still works but gives less information per test.
     try:
         import pingouin as pg
         HAS_PG = True
@@ -111,12 +112,12 @@ def _corpus_stats(df, args):
     # TEST 0: DESCRIPTIVE STATISTICS
     # ════════════════════════════════════════════════════════════════
     # Before any hypothesis tests, describe the data.
-    # "Descriptive" = just summarizing what you have.
-    # "Inferential" = testing whether patterns are real or just noise.
+    # "Descriptive" = summarizing what you have.
+    # "Inferential" = testing whether patterns are real or only noise.
     #
     # The 95% confidence interval (CI) means: "if we repeated this
     # study 100 times, the true mean would fall within this range
-    # 95 times." It's how sure we are about our estimate.
+    # 95 times." It shows how sure we are about the estimate.
 
     if "sentiment" in df.columns:
         print(f"\n{'─'*40}\nDESCRIPTIVE\n{'─'*40}")
@@ -129,7 +130,7 @@ def _corpus_stats(df, args):
         se = df["sentiment"].std() / (n ** 0.5)  # n ** 0.5 = √n
 
         # 95% CI = mean ± 1.96 × standard error
-        # 1.96 comes from the normal distribution -- it's the z-score
+        # 1.96 comes from the normal distribution: it is the z-score
         # that captures 95% of the area under the bell curve.
         print(f"   Mean sentiment: {m:+.3f} (95% CI: [{m-1.96*se:.3f}, {m+1.96*se:.3f}])")
         print(f"   Std: {df['sentiment'].std():.3f}, n={n}")
@@ -141,20 +142,20 @@ def _corpus_stats(df, args):
     # TEST 1: MANN-WHITNEY U (vendor vs non-vendor sentiment)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHAT IT TESTS: Are two groups different?
+    # What it tests: whether two groups differ.
     #   Group 1: sentiment scores from vendor/primary sources
     #   Group 2: sentiment scores from everything else
     #
-    # WHY NOT a t-test? The t-test assumes data is normally distributed
-    # (bell-curve shaped). Sentiment scores rarely are -- they cluster
-    # at the extremes (very positive or very negative). Mann-Whitney
-    # doesn't assume any distribution shape (it's "non-parametric").
+    # Why not a t-test: the t-test assumes the data is normally distributed
+    # (bell-curve shaped). Sentiment scores rarely are. They cluster at the
+    # extremes (strongly positive or strongly negative). Mann-Whitney
+    # doesn't assume any distribution shape (it is "non-parametric").
     #
-    # HOW IT WORKS: Rank all scores from lowest to highest, then check
-    # if one group's ranks are systematically higher than the other's.
+    # How it works: rank all scores from lowest to highest, then check
+    # whether one group's ranks are systematically higher than the other's.
     #
-    # THE QUESTION: "If I randomly pick one vendor source and one non-vendor
-    # source, what's the probability the vendor source is more positive?"
+    # The question it answers: "If I randomly pick one vendor source and one
+    # non-vendor source, what's the probability the vendor source is more positive?"
 
     if "quality" in df.columns and "sentiment" in df.columns:
         print(f"\n{'─'*40}\nMANN-WHITNEY U: Vendor vs Non-Vendor\n{'─'*40}")
@@ -166,7 +167,7 @@ def _corpus_stats(df, args):
         vendor = df[df["quality"].str.contains("vendor", case=False, na=False)]["sentiment"]
 
         # ~ is the NOT operator for pandas: True→False, False→True
-        # So this selects everything that's NOT a vendor source
+        # This selects every source that is not a vendor source
         non_vendor = df[~df["quality"].str.contains("vendor", case=False, na=False)]["sentiment"]
 
         # Need at least 3 sources in each group for a meaningful test
@@ -181,9 +182,10 @@ def _corpus_stats(df, args):
                 report += (f"## Mann-Whitney U\n{result.to_string()}\n"
                            + _mwu_in_words(vendor, non_vendor, p) + "\n")
             else:
-                # scipy's mannwhitneyu returns just the U statistic and p-value
-                # alternative="two-sided" means we're testing "is there ANY
-                # difference?" (not just "is group A higher than B?")
+                # scipy's mannwhitneyu returns only the U statistic and p-value.
+                # alternative="two-sided" tests for a difference in either
+                # direction. A one-sided test would only check whether group A
+                # is higher than group B.
                 u, p = sp.mannwhitneyu(vendor, non_vendor, alternative="two-sided")
                 print(f"   U = {u:.1f}, p = {p:.4f}")
                 print(f"   Vendor: {vendor.mean():+.3f} (n={len(vendor)})")
@@ -199,16 +201,16 @@ def _corpus_stats(df, args):
     # TEST 2: KRUSKAL-WALLIS (sentiment across 3+ languages)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHAT IT TESTS: Are THREE OR MORE groups different?
-    #   Like Mann-Whitney, but for more than 2 groups.
-    #   "Does sentiment differ across English, French, Japanese, etc.?"
+    # What it tests: whether three or more groups differ.
+    #   It is Mann-Whitney extended to more than 2 groups.
+    #   Example: "Does sentiment differ across English, French, Japanese, etc.?"
     #
-    # WHY THIS TEST: It's the non-parametric version of one-way ANOVA.
-    #   - ANOVA assumes normal distribution → we can't assume that
+    # Why this test: it is the non-parametric version of one-way ANOVA.
+    #   - ANOVA assumes a normal distribution → that can't be assumed here
     #   - Kruskal-Wallis uses ranks instead → works with any distribution
     #
-    # THE QUESTION: "Is at least one language's sentiment distribution
-    # different from the others?"
+    # The question it answers: "Is at least one language's sentiment
+    # distribution different from the others?"
 
     if "lang" in df.columns and "sentiment" in df.columns:
         print(f"\n{'─'*40}\nKRUSKAL-WALLIS: Sentiment × Language\n{'─'*40}")
@@ -250,11 +252,11 @@ def _corpus_stats(df, args):
     # TEST 3: SPEARMAN CORRELATIONS (between numeric variables)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHAT IT TESTS: Do two numeric variables move together?
-    #   "When sentiment goes up, does something else go up/down too?"
+    # What it tests: whether two numeric variables move together.
+    #   Example: "When sentiment goes up, does something else go up or down too?"
     #
-    # WHY SPEARMAN (not Pearson)? Pearson assumes a linear relationship
-    # and normal distribution. Spearman uses ranks, so it catches any
+    # Why Spearman instead of Pearson: Pearson assumes a linear relationship
+    # and a normal distribution. Spearman uses ranks, so it detects any
     # monotonic relationship (consistently up or consistently down,
     # even if not a straight line).
     #
@@ -269,13 +271,13 @@ def _corpus_stats(df, args):
         # Find all numeric columns in the DataFrame.
         # select_dtypes(include="number") keeps only columns with numeric data.
         # .columns.tolist() converts the column names to a plain list.
-        # "idx" (row number) and "bertopic" (topic ID -- a category label,
-        # not a quantity) are numeric-looking but meaningless to correlate.
+        # "idx" (row number) and "bertopic" (topic ID, which is a category
+        # label and not a quantity) look numeric but are meaningless to correlate.
         num_cols = [c for c in df.select_dtypes(include="number").columns
                     if c not in ("idx", "bertopic")]
 
         if len(num_cols) >= 2 and HAS_PG:
-            # pingouin's pairwise_corr tests ALL pairs of numeric columns at once.
+            # pingouin's pairwise_corr tests all pairs of numeric columns at once.
             # method="spearman" specifies Spearman (rank-based) correlation.
             # Returns a DataFrame with: X, Y, r (correlation), p-unc (p-value),
             # power (statistical power), and more.
@@ -302,7 +304,7 @@ def _corpus_stats(df, args):
             # everything after the current item.
             for i, c1 in enumerate(num_cols):
                 for c2 in num_cols[i+1:]:  # Only pairs we haven't tested yet
-                    # .dropna() on BOTH columns together removes rows with a
+                    # .dropna() on the two columns together removes rows with a
                     # missing value, so the two series stay paired row-by-row
                     pair = df[[c1, c2]].dropna()
                     rho, p = sp.spearmanr(pair[c1], pair[c2])
@@ -313,7 +315,7 @@ def _corpus_stats(df, args):
     # TEST 4: CHI-SQUARED (all categorical pairs)
     # ════════════════════════════════════════════════════════════════
     #
-    # This tests EVERY PAIR of categorical variables for association.
+    # This tests every pair of categorical variables for association, e.g.:
     # "Is quality associated with sentiment label?"
     # "Is language associated with topic?"
     # "Is topic associated with sentiment?"
@@ -331,8 +333,8 @@ def _corpus_stats(df, args):
     if "topic_zs" in df.columns:
         cat_pairs.append("topic_zs")
 
-    # Add the BERTopic themes (from analyze) -- sources without usable
-    # evidence have no theme, so leave them out of the tests
+    # Add the BERTopic themes (from analyze). Sources without usable
+    # evidence have no theme, so they are left out of the tests
     if "theme" in df.columns:
         df["theme"] = df["theme"].where(df["theme"] != "no usable evidence")
         cat_pairs.append("theme")
@@ -350,14 +352,14 @@ def _corpus_stats(df, args):
             # Need at least 2 categories in each variable
             if ct.shape[0] >= 2 and ct.shape[1] >= 2:
 
-                # ── CHECK CHI-SQUARED ASSUMPTIONS ───────────────────
-                # Chi-squared requires that EXPECTED frequencies (not
-                # observed) in each cell are ≥ 5. With 80 sources across
-                # 6 quality tiers × 3 sentiment labels, many cells will
-                # have expected values below 5, making the p-value
-                # unreliable.
+                # ── Check the chi-squared assumptions ───────────────
+                # Chi-squared requires each cell's expected frequency (as
+                # opposed to its observed count) to be ≥ 5. With 80 sources
+                # across 6 quality tiers × 3 sentiment labels, many cells
+                # will have expected values below 5, which makes the
+                # p-value unreliable.
                 #
-                # We check by computing the expected frequencies:
+                # To check, compute the expected frequencies:
                 chi2, p, dof, expected = sp.chi2_contingency(ct)
 
                 # Count how many cells have expected frequency < 5
@@ -370,12 +372,12 @@ def _corpus_stats(df, args):
                 v = (chi2 / (n * k)) ** 0.5 if k > 0 and n > 0 else 0
 
                 if pct_low > 20:
-                    # More than 20% of cells have expected freq < 5.
-                    # Chi-squared is unreliable. Try Fisher's exact test.
+                    # More than 20% of cells have expected freq < 5, so
+                    # chi-squared is unreliable. Try Fisher's exact test.
                     #
-                    # Fisher's exact test works on small samples but only
-                    # on 2×2 tables in scipy. For larger tables, we report
-                    # the chi-squared result WITH a warning.
+                    # Fisher's exact test works on small samples, but scipy
+                    # only supports it on 2×2 tables. For larger tables, the
+                    # chi-squared result is reported with a warning.
                     if ct.shape == (2, 2):
                         # 2×2 table → use Fisher's exact test
                         odds, p_fisher = sp.fisher_exact(ct)
@@ -403,35 +405,36 @@ def _corpus_stats(df, args):
     # TEST 5: STRUCTURAL EQUATION MODELING (semopy)
     # ════════════════════════════════════════════════════════════════
     #
-    # WHAT IS SEM?
-    # Chi-squared tells you two variables are ASSOCIATED.
-    # SEM tells you the CAUSAL STRUCTURE: which variable affects which,
+    # What SEM is:
+    # Chi-squared tells you that two variables are associated.
+    # SEM estimates the causal structure: which variable affects which,
     # and through what path.
     #
-    # OUR MODEL:
+    # The model here:
     #   source quality → topic discussed → sentiment
     #
-    # In plain English: "Vendor sources are more positive. But WHY?
-    # Is it because they're vendors (direct effect)? Or because vendor
-    # sources tend to discuss 'productivity' (a positive topic) while
-    # forums discuss 'job loss' (a negative topic)?"
+    # In plain English: vendor sources are more positive, and the model
+    # tests why. One explanation is that they are vendors (direct effect).
+    # Another is that vendor sources tend to discuss 'productivity' (a
+    # positive topic) while forums discuss 'job loss' (a negative topic).
     #
     # If the indirect path (quality → topic → sentiment) is significant,
-    # the topic MEDIATES the relationship. The vendor bias isn't just
-    # "vendors are cheerful" -- it's "vendors talk about cheerful topics."
+    # the topic mediates the relationship. Then part of the vendor bias
+    # comes from the topics vendors write about ("vendors talk about
+    # cheerful topics") and is more than "vendors are cheerful".
     #
-    # WHY SEMOPY AND NOT PINGOUIN'S MEDIATION?
+    # Why semopy instead of pingouin's mediation analysis:
     # pingouin.mediation_analysis uses pd.Categorical().codes, which
     # assigns arbitrary integers to nominal categories (academic=0,
-    # vendor=4). That implies "vendor is 4× more academic" -- nonsense.
+    # vendor=4). That treats "vendor" as 4× "academic", which has no meaning.
     #
-    # The fix: DUMMY CODING. We create binary 0/1 columns:
+    # The fix is dummy coding: one binary 0/1 column per category:
     #   quality = "vendor" → is_vendor=1, is_academic=0, is_forum=0
-    # Each dummy variable is genuinely numeric (0 or 1), and the
-    # relationships are interpretable: "being a vendor source predicts
-    # +0.3 on sentiment."
+    # Each dummy variable is a real number (0 or 1), and the results
+    # can be read directly: "being a vendor source predicts +0.3 on
+    # sentiment."
     #
-    # semopy is a Python SEM package published in the journal
+    # semopy is a Python SEM package. It was published in the journal
     # Structural Equation Modeling, uses lavaan-style syntax (the R
     # standard), and outperforms R's lavaan in speed and accuracy.
 
@@ -446,10 +449,10 @@ def _corpus_stats(df, args):
             #   quality = ["academic", "vendor", "forum"]
             #   becomes: quality_academic (0/1), quality_vendor (0/1), quality_forum (0/1)
             #
-            # drop_first=True removes one column to avoid multicollinearity
-            # (if it's not academic AND not vendor AND not forum... it must be
-            # the dropped category. Including all of them would be redundant
-            # and break the math.)
+            # drop_first=True removes one column to avoid multicollinearity.
+            # (If a source is not academic, not vendor and not forum, it must
+            # be in the dropped category. Including all of them would be
+            # redundant and break the math.)
             quality_dummies = pd.get_dummies(df["quality"], prefix="q", drop_first=True).astype(int)
             # .astype(int): pandas 2.x returns True/False columns by default;
             # semopy needs numbers, so we convert to 0/1 integers
@@ -483,10 +486,11 @@ def _corpus_stats(df, args):
             # If adding topics reduces the quality→sentiment path,
             # that's evidence of mediation.
 
-            # Which dummies go into the model (we use at most 4 of each to
-            # avoid overfitting). Skip categories with fewer than 3 sources --
-            # a path estimated from 1 source is noise -- then take the biggest,
-            # always keeping vendor first since vendor bias is the hypothesis.
+            # Which dummies go into the model (at most 4 of each, to avoid
+            # overfitting). Categories with fewer than 3 sources are skipped,
+            # because a path estimated from 1 source is noise. The rest are
+            # sorted largest first, with vendor always first because vendor
+            # bias is the hypothesis.
             # (Taking the first 4 alphabetically used to pick n=1 tiers like
             # "consulting" and leave vendor out entirely.)
             def pick(prefix):
@@ -503,7 +507,7 @@ def _corpus_stats(df, args):
                 if has_topic and t_cols:
                     t_predictors = " + ".join(t_cols[:4])
                     # Full mediated model:
-                    # sentiment depends on quality AND topic
+                    # sentiment depends on quality and topic
                     # topic depends on quality (the mediation path)
                     model_spec = (
                         f"sentiment ~ {q_predictors} + {t_predictors}\n"
@@ -524,7 +528,7 @@ def _corpus_stats(df, args):
 
                 # Get the results table
                 results = sem_model.inspect()
-                # Filter to the interesting paths (not variances)
+                # Keep the regression paths (op "~") and drop the variances
                 paths = results[results["op"] == "~"]
 
                 if not paths.empty:
@@ -573,11 +577,11 @@ def _corpus_stats(df, args):
             print(summary.to_string())
 
     except ImportError:
-        pass  # researchpy not installed -- skip silently
+        pass  # researchpy not installed: skip it without a message
     except Exception as e:
-        # researchpy 0.3.7.3 fails to IMPORT on Python 3.10+ (a TypeError in
+        # researchpy 0.3.7.3 fails to import on Python 3.10+ (a TypeError in
         # its own type hints), and its summary can break on newer pandas.
-        # It's a bonus table -- never let it crash the stats run.
+        # It is an optional extra table, so it must not crash the stats run.
         print(f"   researchpy unavailable ({type(e).__name__}) -- skipped")
 
     # ── Save everything to scratchpad ───────────────────────────────
@@ -602,7 +606,7 @@ def _survey_stats(df, args):
     import pandas as pd
 
     # Show basic info about the dataset
-    # .shape returns (rows, columns) -- like the size of a spreadsheet
+    # .shape returns (number of rows, number of columns)
     print(f"   Shape: {df.shape}")
     # Show first 15 column names so the user knows what's in the data
     print(f"   Columns: {list(df.columns)[:15]}")
@@ -623,17 +627,17 @@ def _survey_stats(df, args):
 
     # ── Logistic regression on binary AI variables ──────────────────
     #
-    # WHAT IS LOGISTIC REGRESSION?
-    # Regular (linear) regression predicts a NUMBER: "how much revenue?"
-    # Logistic regression predicts a YES/NO outcome: "does this developer
+    # What logistic regression is:
+    # Regular (linear) regression predicts a number: "how much revenue?"
+    # Logistic regression predicts a yes/no outcome: "does this developer
     # use AI tools?"
     #
-    # It tells you which factors PREDICT the outcome. For example:
+    # It shows which factors predict the outcome. For example:
     # "Controlling for everything else, developers with 5+ years of
     # experience are 2.3x more likely to use AI coding tools."
     #
-    # We auto-detect binary (yes/no) AI-related columns and run
-    # logistic regression with all available numeric columns as predictors.
+    # The code finds binary (yes/no) AI-related columns automatically and
+    # runs logistic regression with the available numeric columns as predictors.
     #
     # .nunique() returns how many unique values a column has.
     # If it's 2 (e.g., "Yes"/"No"), it's binary → good for logistic regression.
@@ -656,7 +660,7 @@ def _survey_stats(df, args):
                     print("   No numeric predictor columns -- skipping")
                     continue
 
-                # Drop rows with a missing target OR predictor in one go
+                # Drop rows with a missing target or predictor in one step
                 # (logistic regression crashes on NaN values, and a missing
                 # target would otherwise become code -1 below).
                 data = df[[col] + preds].dropna()
@@ -691,11 +695,12 @@ def _survey_stats(df, args):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# PLAIN-WORDS SUMMARIES -- what each test compared and what it found
+# PLAIN-WORDS SUMMARIES: what each test compared and what it found
 # ════════════════════════════════════════════════════════════════════════
 # The brief's writer reads this report. Given only a table of numbers, it
 # once described the vendor-vs-other sentiment test as proof that AI tools
-# have "a significant positive impact" -- so each test says what it means.
+# have "a significant positive impact". So each test also states in words
+# what it means.
 
 def _p(p):
     """A p-value as text: 'p=0.0037', or 'p<0.0001' rather than 'p=0.0000'."""

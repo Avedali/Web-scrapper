@@ -1,31 +1,32 @@
 """
-analyze.py -- Mode 2a: NLP analysis on the collected corpus.
-=============================================================
+analyze.py: Mode 2a, NLP analysis on the collected corpus.
+===========================================================
 Run: python agent.py analyze
 Or:  launcher.py → option 2
 
-This mode reads the raw sources that explore gathered, and runs
-FOUR types of text analysis on them using Hugging Face (HF) models:
+This mode reads the raw sources that explore gathered and runs four
+types of text analysis on them with Hugging Face (HF) models:
 
-  1. SENTIMENT ANALYSIS -- is each source positive, negative, or neutral
-     about AI coding assistants? Do vendor sources feel different from
-     developer forums? Do different languages have different vibes?
+  1. SENTIMENT ANALYSIS: scores each source as positive, negative or
+     neutral about AI coding assistants. This lets you compare vendor
+     sources with developer forums, and one language with another.
 
-  2. ZERO-SHOT CLASSIFICATION -- classify each source into topics like
-     "productivity", "workforce anxiety", "security risks" WITHOUT
-     training any model. You just define the categories and the AI
-     sorts documents into them.
+  2. ZERO-SHOT CLASSIFICATION: sorts each source into topics such as
+     "productivity", "workforce anxiety" and "security risks" without
+     training a model. You define the categories and the AI assigns
+     documents to them.
 
-  3. NAMED ENTITY RECOGNITION (NER) -- extract which companies, products,
-     and organizations are mentioned most. Is the conversation mostly
-     about GitHub Copilot, or are other tools getting attention too?
+  3. NAMED ENTITY RECOGNITION (NER): finds which companies, products
+     and organizations are mentioned most. This shows whether the
+     discussion is mostly about GitHub Copilot or also covers other tools.
 
-  4. TOPIC MODELING (BERTopic) -- let the AI discover what themes exist
-     in the corpus, without you telling it what to look for. It might
-     find 5 topics you didn't expect.
+  4. TOPIC MODELING (BERTopic): the AI finds the themes in the corpus
+     without being told what to look for. It may find, say, 5 topics
+     you didn't expect.
 
-Finally, a chi-squared test checks: is sentiment ASSOCIATED with source
-type? (Are vendor sources statistically more positive than forums?)
+Finally, a chi-squared test checks whether sentiment is associated with
+source type, for example whether vendor sources are statistically more
+positive than forums.
 
 All results are saved to scratchpad/ for stats mode and viz mode.
 """
@@ -50,8 +51,8 @@ from core import (
 
 # How much of each source the language models read. None = all of it.
 # (The models split long text into chunks, so length only costs time.
-# If analyze is too slow on your laptop, set e.g. 10000 -- but text past
-# the limit is then ignored, which may be where the findings are.)
+# If analyze is too slow on your laptop, set e.g. 10000. Text past the
+# limit is then ignored, and that text may hold findings.)
 ANALYZE_CHARS = None
 
 # On an Apple Silicon Mac, let PyTorch run the few operations the Mac GPU
@@ -60,7 +61,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 class _FallbackPipe:
-    """A model on the Mac GPU that switches to the CPU for good if the GPU fails."""
+    """A model on the Mac GPU that switches to the CPU, and stays there, if the GPU fails."""
 
     def __init__(self, pipe, make_cpu_pipe):
         self.pipe, self.make_cpu_pipe, self.on_gpu = pipe, make_cpu_pipe, True
@@ -78,11 +79,12 @@ class _FallbackPipe:
 
 def _make_pipeline(task, test, **kwargs):
     """
-    A Hugging Face pipeline on the fastest device that works. Apple Silicon
-    Macs have a GPU PyTorch can use ("mps"), several times faster than the
-    CPU for these models. It's tried on a sample first (`test(pipe)`), and if
-    it ever fails mid-run the pipeline moves to the CPU -- a GPU problem
-    must never quietly turn into wrong results. Other computers: as before.
+    Builds a Hugging Face pipeline on the fastest device that works. Apple
+    Silicon Macs have a GPU that PyTorch can use ("mps"), several times
+    faster than the CPU for these models. The GPU is tried on a sample
+    first (`test(pipe)`). If it fails mid-run, the pipeline moves to the
+    CPU, so a GPU problem cannot silently produce wrong results. Other
+    computers use the default device, as before.
     """
     from transformers import pipeline
     import torch
@@ -101,26 +103,26 @@ def _make_pipeline(task, test, **kwargs):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# TEXT CHUNKING -- lets models read entire documents, not just page one
+# TEXT CHUNKING: lets models read every part of a long document
 # ════════════════════════════════════════════════════════════════════════
 #
-# HF transformer models have a maximum input size of 512 "tokens"
-# (roughly 400 words / 2000 characters). A 3000-character source
+# HF transformer models accept at most 512 "tokens" of input
+# (about 400 words / 2000 characters). A 3000-character source
 # would lose everything after the first ~2000 characters.
 #
-# CHUNKING solves this: split the text into overlapping pieces,
-# run the model on each piece, and combine the results.
+# Chunking fixes this: the text is split into overlapping pieces,
+# the model runs on each piece, and the results are combined.
 # "Overlapping" means each chunk shares ~50 characters with the next
-# one, so we don't accidentally cut a sentence in half.
+# one, so sentences are not cut in half at chunk edges.
 #
-# The tradeoff is speed: a long source becomes 3-4 model calls
+# The cost is speed: a long source becomes 3-4 model calls
 # instead of 1. For 80 sources, analyze mode takes 3-4× longer.
 
 def _progress(label, total):
     """
     Return a tick() to call once per document: it prints a progress line
     every ~10% with the time left, so a long step (NER takes ~40 minutes
-    on a laptop for ~300 sources) never looks like a hang.
+    on a laptop for ~300 sources) does not look frozen.
     """
     import time
     state = {"done": 0, "start": time.time()}
@@ -142,11 +144,11 @@ def _chunk_text(text, chunk_size=450, overlap=50):
     Split a text into overlapping chunks of roughly chunk_size characters.
 
     Parameters:
-        text       -- the full text to split
-        chunk_size -- how many characters per chunk (default 450, safely
-                     under the 512-token limit since 1 token ≈ 4 chars)
-        overlap    -- how many characters of overlap between chunks
-                     (prevents cutting sentences in half)
+        text:       the full text to split
+        chunk_size: how many characters per chunk (default 450, safely
+                    under the 512-token limit since 1 token ≈ 4 chars)
+        overlap:    how many characters each chunk shares with the next
+                    (prevents cutting sentences in half)
 
     Returns a list of text chunks. If the text is shorter than one
     chunk, returns a single-element list with the whole text.
@@ -171,7 +173,7 @@ def _chunk_text(text, chunk_size=450, overlap=50):
             break
 
         # Move forward by (chunk_size - overlap) so chunks overlap.
-        # If chunk_size=450 and overlap=50, we advance 400 chars each step.
+        # With chunk_size=450 and overlap=50, each step moves 400 chars.
         start += chunk_size - overlap
 
     return chunks
@@ -207,27 +209,28 @@ def run_analyze(args):
 
     # ── Check that pandas is available ──────────────────────────────
     # pandas is the standard Python library for working with data tables.
-    # A "DataFrame" is like a spreadsheet in code: rows and columns,
-    # with names for each column.
+    # A "DataFrame" is a table in code: rows and columns, with a name
+    # for each column.
     try:
         import pandas as pd
     except ImportError:
         sys.exit("pip install pandas")
 
-    # Convert our list of dictionaries into a DataFrame (a data table).
-    # Each dictionary becomes one row. The keys become column names.
-    # So we get columns like: "title", "content", "quality", "lang", etc.
+    # Convert the list of dictionaries into a DataFrame (a data table).
+    # Each dictionary becomes one row. The keys become column names,
+    # such as "title", "content", "quality" and "lang".
     df = pd.DataFrame(corpus)
 
-    # The language models below read each source's whole text (unless
-    # ANALYZE_CHARS sets a limit -- see the top of this file)
+    # The language models below read each source's whole text, unless
+    # ANALYZE_CHARS (set at the top of this file) limits it
     df["content"] = df["content"].fillna("")
     if ANALYZE_CHARS:
         df["content"] = df["content"].str.slice(0, ANALYZE_CHARS)
 
     # ── Evidence cards: a 1-2 sentence English summary per source ───
     # (see core.build_evidence_cards). Used for zero-shot topics and
-    # themes below; cached, so synthesize later reuses them for free.
+    # themes below. They are cached, so synthesize later reuses them
+    # without new AI calls.
     api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
     model = getattr(args, "model", None) or "google/gemini-2.5-flash-lite"
     cards = build_evidence_cards(corpus, api_key, model, args.corpus) if api_key else {}
@@ -244,40 +247,42 @@ def run_analyze(args):
     # ANALYSIS 1: SENTIMENT (Hugging Face transformer)
     # ════════════════════════════════════════════════════════════════
     #
-    # Sentiment analysis answers: "is this text positive or negative?"
+    # Sentiment analysis scores whether a text is positive or negative.
     #
-    # OLD way (TextBlob): counts positive/negative words from a dictionary.
-    #   "good" = +1, "bad" = -1, add them up. Simple but dumb.
-    #   "This code is sick!" → scores as negative (medical context).
+    # Old method (TextBlob): counts positive and negative words from a word
+    #   list. "good" = +1, "bad" = -1, and the counts are added up. It is
+    #   simple but ignores context.
+    #   "This code is sick!" → scores as negative (the medical meaning).
     #
-    # NEW way (Hugging Face transformer): a neural network trained on
-    #   millions of examples that understands CONTEXT.
+    # New method (Hugging Face transformer): a neural network trained on
+    #   millions of examples that takes context into account.
     #   "This code is sick!" → scores as positive (slang for "excellent").
     #
-    # The model we use: nlptown/bert-base-multilingual-uncased-sentiment
-    #   - bert-base = a standard BERT model (good balance of speed and quality)
-    #   - multilingual = trained on text in MANY languages (not just English)
+    # The model used: nlptown/bert-base-multilingual-uncased-sentiment
+    #   - bert-base = a standard BERT model (a balance of speed and quality)
+    #   - multilingual = trained on text in many languages, English included
     #   - uncased = treats "Good" and "good" the same
     #   - sentiment = fine-tuned to predict sentiment (1-5 stars)
     #
-    # WHY MULTILINGUAL? Our corpus has sources in 9 languages. An English-only
-    # model (like distilbert-sst-2) produces GARBAGE scores on Japanese, Chinese,
-    # Korean, Russian, etc. -- not "less accurate," genuinely meaningless numbers.
-    # That would undermine the entire multilingual doctrine: we'd conclude
-    # "Japanese sources are more negative" when the real finding is "the English
-    # model can't read Japanese." A multilingual model reads all languages natively.
+    # Why multilingual: the corpus has sources in 9 languages. An English-only
+    # model (such as distilbert-sst-2) gives meaningless scores on Japanese,
+    # Chinese, Korean, Russian and other languages: the numbers carry no
+    # information about the text at all. That would undermine the
+    # multilingual doctrine: the analysis would conclude "Japanese sources are
+    # more negative" when the real cause is that the English model can't read
+    # Japanese. A multilingual model reads all these languages directly.
 
     print(f"\n{'─'*40}\nSENTIMENT (Hugging Face -- multilingual)\n{'─'*40}")
 
     try:
-        # A Hugging Face "pipeline" downloads a pretrained model and gives
-        # you a function you can call: result = pipe("some text")
+        # A Hugging Face "pipeline" downloads a pretrained model and returns
+        # a function you can call: result = pipe("some text")
         # (_make_pipeline, above, also picks the fastest device)
 
-        # Create a MULTILINGUAL sentiment analysis pipeline.
-        # This model outputs 1-5 stars. We convert to a -1 to +1 scale.
-        # The first time you run this, it downloads the model (~500MB).
-        # After that, it's cached locally and loads instantly.
+        # Create a multilingual sentiment analysis pipeline.
+        # This model outputs 1-5 stars, which are converted to a -1 to +1 scale.
+        # The first run downloads the model (~500MB). Later runs load it
+        # from the local cache in seconds.
         # truncation=True: cut long texts to fit the model's max input (512 tokens)
         # max_length=512: the model can only read 512 "tokens" (roughly words) at once
         sentiment_pipe = _make_pipeline(
@@ -292,25 +297,24 @@ def run_analyze(args):
             """
             Analyze one text and return (score, label).
 
-            CHUNKED: splits the full text into overlapping pieces,
-            runs the model on each piece, and AVERAGES the scores.
-            A 3000-character source becomes ~7 chunks of 450 chars each.
-            This means the model reads the ENTIRE source, not just the
-            first page.
+            Chunked: splits the full text into overlapping pieces,
+            runs the model on each piece, and averages the scores.
+            A 3000-character source becomes ~7 chunks of 450 chars each,
+            so the model reads every part of the source.
 
-            The MULTILINGUAL model returns star ratings like:
+            The multilingual model returns star ratings like:
               {"label": "5 stars", "score": 0.85}
 
-            We convert 1-5 stars to a -1 to +1 scale:
-              1 star  → -1.0 (very negative)
+            The 1-5 stars are converted to a -1 to +1 scale:
+              1 star  → -1.0 (most negative)
               3 stars →  0.0 (neutral)
-              5 stars → +1.0 (very positive)
+              5 stars → +1.0 (most positive)
 
-            And assign a label: POSITIVE (4-5), NEGATIVE (1-2), NEUTRAL (3).
+            Then a label is assigned: POSITIVE (4-5), NEGATIVE (1-2), NEUTRAL (3).
             """
             try:
                 # Split the text into overlapping chunks so the model
-                # reads the whole document, not just the beginning.
+                # reads the whole document.
                 chunks = _chunk_text(text)
                 scores = []
 
@@ -327,8 +331,7 @@ def run_analyze(args):
 
                 # Average the scores across all chunks.
                 # sum(scores) / len(scores) = the mean.
-                # This gives us the overall sentiment of the WHOLE document,
-                # not just the intro.
+                # This gives the overall sentiment of the whole document.
                 avg_score = sum(scores) / len(scores) if scores else 0.0
 
                 # Assign a human-readable label based on the average
@@ -344,7 +347,7 @@ def run_analyze(args):
                 return 0.0, "NEUTRAL"  # If anything goes wrong, default to neutral
 
         # .apply() runs a function on every row of a column.
-        # So this analyzes the sentiment of every source's content.
+        # Here it scores the sentiment of every source's content.
         # The result is a column of (score, label) tuples.
         tick = _progress("sentiment", len(df))
 
@@ -380,11 +383,11 @@ def run_analyze(args):
             print(f"      {lang:5s}  {row['mean']:+.3f} (n={int(row['count'])})")
 
     except Exception as e:
-        # Hugging Face not installed, OR the model download failed
-        # (no internet, disk full, HF hub down). Either way → TextBlob.
-        # We catch Exception (not just ImportError) because pipeline()
-        # DOWNLOADS the model on first run, and that can fail in ways
-        # that aren't import errors.
+        # Hugging Face is not installed, or the model download failed
+        # (no internet, disk full, HF hub down). In both cases → TextBlob.
+        # The code catches Exception instead of only ImportError because
+        # pipeline() downloads the model on the first run, and that
+        # download can fail with errors that are not import errors.
         print(f"   HF sentiment unavailable ({type(e).__name__}: {str(e)[:150]})")
         print("   Falling back to TextBlob...")
         try:
@@ -403,13 +406,13 @@ def run_analyze(args):
     # ANALYSIS 2: ZERO-SHOT CLASSIFICATION (Hugging Face)
     # ════════════════════════════════════════════════════════════════
     #
-    # This is the coolest HF feature for research. "Zero-shot" means
-    # the model was NOT trained on your specific categories -- you
-    # define them at runtime and it classifies anyway.
+    # This HF feature is especially useful for research. "Zero-shot" means
+    # the model was never trained on your specific categories. You define
+    # them when the code runs and it classifies the text anyway.
     #
-    # How? The model is trained on "natural language inference" (NLI) --
-    # given two sentences, decide if the second FOLLOWS from the first,
-    # CONTRADICTS it, or is NEUTRAL.
+    # How it works: the model is trained on "natural language inference"
+    # (NLI). Given two sentences, it decides whether the second follows
+    # from the first, contradicts it, or is neutral.
     #
     # To classify, it turns each category into a hypothesis:
     #   Text: "GitHub reports 40% of code is now AI-generated"
@@ -417,18 +420,19 @@ def run_analyze(args):
     #   Hypothesis 2: "This text is about workforce displacement" → score 0.2
     #   → Winner: "developer productivity"
     #
-    # You can change the categories to anything you want. No retraining.
+    # You can change the categories to anything, with no retraining.
     #
-    # WHY MULTILINGUAL? Same reason as sentiment: facebook/bart-large-mnli
-    # is English-only and produces garbage on Japanese/Chinese/Korean sources.
-    # joeddav/xlm-roberta-large-xnli was trained on XNLI (Cross-lingual NLI)
-    # which covers 15 languages. It can classify a Japanese article about
-    # engineer shortage into "workforce displacement" because it READS Japanese.
+    # Why multilingual: same reason as for sentiment. facebook/bart-large-mnli
+    # is English-only and gives meaningless results on Japanese, Chinese and
+    # Korean sources. joeddav/xlm-roberta-large-xnli was trained on XNLI
+    # (Cross-lingual NLI), which covers 15 languages. It can put a Japanese
+    # article about an engineer shortage into "workforce displacement"
+    # because it reads Japanese.
 
     print("\n" + '─'*40 + "\n ZERO-SHOT CLASSIFICATION (HF -- multilingual)\n" + '─'*40)
 
     try:
-        # Create a MULTILINGUAL zero-shot classification pipeline.
+        # Create a multilingual zero-shot classification pipeline.
         # xlm-roberta = cross-lingual RoBERTa (reads 100+ languages)
         # xnli = cross-lingual NLI (trained on 15 languages)
         zs_pipe = _make_pipeline(
@@ -438,10 +442,10 @@ def run_analyze(args):
             truncation=True,
         )
 
-        # These are the categories we want to sort sources into.
-        # You can change these to anything relevant to your research.
-        # The model has never seen these exact labels before -- it figures
-        # out the best match using its understanding of language.
+        # The categories to sort sources into.
+        # Change them to whatever fits your research.
+        # The model has never seen these exact labels. It picks the best
+        # match from its general knowledge of language.
         categories = [
             "developer productivity and efficiency",
             "workforce displacement and job loss concerns",
@@ -455,10 +459,10 @@ def run_analyze(args):
             """
             Classify one text into the best-matching category.
 
-            CHUNKED: splits the text into pieces, classifies each,
-            and picks the category that wins the MOST chunks.
-            This prevents a long article about "workforce displacement"
-            from being classified as "productivity" just because its
+            Chunked: splits the text into pieces, classifies each piece,
+            and picks the category that wins the most chunks.
+            This stops a long article about "workforce displacement"
+            from being classified as "productivity" only because its
             first paragraph mentions efficiency.
             """
             try:
@@ -481,11 +485,11 @@ def run_analyze(args):
 
         print(f"   Classifying {len(df)} documents into {len(categories)} categories...")
 
-        # Apply the classifier to every document's content
-        # This creates a new column "topic_zs" (zs = zero-shot)
-        # Classify each source's evidence card when there is one: a single
-        # English summary of what the source says, instead of ~7 chunks of
-        # raw page text per source -- about 7x faster on a laptop CPU.
+        # Apply the classifier to every document's content.
+        # This creates a new column "topic_zs" (zs = zero-shot).
+        # When a source has an evidence card, the card is classified: a single
+        # English summary of what the source says. That replaces ~7 chunks of
+        # raw page text per source and is about 7x faster on a laptop CPU.
         tick = _progress("zero-shot", len(df))
 
         def classify_with_progress(text):
@@ -504,23 +508,23 @@ def run_analyze(args):
 
         # ── Cross-tabulation: topic × language ──────────────────────
         # A cross-tab shows how two categorical variables relate.
-        # It's a table where rows = languages, columns = topics,
+        # It is a table where rows = languages, columns = topics,
         # and each cell = "how many documents of this language are in this topic"
         #
-        # This reveals things like: "Japanese sources cluster in 'workforce'
+        # It can show patterns such as: "Japanese sources cluster in 'workforce'
         # while English sources cluster in 'productivity'"
         ct = pd.crosstab(df["lang"], df["topic_zs"])
 
         # .shape = (number of rows, number of columns)
-        # We need at least 2 rows (2 languages) for the table to be interesting
+        # The table needs at least 2 rows (2 languages) to compare anything
         if ct.shape[0] >= 2:
             print("\n   Topic × Language cross-tab:")
             print(ct.to_string())  # .to_string() renders the table as text
 
     except Exception as e:
-        # Covers both missing install AND model-download failures
-        # Show the real reason -- it's often a missing helper package
-        # (e.g. sentencepiece), not transformers itself.
+        # Covers both a missing install and a failed model download.
+        # The message shows the real reason. Often the cause is a missing
+        # helper package (e.g. sentencepiece) and transformers itself is fine.
         print(f"   zero-shot unavailable ({type(e).__name__}: {str(e)[:150]})")
 
     # ════════════════════════════════════════════════════════════════
@@ -532,20 +536,20 @@ def run_analyze(args):
     #   - PER = people (Satya Nadella, Linus Torvalds)
     #   - LOC = locations (Silicon Valley, Brussels)
     #
-    # We count which organizations appear most across all sources.
-    # This tells us who dominates the discourse -- is the conversation
-    # about Copilot specifically, or about AI coding tools broadly?
+    # The code counts which organizations appear most across all sources.
+    # This shows who dominates the discussion: Copilot specifically, or
+    # AI coding tools in general.
     #
     # The model: Davlan/xlm-roberta-large-ner-hrl
     #   - xlm-roberta-large = cross-lingual RoBERTa (reads 100+ languages)
     #   - ner-hrl = fine-tuned for NER on high-resource languages
     #     (English, French, German, Spanish, Dutch, Chinese, Arabic, etc.)
     #
-    # WHY MULTILINGUAL? Our corpus has Japanese, Chinese, Korean, Russian
+    # Why multilingual: the corpus has Japanese, Chinese, Korean and Russian
     # sources. An English-only NER model can't extract organization names
-    # from non-Latin scripts. 株式会社GitHub (GitHub Inc. in Japanese) or
-    # 微软 (Microsoft in Chinese) would be invisible to an English model.
-    # This multilingual model reads names in all our source languages.
+    # from non-Latin scripts. It would miss 株式会社GitHub (GitHub Inc. in
+    # Japanese) or 微软 (Microsoft in Chinese). This multilingual model
+    # reads names in all the source languages.
 
     print(f"\n{'─'*40}\nNAMED ENTITY RECOGNITION (HF -- multilingual)\n{'─'*40}")
 
@@ -572,20 +576,20 @@ def run_analyze(args):
         for _, row in df.iterrows():
             tick()
             try:
-                # CHUNKED: split the source into pieces and run NER on each.
-                # An organization mentioned only on page 3 of a long article
-                # would be invisible without chunking.
+                # Chunked: split the source into pieces and run NER on each.
+                # Without chunking, an organization mentioned only on page 3
+                # of a long article would be missed.
                 chunks = _chunk_text(row["content"])
 
                 for chunk in chunks:
                     entities = ner_pipe(chunk)
 
                     for e in entities:
-                        # Only keep organizations (ORG), not people or locations
-                        # Only keep high-confidence predictions (score > 0.8)
-                        # (The model occasionally returns an empty "word" or
-                        # bare punctuation like "’" or "。" -- skip those, or
-                        # they would rank as top organizations.)
+                        # Keep organizations (ORG) and drop people and locations.
+                        # Keep only high-confidence predictions (score > 0.8).
+                        # (The model sometimes returns an empty "word" or bare
+                        # punctuation such as "’" or "。". These are skipped,
+                        # because otherwise they would rank as top organizations.)
                         word = e["word"].strip()
                         is_name = any(ch.isalnum() for ch in word)
                         if e["entity_group"] == "ORG" and e["score"] > 0.8 and is_name:
@@ -603,39 +607,39 @@ def run_analyze(args):
             print(f"      {org:30s}  {count} mentions")
 
     except Exception as e:
-        # Covers both missing install AND model-download failures
+        # Covers both a missing install and a failed model download
         print(f"   NER unavailable ({type(e).__name__}: {str(e)[:150]})")
 
     # ════════════════════════════════════════════════════════════════
     # ANALYSIS 4: THEMES (BERTopic on evidence cards)
     # ════════════════════════════════════════════════════════════════
     #
-    # Topic modeling discovers themes in a collection of texts WITHOUT
-    # you telling it what to look for: "I found 8 clusters -- here's what
-    # each one is about."
+    # Topic modeling finds themes in a collection of texts without being
+    # told what to look for. Example result: 8 clusters, with a description
+    # of what each one is about.
     #
     # BERTopic turns each text into embeddings (lists of numbers that
     # represent its meaning) and clusters similar ones together.
     #
-    # WHY CLUSTER EVIDENCE CARDS, NOT THE RAW PAGES?
+    # Why cluster evidence cards instead of the raw pages:
     # On raw pages in 9 languages, topics came out labelled with words like
     # "die / der / de" (German, French and Spanish filler words), and the
     # page boilerplate (menus, "h2", cookie text) diluted the meaning.
-    # Evidence cards (core.build_evidence_cards) are 1-2 sentence ENGLISH
-    # summaries of each source's findings -- so clustering them groups
-    # sources by what they SAY, whatever language they're in. An AI call
-    # then names each theme in plain English.
+    # Evidence cards (core.build_evidence_cards) are 1-2 sentence English
+    # summaries of each source's findings. Clustering them groups sources
+    # by what they say, whatever language they are in. An AI call then
+    # names each theme in plain English.
     #
-    # We use k-means (a fixed number of themes) rather than BERTopic's
-    # default HDBSCAN: the cards are all about AI coding tools, so HDBSCAN
-    # lumped ~90% of them into one topic, or left ~45% as "outliers".
+    # The code uses k-means (a fixed number of themes) instead of BERTopic's
+    # default HDBSCAN. The cards are all about AI coding tools, so HDBSCAN
+    # put ~90% of them into one topic, or left ~45% as "outliers".
     #
-    # Needs an API key (to write the cards). Without one, we cluster the raw
-    # pages instead and label topics with meaning-based keywords.
+    # Writing the cards needs an API key. Without one, the code clusters the
+    # raw pages and labels topics with meaning-based keywords.
     #
-    # FALLBACK: If BERTopic isn't installed, we use LDA (Latent Dirichlet
-    # Allocation), an older method that works on word counts. LDA is
-    # English-only and needs more documents to work well.
+    # Fallback: if BERTopic isn't installed, the code uses LDA (Latent
+    # Dirichlet Allocation), an older method that works on word counts.
+    # LDA is English-only and needs more documents to work well.
 
     print(f"\n{'─'*40}\nTHEMES (BERTopic)\n{'─'*40}")
 
@@ -690,7 +694,7 @@ def run_analyze(args):
                     api_key, model, temp=0.2)
                 names = {int(n): name.strip(" *") for n, name in
                          re.findall(r"THEME\s*(\d+)\s*[:：]\s*(.+)", reply)}
-            # No AI names? Fall back to the theme's top keywords
+            # A theme without an AI name is named by its top 4 keywords
             for t in set(topics):
                 if t not in names:
                     names[t] = ", ".join(w for w, _ in topic_model.get_topic(t)[:4])
@@ -732,8 +736,8 @@ def run_analyze(args):
             print(f"   Need 10+ documents for BERTopic (have {len(docs)})")
 
     except Exception as e:
-        # BERTopic not installed OR its embedding-model download failed
-        # → fall back to LDA (older, simpler, no downloads needed)
+        # BERTopic is not installed or its embedding-model download failed
+        # → fall back to LDA (older, simpler, needs no downloads)
         print(f"   BERTopic unavailable ({type(e).__name__}: {str(e)[:150]})")
         print("   Falling back to sklearn LDA...")
 
@@ -781,17 +785,17 @@ def run_analyze(args):
     # CHI-SQUARED TEST: sentiment × source quality
     # ════════════════════════════════════════════════════════════════
     #
-    # The chi-squared test asks: "Is sentiment ASSOCIATED with source
-    # type, or are they independent?"
+    # The chi-squared test checks whether sentiment is associated with
+    # source type or independent of it.
     #
-    # Null hypothesis (H₀): Sentiment distribution is the same
-    # regardless of source type. (Vendor sources are just as likely
-    # to be negative as forum sources.)
+    # Null hypothesis (H₀): the sentiment distribution is the same for
+    # every source type. (Vendor sources are as likely to be negative
+    # as forum sources.)
     #
-    # If p < 0.05: we reject H₀ → sentiment IS associated with source
-    # type. (Vendor sources are systematically more positive.)
+    # If p < 0.05, H₀ is rejected → sentiment is associated with source
+    # type. (For example, vendor sources are systematically more positive.)
     #
-    # Cramér's V measures HOW STRONG the association is (0 to 1):
+    # Cramér's V measures how strong the association is (0 to 1):
     #   V < 0.1 = negligible, V < 0.3 = weak, V < 0.5 = moderate, V ≥ 0.5 = strong
 
     print(f"\n{'─'*40}\nCHI-SQUARED\n{'─'*40}")
@@ -860,13 +864,13 @@ def run_analyze(args):
             for theme, group in themed.groupby("theme")}
 
     with open(os.path.join(args.corpus, "analysis_results.json"), "w") as f:
-        # default=str tells json.dump to convert any weird types to strings
+        # default=str tells json.dump to convert types it can't store to strings
         # (some pandas types aren't JSON-compatible by default)
         json.dump(results, f, indent=2, default=str)
 
-    # Save a markdown report to the scratchpad
-    # Themes as plain sentences too -- easier for people (and the ask
-    # agent) to read than the nested JSON below
+    # Save a markdown report to the scratchpad.
+    # The themes are also written as plain sentences, which people (and
+    # the ask agent) read more easily than the nested JSON below
     theme_lines = "".join(
         f"- {theme}: {n} sources ("
         + ", ".join(f"{lang} {k}" for lang, k in results["theme_languages"][theme].items()) + ")\n"
