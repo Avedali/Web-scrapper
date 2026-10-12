@@ -346,7 +346,8 @@ PROBE_JS = r"""() => {
   };
 }"""
 
-SAMPLE_CSV = "name,department,salary\nAlice,Sales,52000\nBob,IT,61000\nChen,HR,48000\nDara,IT,70500"
+# Rows deliberately NOT in alphabetical order, so a working sort visibly changes them
+SAMPLE_CSV = "name,department,salary\nDara,IT,70500\nAlice,Sales,52000\nChen,HR,48000\nBob,IT,61000"
 SAMPLE_JSON = ('[{"name": "Alice", "salary": 52000}, {"name": "Bob", "salary": 61000}, '
                '{"name": "Chen", "salary": 48000}, {"name": "Dara", "salary": 70500}]')
 PROBE_TASK = "Probe task 4321"
@@ -378,6 +379,14 @@ def _try_add_task(page):
         if not box.count():
             return False
         box.first.fill(PROBE_TASK)
+        # Fill in the rest of the form like a person would -- forms often
+        # refuse to submit while a required field is empty
+        for other in box.all()[1:]:
+            if not other.input_value():
+                other.fill("Probe")
+        for select in page.locator("select:visible").all():
+            if select.locator("option").count() > 1:
+                select.select_option(index=1)
         save = page.locator("button:visible").filter(
             has_text=re.compile(r"add|save|create|submit|ok|done", re.I))
         if save.count():
@@ -496,6 +505,8 @@ def check_pages_in_browser(results, out_dir):
             for r in results:
                 r.update(works=None, js_error="", check="not checked (no browser)")
             return
+        print(f"   Testing {len(results)} pages against their prompts "
+              f"(each requirement on a fresh copy -- takes a few minutes)...")
 
         for r in results:
             page = browser.new_page(viewport={"width": 1200, "height": 800})
@@ -542,7 +553,461 @@ def check_pages_in_browser(results, out_dir):
             r.update(works=ok and not errors, js_error=errors[0][:120] if errors else "",
                      check=check, screenshot=shot)
             page.close()
+
+            # Did the page do what its prompt asked? (see SPEC above)
+            met = _check_spec(browser, path, r["task"], r["level"])
+            got, asked, missing, pro_met, pro_total = _spec_scores(r["task"], r["level"], met)
+            r.update(spec=met, prompt_met=len(got), prompt_total=len(asked),
+                     missing=missing, pro_met=pro_met, pro_total=pro_total)
         browser.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# SPEC CHECK -- does each page do what its prompt ASKED for?
+# ════════════════════════════════════════════════════════════════════════
+#
+# "Works" (above) only means a page functions. A senior prompt asks for much
+# more: 20 products, category chips, sorting, an empty state, a mobile
+# layout... Each requirement below is taken from the task prompts and
+# tested by actually USING the page, on a fresh copy of it each time.
+#
+# Every requirement lists the prompt levels that asked for it. Each page
+# gets two scores:
+#   prompt score -- requirements ITS prompt asked for ("did what was asked")
+#   pro score    -- ALL requirements, i.e. the senior spec ("how close to a
+#                   professional product") -- the experiment's real measure
+
+PRICES_JS = r"""() => (document.body.innerText.match(/[$€£¥]\s?\d[\d,]*(\.\d+)?/g) || [])
+  .map(p => parseFloat(p.replace(/[^\d.]/g, '')))"""
+
+FIRST_COLUMN_JS = """() => [...document.querySelectorAll('tr')].filter(r => r.querySelector('td'))
+  .map(r => r.querySelector('td').innerText.trim())"""
+
+NO_OVERFLOW_JS = "() => document.documentElement.scrollWidth <= window.innerWidth + 5"
+
+# Most data cells in any table row -- a CSV with 3 columns should not be
+# shown as one column of raw "Dara,IT,70500" lines
+CELLS_PER_ROW_JS = """() => Math.max(0, ...[...document.querySelectorAll('tr')]
+  .map(r => r.querySelectorAll('td').length))"""
+
+SEARCH_BOX = "input[type=search]:visible, input[type=text]:visible, input:not([type]):visible"
+
+
+def _count(page):
+    """Products / tasks / rows currently shown (see PROBE_JS)."""
+    return page.evaluate(PROBE_JS)
+
+
+def _search_for(page, term):
+    box = page.locator(SEARCH_BOX)
+    box.first.fill(term)
+    box.first.press("Enter")
+    go = page.locator("button:visible").filter(has_text=re.compile(r"search|go|find", re.I))
+    if go.count():
+        go.first.click()
+    page.wait_for_timeout(700)   # debounced search boxes wait ~300ms
+
+
+def _shown(page):
+    """How many products/items are on screen right now."""
+    found = _count(page)
+    return max(found["prices"], found["items"], found["listed"])
+
+
+def _ensure_rows(page):
+    """Make sure the data explorer shows a table (load sample data if empty)."""
+    if _count(page)["rows"] < 3:
+        _try_paste_data(page)
+    return _count(page)["rows"]
+
+
+def _open_add_form(page):
+    add = page.locator("button:visible").filter(has_text=re.compile(r"add|new|\+", re.I))
+    add.first.click()
+    page.wait_for_timeout(400)
+
+
+# --- product search page -------------------------------------------------
+
+def _s_products(page, _):
+    found, gained = _try_search(page) if max(_count(page)["prices"], _count(page)["items"]) < 3 \
+        else (_count(page), 0)
+    return max(found["prices"], found["items"], gained) >= 3
+
+
+def _s_filters(page, _):
+    # Compare a broad search (or the starting page) with one for nonsense:
+    # a working search box shows fewer products for "zzqxw". (Some pages
+    # show nothing until you search, so we search broadly first.)
+    _try_search(page)
+    broad = _shown(page)
+    _search_for(page, "zzqxw")             # matches no product
+    return _shown(page) < broad
+
+
+def _s_card_fields(page, _):
+    images = page.evaluate("""() => [...document.querySelectorAll('img, svg, [class*="image" i], [class*="img" i]')]
+      .filter(e => { const r = e.getBoundingClientRect(); return r.width > 20 && r.height > 20; }).length""")
+    return _count(page)["prices"] >= 3 and images >= 3
+
+
+def _s_category_filter(page, _):
+    # It must WORK: choosing a category has to change what's shown.
+    # (Some pages have a dropdown that does nothing at all.)
+    _try_search(page)                      # some pages list nothing until searched
+    before = _shown(page)
+    for select in page.locator("select:visible").all():
+        for option in select.locator("option").all_inner_texts()[1:4]:   # skip "All"
+            select.select_option(label=option)
+            page.wait_for_timeout(400)
+            if _shown(page) != before:
+                return True
+    chips = page.locator("button:visible, [role=button]:visible, [class*='chip' i]:visible").filter(
+        has_text=re.compile(r"^\s*(electronics|clothing|home|books)\s*$", re.I))
+    for chip in chips.all()[:3]:
+        chip.click()
+        page.wait_for_timeout(400)
+        if _shown(page) != before:
+            return True
+    return False
+
+
+def _s_named_categories(page, _):
+    text = page.inner_text("body").lower()
+    return all(c in text for c in ["electronics", "clothing", "home", "books"])
+
+
+def _s_sort(page, _):
+    before = page.evaluate(PRICES_JS)
+    for select in page.locator("select:visible").all():
+        options = [o for o in select.locator("option").all_inner_texts() if re.search(r"price|high|low", o, re.I)]
+        for option in options:
+            select.select_option(label=option)
+            page.wait_for_timeout(400)
+            if page.evaluate(PRICES_JS) != before:
+                return True
+    for button in page.locator("button:visible").filter(has_text=re.compile(r"price|sort", re.I)).all():
+        button.click()
+        page.wait_for_timeout(400)
+        if page.evaluate(PRICES_JS) != before:
+            return True
+    return False
+
+
+def _s_twenty(page, _):
+    return max(_count(page)["prices"], _count(page)["items"]) >= 20
+
+
+def _s_result_count(page, _):
+    return bool(re.search(r"showing\s+\d+\s+(of|/)\s+\d+", page.inner_text("body"), re.I))
+
+
+def _s_empty_state(page, _):
+    _search_for(page, "zzqxw")
+    return bool(re.search(r"no (products|results|items)|not found|nothing (found|matches)",
+                          page.inner_text("body"), re.I))
+
+
+def _s_mobile(page, _):
+    page.set_viewport_size({"width": 375, "height": 800})
+    page.wait_for_timeout(300)
+    return page.evaluate(NO_OVERFLOW_JS)
+
+
+def _s_ratings(page, _):
+    return page.evaluate("""() => /[★⭐☆]/.test(document.body.innerText)
+      || document.querySelector('[class*="star" i], [class*="rating" i], [aria-label*="rating" i]') !== null""")
+
+
+# --- kanban board ---------------------------------------------------------
+
+def _board_text(page):
+    """Page text with hyphens/extra spaces normalised: "In-progress" = "in progress"."""
+    return re.sub(r"[\s\-_]+", " ", page.inner_text("body").lower())
+
+
+def _k_columns(page, _):
+    named = sum(n in _board_text(page) for n in ["to do", "todo", "in progress", "done", "backlog"])
+    columns = page.evaluate("""() => [...document.querySelectorAll('[class*="column" i], [class*="lane" i]')]
+      .filter(e => e.getBoundingClientRect().height > 30).length""")
+    return named >= 2 or columns >= 2
+
+
+def _k_three_named(page, _):
+    text = _board_text(page)
+    return ("to do" in text or "todo" in text) and "in progress" in text and "done" in text
+
+
+def _k_backlog(page, _):
+    return _k_three_named(page, _) and "backlog" in _board_text(page)
+
+
+def _k_tasks(page, _):
+    found = _count(page)
+    return max(found["items"], found["filled"]) >= 3
+
+
+def _k_eight(page, _):
+    found = _count(page)
+    return max(found["items"], found["filled"]) >= 8
+
+
+def _k_add(page, _):
+    return _try_add_task(page)
+
+
+def _k_form_fields(page, _):
+    _open_add_form(page)
+    fields = page.locator("input:visible, textarea:visible, select:visible").count()
+    priority = re.search(r"low.*medium.*high|high.*medium.*low", page.inner_text("body"), re.I | re.S)
+    return fields >= 3 and bool(priority)
+
+
+# (A "column" is an element whose class is exactly column/lane or ends in
+# -column/-lane -- not column-header, column-title, column-count...)
+# Drag the first card onto another column using the browser's own HTML5
+# drag-and-drop events (dragstart → dragover → drop), then count cards per
+# column. Playwright's mouse drag doesn't reliably trigger HTML5 drag-and-
+# drop in a headless browser, and card text is too messy to compare.
+DRAG_JS = """() => {
+  const isCol = el => [...el.classList].some(c => /^(column|lane)$|-(column|lane)$/i.test(c));
+  const shown = el => el.getBoundingClientRect().height > 0;
+  const cols = [...document.querySelectorAll('div, section, ul')].filter(el => isCol(el) && shown(el));
+  const card = [...document.querySelectorAll('[draggable="true"]')].find(d => !isCol(d) && shown(d));
+  if (!card || cols.length < 2) return null;
+  const target = cols.findIndex(c => !c.contains(card));
+  const counts = () => cols.map(c => [...c.querySelectorAll('[draggable="true"]')].filter(d => !isCol(d)).length);
+  const before = counts();
+  const dt = new DataTransfer();
+  const fire = (el, type) => el.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer: dt}));
+  fire(card, 'dragstart'); fire(cols[target], 'dragenter'); fire(cols[target], 'dragover');
+  fire(cols[target], 'drop'); fire(card, 'dragend');
+  return {target, before};
+}"""
+
+COLUMN_COUNTS_JS = """() => {
+  const isCol = el => [...el.classList].some(c => /^(column|lane)$|-(column|lane)$/i.test(c));
+  return [...document.querySelectorAll('div, section, ul')]
+    .filter(el => isCol(el) && el.getBoundingClientRect().height > 0)
+    .map(c => [...c.querySelectorAll('[draggable="true"]')].filter(d => !isCol(d)).length);
+}"""
+
+
+def _k_drag(page, _):
+    _ensure_task(page)              # something to drag
+    moved = page.evaluate(DRAG_JS)
+    if not moved:
+        return False                # no draggable cards, or fewer than 2 columns
+    page.wait_for_timeout(400)      # boards usually re-draw after a drop
+    after = page.evaluate(COLUMN_COUNTS_JS)
+    target = moved["target"]
+    return target < len(after) and after[target] > moved["before"][target]
+
+
+def _k_persist(page, _):
+    if not _try_add_task(page):
+        return False
+    page.reload()
+    page.wait_for_timeout(600)
+    return PROBE_TASK in page.inner_text("body")
+
+
+def _ensure_task(page):
+    """Empty board? Add a task, so there's a card to inspect."""
+    if _count(page)["items"] < 1:
+        _try_add_task(page)
+
+
+def _k_delete_confirm(page, dialogs):
+    _ensure_task(page)
+    # Any clickable element whose text is just Delete / Remove / × -- some
+    # boards use a clickable <div> or <span> rather than a <button>
+    delete = page.locator("button:visible, [role=button]:visible, [onclick]:visible, "
+                          "span:visible, div:visible, a:visible").filter(
+        has_text=re.compile(r"^\s*(delete|remove|×|✕|✖|x|🗑)\s*$", re.I))
+    try:
+        delete.first.click()
+    except Exception:
+        # Animated/hover-styled controls never count as "stable" for
+        # Playwright, though a person can click them -- click anyway
+        delete.first.click(force=True)
+    page.wait_for_timeout(400)
+    return bool(dialogs) or bool(re.search(r"are you sure|confirm", page.inner_text("body"), re.I))
+
+
+def _k_priority(page, _):
+    # A visible priority badge on a card: an element whose class mentions
+    # priority (often a coloured dot or label), or a card that says
+    # Low/Medium/High -- not just the words in the add-task form
+    _ensure_task(page)
+    return page.evaluate(r"""() => {
+      const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const inForm = el => el.closest('form, dialog, [class*="modal" i]');
+      if ([...document.querySelectorAll('[class*="priority" i]')].some(el => shown(el) && !inForm(el)
+            && el.tagName !== 'SELECT' && el.tagName !== 'OPTION' && el.tagName !== 'LABEL')) return true;
+      return [...document.querySelectorAll('[draggable="true"], [class*="card" i], [class*="task" i]')]
+        .some(el => shown(el) && !inForm(el) && /\b(low|medium|high)\b/i.test(el.innerText));
+    }""")
+
+
+def _k_initials(page, _):
+    _ensure_task(page)
+    return page.evaluate("""() => [...document.querySelectorAll('*')].some(e =>
+      /^[A-Z]{1,3}$/.test(e.innerText?.trim() || '') && e.children.length === 0
+      && parseFloat(getComputedStyle(e).borderRadius) >= e.getBoundingClientRect().width / 3)""")
+
+
+# --- data explorer --------------------------------------------------------
+
+def _e_table(page, _):
+    return _ensure_rows(page) >= 3 and page.evaluate(CELLS_PER_ROW_JS) >= 2
+
+
+def _e_paste(page, _):
+    return _try_paste_data(page) >= 3 and page.evaluate(CELLS_PER_ROW_JS) >= 2
+
+
+def _e_sort(page, _):
+    if _ensure_rows(page) < 3:
+        return False
+    before = page.evaluate(FIRST_COLUMN_JS)
+    header = page.locator("th:visible").first
+    for _click in range(2):              # first click may sort ascending = no change
+        header.click()
+        page.wait_for_timeout(300)
+        if page.evaluate(FIRST_COLUMN_JS) != before:
+            return True
+    return False
+
+
+def _e_thirty(page, _):
+    return _count(page)["rows"] >= 30
+
+
+def _e_search(page, _):
+    if _ensure_rows(page) < 3:
+        return False
+    rows_before = _count(page)["rows"]
+    value = page.evaluate(FIRST_COLUMN_JS)[0]
+    box = page.locator("input[type=search]:visible, input[type=text]:visible")
+    box.first.fill(value)
+    page.wait_for_timeout(500)
+    return 0 < _count(page)["rows"] < rows_before
+
+
+def _e_stats(page, _):
+    _ensure_rows(page)
+    words = set(re.findall(r"\b(min|max|mean|median|average|unique|nulls?|missing|count)\b",
+                           page.inner_text("body").lower()))
+    return len(words) >= 3
+
+
+def _e_missing(page, _):
+    area = page.locator("textarea:visible")
+    area.first.fill("name,salary\nAlice,52000\nBob,\nChen,48000")
+    area.first.dispatch_event("input")
+    go = page.locator("button:visible").filter(has_text=re.compile(
+        r"load|parse|render|show|display|submit|go|analy|view|table|process|explore|import|generate|update", re.I))
+    if go.count():
+        go.first.click()
+    page.wait_for_timeout(500)
+    return page.evaluate("""() => [...document.querySelectorAll('td')].some(td => td.innerText.trim() === ''
+      && !['rgba(0, 0, 0, 0)', 'rgb(255, 255, 255)', 'transparent'].includes(getComputedStyle(td).backgroundColor))""")
+
+
+def _e_footer(page, _):
+    _ensure_rows(page)
+    return bool(re.search(r"showing\s+\d+\s+(of|/)\s+\d+", page.inner_text("body"), re.I))
+
+
+def _e_export(page, _):
+    _ensure_rows(page)
+    button = page.locator("button:visible, a:visible").filter(has_text=re.compile(r"export|download", re.I))
+    with page.expect_download(timeout=2000):
+        button.first.click()
+    return True
+
+
+def _e_mobile(page, _):
+    _ensure_rows(page)
+    return _s_mobile(page, _)
+
+
+# (requirement, which prompt levels asked for it, check)
+L_ALL, L_JS, L_S = ("layman", "junior", "senior"), ("junior", "senior"), ("senior",)
+SPEC = {
+    "search": [
+        ("shows products", L_ALL, _s_products),
+        ("search box filters products", L_ALL, _s_filters),
+        ("cards show image + price", L_JS, _s_card_fields),
+        ("category filter", L_JS, _s_category_filter),
+        ("categories Electronics/Clothing/Home/Books", L_S, _s_named_categories),
+        ("sort by price", L_S, _s_sort),
+        ("20+ products", L_S, _s_twenty),
+        ("'Showing X of Y' count", L_S, _s_result_count),
+        ("empty state for no matches", L_S, _s_empty_state),
+        ("works on a phone screen", L_S, _s_mobile),
+        ("rating stars", L_S, _s_ratings),
+    ],
+    "kanban": [
+        ("shows columns", L_ALL, _k_columns),
+        ("To Do / In Progress / Done columns", L_JS, _k_three_named),
+        ("task cards shown", L_JS, _k_tasks),
+        ("Backlog column too", L_S, _k_backlog),
+        ("8 sample tasks", L_S, _k_eight),
+        ("add a task", L_S, _k_add),
+        ("form with priority Low/Medium/High", L_S, _k_form_fields),
+        ("drag cards between columns", L_S, _k_drag),
+        ("tasks survive a page reload", L_S, _k_persist),
+        ("delete asks for confirmation", L_S, _k_delete_confirm),
+        ("priority badges", L_S, _k_priority),
+        ("assignee initials in a circle", L_S, _k_initials),
+        ("works on a phone screen", L_S, _s_mobile),
+    ],
+    "explorer": [
+        ("shows data as a table", L_ALL, _e_table),
+        ("paste CSV into a text area", L_JS, _e_paste),
+        ("click headers to sort", L_JS, _e_sort),
+        ("30 sample rows preloaded", L_S, _e_thirty),
+        ("search filters rows", L_S, _e_search),
+        ("column statistics", L_S, _e_stats),
+        ("missing values highlighted", L_S, _e_missing),
+        ("'Showing X of Y rows' footer", L_S, _e_footer),
+        ("export filtered data", L_S, _e_export),
+        ("works on a phone screen", L_S, _e_mobile),
+    ],
+}
+
+
+def _check_spec(browser, path, task, level):
+    """
+    Test every requirement for this task on a fresh copy of the page
+    (separate browser storage each time, so tests don't affect each other).
+    Returns {requirement: True/False}.
+    """
+    met = {}
+    for name, _levels, check in SPEC[task]:
+        context = browser.new_context(viewport={"width": 1200, "height": 800})
+        page = context.new_page()
+        page.set_default_timeout(2000)
+        dialogs = []
+        page.on("dialog", lambda d, dialogs=dialogs: (dialogs.append(d.type), d.accept()))
+        try:
+            page.goto(Path(path).resolve().as_uri())
+            page.wait_for_timeout(600)
+            met[name] = bool(check(page, dialogs))
+        except Exception:
+            met[name] = False      # crashed or element missing = requirement not met
+        context.close()
+    return met
+
+
+def _spec_scores(task, level, met):
+    """(prompt score text, missing list, pro met, pro total) for one page."""
+    asked = [name for name, levels, _ in SPEC[task] if level in levels]
+    got = [n for n in asked if met.get(n)]
+    missing = [n for n in asked if not met.get(n)]
+    return got, asked, missing, sum(met.values()), len(SPEC[task])
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -748,6 +1213,10 @@ def run_simulate(args):
         verdict = {True: "WORKS ", False: "BROKEN", None: "  ?   "}[r["works"]]
         err = f" -- JS error: {r['js_error'][:60]}" if r["js_error"] else ""
         print(f"   {verdict} {r['file'][:-5]:50s} {r['check']}{err}")
+        if r.get("prompt_total"):
+            missing = f" -- missing: {', '.join(r['missing'])}" if r["missing"] else ""
+            print(f"          prompt asked {r['prompt_met']}/{r['prompt_total']} done, "
+                  f"pro spec {r['pro_met']}/{r['pro_total']}{missing}")
 
     # ════════════════════════════════════════════════════════════════
     # EXPERIMENT 2: GUARDRAIL TASKS
@@ -849,6 +1318,12 @@ def run_simulate(args):
             errors = sum(1 for r in tr if r.get("has_error_handling"))
             works_text = (f"{works}/{len(checked)} work in a browser, " if checked
                           else "browser check not run, ")
+            specced = [r for r in tr if r.get("prompt_total")]
+            if specced:
+                prompt_pct = sum(r["prompt_met"] / r["prompt_total"] for r in specced) / len(specced)
+                pro_pct = sum(r["pro_met"] / r["pro_total"] for r in specced) / len(specced)
+                works_text += (f"did {prompt_pct:.0%} of what their prompt asked, "
+                               f"met {pro_pct:.0%} of the professional spec, ")
 
             report += (
                 f"- **{level}**: avg {avg_lines:.0f} lines, "
@@ -869,11 +1344,18 @@ def run_simulate(args):
 
     # ── What the browser saw on every page (with screenshots) ───────
     if any(r.get("works") is not None for r in results):
-        report += "## Browser check (every page)\n\n| Page | Works | What the browser saw |\n|---|---|---|\n"
+        report += ("## Browser check (every page)\n\n"
+                   "*Prompt* = requirements this page's own prompt asked for. "
+                   "*Pro spec* = all senior-level requirements.\n\n"
+                   "| Page | Works | Prompt | Pro spec | Missing from its prompt | What the browser saw |\n"
+                   "|---|---|---|---|---|---|\n")
         for r in results:
             mark = {True: "yes", False: "**NO**", None: "?"}[r.get("works")]
             seen = r["check"] + (f"; JS error: {r['js_error']}" if r.get("js_error") else "")
-            report += f"| `{r['file']}` | {mark} | {seen} |\n"
+            prompt = f"{r['prompt_met']}/{r['prompt_total']}" if r.get("prompt_total") else "?"
+            pro = f"{r['pro_met']}/{r['pro_total']}" if r.get("pro_total") else "?"
+            report += (f"| `{r['file']}` | {mark} | {prompt} | {pro} | "
+                       f"{', '.join(r.get('missing', [])) or '-'} | {seen} |\n")
         report += "\nA screenshot of each page is saved next to it (same name, `.png`).\n\n"
 
     # ── Feature comparison across levels ────────────────────────────

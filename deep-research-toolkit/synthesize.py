@@ -37,6 +37,7 @@ from core import (
     NO_EVIDENCE,           # Card text for sources with nothing usable
     LANGUAGES,             # The 9-language config (for APA language notes)
     BANNED_PHRASES,        # LLM-speak phrases to strip (for voice cleaning)
+    CONTENT_CHARS,         # How much text is stored per source
 )
 
 
@@ -51,10 +52,18 @@ from core import (
 # this (the default reads ~1M tokens); a full synthesize run costs a few
 # cents. Lower these if you pick a model with a small context window.
 
-THESIS_CONTEXT_CHARS = 80000   # Findings + ALL evidence cards for the thesis step
-CARDS_CHARS = 60000            # Evidence cards shown when writing each section
-SOURCE_CHARS = 2500            # Full text per source assigned to a section
-MAX_SOURCES_PER_SECTION = 12   # Sources the evidence map assigns per section
+BRIEF_WORDS = 6000             # Target length of the whole brief (~22 double-spaced
+                               # pages). Split across sections by how much evidence
+                               # each has; sections stop early if evidence runs out.
+THESIS_CONTEXT_CHARS = 120000  # Findings + ALL evidence cards for the thesis step
+CARDS_CHARS = 100000           # Evidence cards shown when writing each section
+SOURCE_CHARS = CONTENT_CHARS   # Text per source given to the writer: all of it
+FACT_CHECK_CHARS = 400000      # Room for the full text of every source a section
+                               # cites (~100k tokens), so the checker sees it all
+MAX_SOURCES_PER_SECTION = 15   # Sources the evidence map assigns per section
+SOURCES_PER_PART = 5           # Long sections are written in passes of ~5 sources
+                               # (models write ~400-500 words per call, however
+                               # long they're asked to write)
 MAX_SECTIONS_PER_SOURCE = 3    # A source is ASSIGNED to at most this many sections
                                # (any section can still cite it from the cards)
 EVIDENCE_CHARS = 40000         # Fallback evidence block (if cards fail)
@@ -220,11 +229,11 @@ Output 3 theses, ranked by strength of evidence."""
 
     outline_prompt = f"""Based on thesis #{thesis_num} from this analysis, generate a paper outline.
 
-The paper is 8-10 pages, double-spaced, for a business school capstone.
+The paper is about {BRIEF_WORDS} words (~{BRIEF_WORDS // 275} double-spaced pages), for a business school capstone.
 The audience is financial industry professionals, not technologists.
 
 THESES:
-{theses[:8000]}
+{theses}
 
 RULES:
 - Every section must exist because the thesis NEEDS it, not because
@@ -334,7 +343,15 @@ Output a numbered outline with section titles and one-line argument summaries.""
     # the system prompt from getting too long).
     sys_prompt = (
         "You write academic research. STRICT RULES:\n"
-        "- ONLY facts from the sources and evidence cards given. Tag every claim [n].\n"
+        "- ONLY facts from the sources and evidence cards given. Tag every claim [n]\n"
+        "  with the 1-3 sources that actually say it -- never long lists of sources.\n"
+        "- Results of THIS study's own analysis (its themes, sentiment scores,\n"
+        "  statistical tests, source counts) come from the research findings:\n"
+        "  say so in words ('our analysis of the corpus found...'), with NO [n]\n"
+        "  tag -- [n] is only for what a source itself says -- and never\n"
+        "  mention file names.\n"
+        "- Report numbers with the scope the source gives them (who was\n"
+        "  studied, what was measured) -- don't generalise them.\n"
         "- If evidence is thin, say so. NEVER fill from memory.\n"
         "- Note source language when relevant.\n"
         "- Draw on a RANGE of sources: support each point with several\n"
@@ -347,34 +364,74 @@ Output a numbered outline with section titles and one-line argument summaries.""
     )
 
     # ── Write each section ──────────────────────────────────────────
+    # Length: BRIEF_WORDS split by how many sources each section was given
+    # (more evidence → longer section), within 350-1500 words. The writer
+    # is told to stop early rather than pad -- extra length must come from
+    # extra evidence, never from general knowledge.
+    weights = {k: max(3, len(assignment.get(k, []))) for k in range(1, len(section_titles) + 1)}
+    targets = {k: min(1500, max(350, round(BRIEF_WORDS * w / sum(weights.values()))))
+               for k, w in weights.items()}
+
     sections = []  # Will hold (title, content) pairs
 
     for k, title in enumerate(section_titles, 1):
         mine = assignment.get(k, [])
-        print(f"    {title}  ({len(mine)} assigned sources)")
+        print(f"    {title}  ({len(mine)} assigned sources, ~{targets[k]} words)")
 
-        # Full text of the sources assigned to THIS section
-        assigned_text = "\n\n".join(
-            f"[{i}][{by_idx[i].get('lang', '?')}] {by_idx[i].get('title', '')} "
-            f"({by_idx[i].get('domain', '')})\n{by_idx[i].get('content', '')[:SOURCE_CHARS]}"
-            for i in mine)
+        # Write the section in passes of ~SOURCES_PER_PART sources each, so
+        # a section with 15 sources gets ~3x the words of one with 5 -- and
+        # every assigned source is actually used. Each pass sees the text so
+        # far and continues it.
+        n_parts = max(1, round(len(mine) / SOURCES_PER_PART))
+        parts = [mine[p::n_parts] for p in range(n_parts)] if mine else [[]]
+        part_words = max(300, targets[k] // n_parts)
+        content = ""
 
-        # Ask the AI to write this specific section.
-        # The section writer has never seen the thesis analysis, so we
-        # must include the theses text itself -- "#2" alone means nothing.
-        content = call_ai(
-            f"Write this section of the paper.\n\n"
-            f"THESIS: argue thesis #{thesis_num} from the analysis below.\n"
-            f"THESES:\n{theses[:8000]}\n\n"
-            f"SECTION: {title}\n"
-            f"OUTLINE:\n{outline[:6000]}\n\n"  # Include outline for context
-            + (f"ASSIGNED SOURCES -- build this section mainly on these, and use "
-               f"most of them (full text):\n{assigned_text}\n\n" if assigned_text else "")
-            + f"ALL EVIDENCE CARDS (one per source; you may cite any of these too):\n"
-            f"{evidence[:CARDS_CHARS]}\n\n"
-            f"400-600 words. Tag every claim [n]. Argue, don't summarize.",
-            api_key, model, temp=0.5, system=sys_prompt,
-        )
+        for p, part_sources in enumerate(parts, 1):
+            # Full text of the sources for THIS pass
+            assigned_text = "\n\n".join(
+                f"[{i}][{by_idx[i].get('lang', '?')}] {by_idx[i].get('title', '')} "
+                f"({by_idx[i].get('domain', '')})\n{by_idx[i].get('content', '')[:SOURCE_CHARS]}"
+                for i in part_sources)
+            where = (f"This is part {p} of {n_parts} of the section. Continue the text "
+                     f"so far without repeating it or adding a heading"
+                     + ("; you may conclude the section." if p == n_parts else
+                        "; don't conclude yet.") + f"\n\nSECTION TEXT SO FAR:\n{content}\n\n"
+                     if n_parts > 1 else "")
+
+            # The section writer has never seen the thesis analysis, so we
+            # must include the theses text itself -- "#2" alone means nothing.
+            part_args = (
+                f"Write this section of the paper.\n\n"
+                f"THESIS: argue thesis #{thesis_num} from the analysis below.\n"
+                f"THESES:\n{theses}\n\n"
+                f"SECTION: {title}\n"
+                f"OUTLINE:\n{outline}\n\n"  # Include outline for context
+                + where
+                + (f"ASSIGNED SOURCES -- build this {'part' if n_parts > 1 else 'section'} "
+                   f"mainly on these, and use most of them (full text):\n{assigned_text}\n\n"
+                   if assigned_text else "")
+                + f"ALL EVIDENCE CARDS (one per source; you may cite any of these too):\n"
+                f"{evidence[:CARDS_CHARS]}\n\n"
+                f"RESEARCH FINDINGS (this study's own analysis and statistics):\n{context}\n\n"
+                f"Length: about {part_words} words -- but ONLY as long as the evidence "
+                f"supports. Use the specific numbers, findings and examples in the "
+                f"sources. If the evidence runs out first, stop: shorter is better "
+                f"than padding or general knowledge. Every factual sentence must come "
+                f"from the sources or the research findings, with numbers copied "
+                f"exactly -- a fact checker will delete anything they don't support. "
+                f"Tag every claim [n] with the 1-3 sources that actually say it -- "
+                f"never a long list of sources in one bracket. "
+                f"Argue, don't summarize.",
+                api_key, model,
+            )
+            part_kwargs = {"temp": 0.3, "system": sys_prompt}  # low temp = stay close to sources
+            part = call_ai(*part_args, **part_kwargs)
+            if not part:   # Failed call (e.g. network or credit) -- retry once
+                part = call_ai(*part_args, **part_kwargs)
+            if not part:
+                print(f"      part {p} of {n_parts} FAILED -- this section is incomplete")
+            content = (content + "\n\n" + part).strip() if part else content
 
         # Store the section. If the AI call failed, use a placeholder.
         # "content or '*[Failed]*'" means: use content if it's not empty,
@@ -439,17 +496,59 @@ Output a numbered outline with section titles and one-line argument summaries.""
         # If we found and removed phrases, the text probably reads awkwardly.
         # Ask the AI to rewrite it smoothly while keeping facts and citations.
         if flags > 0:
+            # Keep the length: an open-ended "rewrite" used to shorten
+            # sections by up to ~20%, dropping facts along the way.
             rw = call_ai(
-                f"Rewrite: remove buzzwords, keep facts and [n] tags. "
-                f"Direct, concrete, argues a position.\n\n{c}",
+                f"Some buzzwords were just deleted from this text, leaving a few "
+                f"awkward sentences. Fix ONLY those sentences so they read naturally. "
+                f"Keep every other sentence, every fact, number and [n] tag, and the "
+                f"same length. Output only the text.\n\n{c}",
                 api_key, model, temp=0.3,  # Low temp = stay close to original
             )
-            if rw:
+            # Only accept a rewrite that kept (nearly) everything -- a model
+            # once turned a 428-word section into one 28-word sentence.
+            if rw and _words(rw) >= 0.85 * _words(c):
                 c = rw  # Use the rewritten version
+            elif rw:
+                print(f"   {title}: rewrite dropped text -- kept the original instead")
 
             print(f"   {title}: {flags} phrases cleaned")
 
         cleaned.append((title, c))
+
+    # ════════════════════════════════════════════════════════════════
+    # 1.b.v: FACT CHECK (every claim against the sources it cites)
+    # ════════════════════════════════════════════════════════════════
+    # The last step before saving, so nothing rewrites the text after it.
+    # For each section, one AI call compares every factual sentence with
+    # the full text of the sources it cites and lists the ones that aren't
+    # supported (or cite nothing); a second call fixes only those sentences
+    # -- correct, re-cite or delete, never add. The log is saved so a human
+    # can review exactly what was changed.
+
+    print(f"\n{'─'*50}\nFACT CHECK (claims vs. cited sources)\n{'─'*50}")
+    checked, check_log, n_flagged, not_checked = [], [], 0, []
+    for title, c in cleaned:
+        fixed, flagged = _fact_check(c, by_idx, cards, api_key, model, findings=context)
+        if flagged is None:
+            # Never report a failed check as a clean one
+            not_checked.append(title)
+            print(f"   {title}: NOT CHECKED -- the AI call failed (see the error above)")
+            check_log.append(f"## {title}\n\n- NOT CHECKED: the fact-check call failed. "
+                             "Re-run synthesize, or check this section by hand.")
+        else:
+            n_flagged += len(flagged)
+            print(f"   {title}: {len(flagged)} unsupported/uncited sentences fixed")
+            check_log.append(f"## {title}\n\n" + ("\n".join(f"- {f}" for f in flagged)
+                                                   or "- All claims supported by their sources"))
+        checked.append((title, fixed))
+    cleaned = checked
+    pad("synthesis_05_fact_check",
+        f"# Fact check: {n_flagged} sentences flagged and fixed"
+        + (f" -- {len(not_checked)} section(s) NOT CHECKED" if not_checked else "") + "\n\n"
+        "Each line was flagged as not supported by the source(s) it cites (UNSUPPORTED)\n"
+        "or as stating a fact without a source (UNCITED), then corrected or removed.\n\n"
+        + "\n\n".join(check_log))
 
     # ════════════════════════════════════════════════════════════════
     # ASSEMBLE THE FINAL REPORT
@@ -466,13 +565,23 @@ Output a numbered outline with section titles and one-line argument summaries.""
     lines.append(f"**Thesis:** #{thesis_num} (evidence-derived)")
 
     # ── Coverage: how much of the corpus does the brief actually use? ─
-    cited = sorted({int(n) for t, c in cleaned
-                    for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", c)
-                    for n in re.split(r"\s*,\s*", grp) if int(n) in by_idx})
+    # Citation brackets listing more than 5 sources are "dumps", not
+    # evidence for a claim -- they're counted separately, not as coverage
+    groups = [re.split(r"\s*,\s*", g) for _, c in cleaned
+              for g in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", c)]
+    dumps = sum(len(g) > 5 for g in groups)
+    cited = sorted({int(n) for g in groups if len(g) <= 5 for n in g if int(n) in by_idx})
     cited_langs = sorted({by_idx[i].get("lang", "?") for i in cited})
     coverage = (f"cites {len(cited)} of {len(usable) or len(corpus)} usable sources, "
-                f"in {len(cited_langs)} languages ({', '.join(cited_langs)})")
-    lines.append(f"**Evidence coverage:** {coverage}\n")
+                f"in {len(cited_langs)} languages ({', '.join(cited_langs)})"
+                + (f"; {dumps} citation(s) listing 6+ sources not counted" if dumps else ""))
+    lines.append(f"**Evidence coverage:** {coverage}")
+    words = sum(len(re.findall(r"\w+", c)) for _, c in cleaned)
+    check_note = (f"**WARNING: {len(not_checked)} section(s) NOT fact-checked** "
+                  f"({', '.join(not_checked)}) -- re-run synthesize" if not_checked else
+                  f"{n_flagged} unsupported or uncited sentences corrected")
+    lines.append(f"**Length:** {words} words | **Fact check:** {check_note} "
+                 f"(see scratchpad/synthesis_05_fact_check.md)\n")
     lines.append("---\n")
 
     # Sections
@@ -494,6 +603,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
     print("SYNTHESIS COMPLETE")
     print(f"   {fn}")
     print(f"   Brief {coverage}")
+    print(f"   {words} words; fact check corrected {n_flagged} sentences")
+    if not_checked:
+        print(f"   WARNING: {len(not_checked)} section(s) were NOT fact-checked "
+              f"(AI calls failed) -- re-run synthesize before using this brief")
     print("   Thesis was derived from evidence, not assumed.")
     print("   Run 'deepen' to find targeted support for weak areas.")
     print(f"{'='*60}")
@@ -531,33 +644,32 @@ def _load_all_evidence(corpus_dir):
     if not pad_dir.exists():
         return ""
 
+    # These files are summaries (a few KB each), so they're read in full.
+    # (They used to be cut at 2,000-3,000 characters each.)
+
     # ── Analysis results (highest priority -- these ARE the findings) ──
-    for fn in ["analysis_results.json", "corpus_analyzed.csv"]:
-        p = pad_dir / fn  # Path / "filename" joins them (like os.path.join)
-        if p.exists():
-            with open(p, encoding="utf-8") as f:
-                # f"── {fn} ──\n" creates a label header so the AI knows
-                # which file this text came from
-                parts.append(f"── {fn} ──\n{f.read()[:3000]}\n")
+    # (corpus_analyzed.csv is no longer included: it's raw data, and the
+    # evidence cards already give the AI every source properly.)
+    p = pad_dir / "analysis_results.json"
+    if p.exists():
+        parts.append(f"── analysis_results.json ──\n{p.read_text(encoding='utf-8')}\n")
 
     # ── Statistical reports ──────────────────────────────────────────
     # .glob("stats_*.md") finds all files matching "stats_*.md"
     for fn in sorted(pad_dir.glob("stats_*.md")):
         # fn.stem is the filename without extension: "stats_report.md" → "stats_report"
-        # fn.read_text() reads the whole file as a string
-        parts.append(f"── {fn.stem} ──\n{fn.read_text(encoding='utf-8')[:2000]}\n")
+        parts.append(f"── {fn.stem} ──\n{fn.read_text(encoding='utf-8')}\n")
 
     # ── Red team and bias audit ──────────────────────────────────────
     for name in ["06_red_team", "065_bias", "01_definitions", "02_decomposition"]:
         p = pad_dir / f"{name}.md"
         if p.exists():
-            parts.append(f"── {name} ──\n{p.read_text(encoding='utf-8')[:2000]}\n")
+            parts.append(f"── {name} ──\n{p.read_text(encoding='utf-8')}\n")
 
     # ── Simulation results (if the user ran simulate mode) ───────────
-    sim = pad_dir / "simulation_results.json"
-    if sim.exists():
-        with open(sim) as f:
-            parts.append(f"── simulation ──\n{f.read()[:2000]}\n")
+    p = pad_dir / "simulation_report.md"
+    if p.exists():
+        parts.append(f"── simulation ──\n{p.read_text(encoding='utf-8')}\n")
 
     # Join all parts into one big string
     return "\n".join(parts)
@@ -572,6 +684,100 @@ def _load_corpus(corpus_dir):
         return json.load(f)
 
 
+def _fact_check(text, by_idx, cards, api_key, model, findings=""):
+    """
+    Check every factual sentence in one section against the sources it
+    cites -- and, for claims about this study's own results (themes,
+    sentiment, statistical tests), against `findings` (the analysis and
+    stats outputs). Returns (corrected text, list of flagged sentences),
+    or (text, None) if the check itself failed -- the caller then reports
+    the section as NOT CHECKED (never as "all supported").
+    """
+    cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", text)
+                    for n in re.split(r"\s*,\s*", grp) if int(n) in by_idx})
+    # The full text of each cited source (plus its card, a handy summary)
+    sources = "\n\n".join(
+        f"[{i}] {by_idx[i].get('title', '')} ({by_idx[i].get('domain', '')})\n"
+        f"CARD: {cards.get(i, '')}\nTEXT: {by_idx[i].get('content', '')[:SOURCE_CHARS]}"
+        for i in cited)[:FACT_CHECK_CHARS]
+
+    # The (long) sources come FIRST and the section LAST, clearly marked:
+    # with the section first, a model once listed sentences from the
+    # SOURCES as problems, repeating them ~2,000 times.
+    report = call_ai(
+        "You are a strict fact-checker for a research brief. Below are the full "
+        "texts of the sources a section cites ([n] numbers), then the SECTION.\n\n"
+        f"<sources>\n{sources}\n</sources>\n\n"
+        f"<research_findings>\n{findings}\n</research_findings>\n\n"
+        f"<section>\n{text}\n</section>\n\n"
+        "Claims about THIS study's own results (its themes, sentiment scores, "
+        "statistical tests, source counts) need no [n] but must match the "
+        "research findings -- flag them as UNSUPPORTED if they don't, or if "
+        "they cite a source [n] for the study's own results.\n"
+        "A number stated with a broader scope than the source gives it (e.g. "
+        "one study's sample presented as all developers) is UNSUPPORTED.\n"
+        "Check EVERY sentence IN THE SECTION (only those) that states a fact, "
+        "number, or claim about the world:\n"
+        "- UNSUPPORTED: the cited source(s) don't say this (wrong number, "
+        "overstated, or about something else)\n"
+        "- UNCITED: it states a fact but has no [n] tag\n"
+        "Sentences that only argue, connect or interpret, without new facts, are fine.\n"
+        "Output one line per problem, each sentence once: 'UNSUPPORTED: <exact "
+        "sentence from the section>' or 'UNCITED: <exact sentence from the "
+        "section>'. If there are none, output: ALL SUPPORTED",
+        api_key, model, temp=0, max_tokens=4000,
+    )
+    if not report:
+        return text, None   # The call failed: this section was NOT checked
+
+    # Keep only real sentences from THIS section, each once (guards against a
+    # model quoting the sources, or repeating itself)
+    flat = re.sub(r"\s+", " ", text)
+    flagged = []
+    for kind, raw_sentence in re.findall(r"(UNSUPPORTED|UNCITED)\s*:\s*(.+)", report or ""):
+        sentence = raw_sentence.strip().strip('"')
+        if (len(sentence) > 15 and re.sub(r"\s+", " ", sentence) in flat
+                and f"{kind}: {sentence}" not in flagged):
+            flagged.append(f"{kind}: {sentence}")
+    if not flagged:
+        return text, []
+
+    # Ask for a correction per flagged sentence -- NOT a rewritten section:
+    # asking for a revised section once returned the list of problems in
+    # place of the text. Applying sentence-level fixes in code guarantees
+    # that nothing else in the section can change.
+    reply = call_ai(
+        "Each sentence under PROBLEMS failed a fact check against the cited "
+        "sources. For EACH one, output exactly two lines:\n"
+        "ORIGINAL: <the sentence, copied exactly from the section>\n"
+        "FIX: <the sentence corrected to say only what the source says, with the "
+        "right [n] -- or the single word DELETE if no source supports it>\n"
+        "Never add new claims.\n\n"
+        f"<sources>\n{sources}\n</sources>\n\n"
+        f"<research_findings>\n{findings}\n</research_findings>\n\n"
+        f"<section>\n{text}\n</section>\n\n"
+        "PROBLEMS:\n" + "\n".join(flagged),
+        api_key, model, temp=0, max_tokens=8000,
+    )
+    fixed = text
+    fixes = re.findall(r"ORIGINAL:\s*(.+?)\s*\n\s*FIX:\s*(.+)", reply or "")
+    if not fixes:
+        # The fix call failed: delete the flagged sentences rather than keep
+        # claims the check found unsupported (conservative by design)
+        fixes = [(f.split(": ", 1)[1], "DELETE") for f in flagged]
+    for raw_original, raw_fix in fixes:
+        original, fix = raw_original.strip().strip('"'), raw_fix.strip().strip('"')
+        if original and original in fixed:
+            fixed = fixed.replace(original, "" if fix.upper() == "DELETE" else fix, 1)
+    fixed = re.sub(r"[ \t]{2,}", " ", fixed)      # Tidy gaps left by deletions
+    return fixed, flagged
+
+
+def _words(text):
+    """Number of words in a text."""
+    return len(re.findall(r"\w+", text or ""))
+
+
 def _assign_sources(section_titles, outline, cards_text, valid_ids, api_key, model):
     """
     Ask the AI which sources belong in which section.
@@ -584,7 +790,7 @@ def _assign_sources(section_titles, outline, cards_text, valid_ids, api_key, mod
     numbered = "\n".join(f"SECTION {k}: {t}" for k, t in enumerate(section_titles, 1))
     reply = call_ai(
         "You are planning which evidence goes into each section of a paper.\n\n"
-        f"OUTLINE (for each section's argument):\n{outline[:6000]}\n\n"
+        f"OUTLINE (for each section's argument):\n{outline}\n\n"
         f"SECTIONS:\n{numbered}\n\n"
         f"EVIDENCE CARDS (one per source, [n] = source number):\n{cards_text[:THESIS_CONTEXT_CHARS]}\n\n"
         f"For EACH section, list the 6-{MAX_SOURCES_PER_SECTION} sources that best support, "

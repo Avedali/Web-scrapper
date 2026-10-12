@@ -27,7 +27,6 @@ The opinion comes later, from what the data shows (in synthesize mode).
 
 import re    # Pattern matching in text (used to clean up AI responses)
 import json  # Read/write structured data files
-import time  # Add pauses between web requests
 import os    # File/folder operations and environment variables
 
 from collections import defaultdict # Auto-initializing dictionary (see core.py)
@@ -36,10 +35,11 @@ from collections import defaultdict # Auto-initializing dictionary (see core.py)
 # "from core import X, Y, Z" means: bring these specific functions
 # from core.py into this file so we can use them directly.
 from core import (
-    search_web,          # Search the web (multi-engine with fallback)
+    search_many,         # Run several web searches at once
+    fetch_pages,         # Read many web pages at once
+    CONTENT_CHARS,       # How much text to keep per source
     search_academic,     # Search Semantic Scholar + arXiv
     search_hn,           # Search Hacker News
-    fetch_page,          # Read a web page's article text
     call_ai,             # Send a prompt to an AI model
     pad,                 # Save work to the scratchpad
     classify_source,     # Label a source's quality tier
@@ -55,6 +55,20 @@ from core import (
 # ════════════════════════════════════════════════════════════════════════
 # DEFAULT TOPIC -- used if the user doesn't specify one
 # ════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════
+# HOW DEEP TO SEARCH -- raise for a bigger corpus (explore takes longer)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Was 5 queries x 3 results per language: at most 15 pages per language,
+# ~10 after pages that can't be read. Now up to 40 per language. Searches
+# and page downloads run in parallel, so a full explore takes about as long
+# as the old, smaller one did.
+
+QUERIES_PER_LANGUAGE = 8   # Native search queries per language
+RESULTS_PER_QUERY = 5      # Search results read per query
+GAP_QUERIES = 12           # Fix-up searches suggested by red team + bias check
+
 
 DEFAULT_TOPIC = (
     "How AI-powered coding assistants (GitHub Copilot, Cursor, ChatGPT, "
@@ -122,6 +136,49 @@ def _parse_queries(resp, n, lang=None):
         queries.append(q)
 
     return queries[:n]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# GATHERING -- search, then read the new pages, many at a time
+# ════════════════════════════════════════════════════════════════════════
+
+def _gather(jobs, sources, quality=None):
+    """
+    Run searches and add every NEW readable page to `sources`.
+
+    jobs: list of (query, n_results, region, search_lang). All searches run
+    first (a few at a time), then all new pages are downloaded in parallel
+    (see core.fetch_pages). quality overrides the domain-based label.
+    Returns how many sources were added.
+    """
+    results = search_many([(q, n, region) for q, n, region, _ in jobs])
+
+    # Collect the new URLs, remembering which query found each one
+    todo = {}
+    for job, found in zip(jobs, results, strict=True):
+        for r in found:
+            if r["url"] not in sources and r["url"] not in todo:
+                todo[r["url"]] = (job, r)
+
+    pages = fetch_pages(list(todo))
+
+    added = 0
+    for url, ((q, _, _, search_lang), r) in todo.items():
+        content = pages.get(url)
+        if not content:
+            continue  # Couldn't read the page
+        sources[url] = {
+            "title": r["title"],                     # Page title
+            "domain": r["domain"],                   # Domain name (bbc.com)
+            "snippet": r.get("snippet", ""),         # Search preview text
+            "content": content,                      # Article text
+            "queries": [q],                          # Which query found this
+            "quality": quality or classify_source(r["domain"]),  # academic? vendor? etc.
+            "source_lang": detect_lang(content),     # Language the page is written in
+            "search_lang": search_lang,              # Language we searched in
+        }
+        added += 1
+    return added
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -206,18 +263,14 @@ def run_explore(args):
         # lc = language code ("en", "fr", "ja", etc.)
         # info = {"name": "English", "why": "Primary global tech language"}
 
-        # EQUALIZED QUERY COUNT: every language gets 5 queries.
+        # EQUALIZED QUERY COUNT: every language gets the same number of
+        # queries (QUERIES_PER_LANGUAGE, see the top of this file).
         #
-        # The old version gave English 8 queries and other languages 3.
-        # That created an inherently English-heavy corpus (~24 EN results
-        # vs ~3 per other language). The bias check would flag this, but
-        # the pipeline itself was creating the imbalance.
-        #
-        # Now every language gets 5 queries, searched with n=3 results each.
-        # 9 languages × 5 queries × 3 results = up to 135 sources, evenly
-        # distributed. English still gets more in practice (more English
-        # content exists on the web), but the SEARCH EFFORT is equal.
-        n_queries = 5
+        # A much older version gave English 8 queries and other languages 3,
+        # creating an English-heavy corpus by design. English still gets
+        # more in practice (more English content exists on the web), but
+        # the SEARCH EFFORT is equal.
+        n_queries = QUERIES_PER_LANGUAGE
 
         if lc == "en":
             prompt = (
@@ -272,47 +325,18 @@ def run_explore(args):
     # pages we find. This is the bulk of the research gathering.
 
     print(f"\n{'─'*50}\nSEARCH\n{'─'*50}")
+    print(f"   {sum(len(q) for q in all_queries.values())} queries x {RESULTS_PER_QUERY} results, "
+          f"reading pages in parallel...")
 
-    # Loop through each language and its queries
-    for lc, queries in all_queries.items():
-        print(f"\n   {LANGUAGES[lc]['name']}...")
+    # Every query in every language, favoring results from that
+    # language's region (see LANGUAGES in core.py)
+    _gather([(q, RESULTS_PER_QUERY, LANGUAGES[lc]["region"], lc)
+             for lc, queries in all_queries.items() for q in queries], sources)
 
-        for q in queries:
-            print(f"      {q[:55]}...")  # Show first 55 chars of query
-
-            # Search the web for this query, get up to 3 results,
-            # favoring pages from that language's region
-            for r in search_web(q, n=3, region=LANGUAGES[lc]["region"]):
-
-                # Skip if we already have this URL (avoid duplicates)
-                # "continue" means "skip the rest of this loop iteration
-                # and go to the next one"
-                if r["url"] in sources:
-                    continue
-
-                # Try to read the actual page content
-                content = fetch_page(r["url"])
-
-                if content:
-                    # Detect what language the page is actually written in
-                    dl = detect_lang(content)
-
-                    # Store everything about this source
-                    sources[r["url"]] = {
-                        "title": r["title"],           # Page title
-                        "domain": r["domain"],         # Domain name (bbc.com)
-                        "snippet": r.get("snippet", ""),  # Search preview text
-                        "content": content,            # Full article text
-                        "queries": [q],                # Which query found this
-                        "quality": classify_source(r["domain"]),  # academic? vendor? etc.
-                        "source_lang": dl,             # Detected language of the page
-                        "search_lang": lc,             # Language we searched in
-                    }
-                    print(f"      {r['domain']} [{dl}]")
-
-                # Wait 0.5 seconds between page fetches to avoid being
-                # rate-limited (websites block you if you hit them too fast)
-                time.sleep(0.5)
+    # How many readable pages each language's searches produced
+    for lc in all_queries:
+        n = sum(1 for s in sources.values() if s["search_lang"] == lc)
+        print(f"   {LANGUAGES[lc]['name']:16s} {n} sources")
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 4: AUTHORITATIVE + ACADEMIC SOURCES
@@ -329,7 +353,7 @@ def run_explore(args):
 
     # Targeted web searches for known high-quality sources
     # (query, search region) -- see LANGUAGES in core.py for the regions
-    for q, region in [
+    added = _gather([(q, 3, region, "mixed") for q, region in [
         ("Stack Overflow developer survey AI tools 2025 2026", "us-en"),
         ("JetBrains developer ecosystem survey AI", "us-en"),
         ("OECD AI software workers report", "us-en"),
@@ -337,22 +361,8 @@ def run_explore(args):
         ("GitHub Copilot productivity Microsoft study", "us-en"),
         ("AIコーディングアシスタント 調査 日本", "jp-jp"),  # Japanese: AI coding assistant survey Japan
         ("中国AI编程工具 开发者 报告", "cn-zh"),            # Chinese: China AI programming tools developer report
-    ]:
-        for r in search_web(q, n=2, region=region):  # Only top 2 results per query
-            if r["url"] not in sources:
-                content = fetch_page(r["url"])
-                if content:
-                    sources[r["url"]] = {
-                        "title": r["title"],
-                        "domain": r["domain"],
-                        "snippet": r.get("snippet", ""),
-                        "content": content,
-                        "queries": [q],
-                        "quality": classify_source(r["domain"]),
-                        "source_lang": detect_lang(content),
-                        "search_lang": "mixed",  # These queries span languages
-                    }
-        time.sleep(0.4)  # Pause between searches
+    ]], sources)
+    print(f"   {added} authoritative sources")
 
     # Academic paper search (Semantic Scholar + arXiv)
     # These are separate from web search -- they search dedicated
@@ -398,26 +408,12 @@ def run_explore(args):
                 }
 
     # Search for blog posts and non-English developer experiences
-    for q, region in [
+    added = _gather([(q, 5, region, "mixed") for q, region in [
         ("site:dev.to Copilot review developer", "us-en"),        # Dev.to (developer blog platform)
         ('"mon expérience avec Copilot" développeur', "fr-fr"),   # French: "my experience with Copilot"
         ("Copilot 使ってみた エンジニア", "jp-jp"),                 # Japanese: "tried Copilot, engineer"
-    ]:
-        for r in search_web(q, n=3, region=region):
-            if r["url"] not in sources:
-                content = fetch_page(r["url"])
-                if content:
-                    sources[r["url"]] = {
-                        "title": r["title"],
-                        "domain": r["domain"],
-                        "snippet": r.get("snippet", ""),
-                        "content": content,
-                        "queries": [q],
-                        "quality": "experiential/blog",
-                        "source_lang": detect_lang(content),
-                        "search_lang": "mixed",
-                    }
-        time.sleep(0.5)
+    ]], sources, quality="experiential/blog")
+    print(f"   {added} developer blog posts")
 
     # ════════════════════════════════════════════════════════════════
     # PHASE 6: RED TEAM (find weaknesses in our research)
@@ -493,29 +489,21 @@ def run_explore(args):
     # PHASE 7: GAP FILL
     # ════════════════════════════════════════════════════════════════
     # Run the search queries suggested by the red team and bias check
-    # to fill the gaps they identified. We limit to 8 queries to
-    # keep the runtime reasonable.
-    #
-    # fixes[:8] means "take the first 8 items from the fixes list"
-    # (Python's "slice" syntax: list[start:end])
+    # to fill the gaps they identified (up to GAP_QUERIES of them).
+    # Each query searches the region matching its script, so a Korean
+    # fix query looks for Korean pages.
 
-    print(f"\n{'─'*50}\nGAP FILL ({len(fixes[:8])} queries)\n{'─'*50}")
+    print(f"\n{'─'*50}\nGAP FILL ({len(fixes[:GAP_QUERIES])} queries)\n{'─'*50}")
 
-    for q in fixes[:8]:
-        for r in search_web(q, n=2):
-            if r["url"] not in sources:
-                content = fetch_page(r["url"])
-                if content:
-                    sources[r["url"]] = {
-                        "title": r["title"],
-                        "domain": r["domain"],
-                        "snippet": r.get("snippet", ""),
-                        "content": content,
-                        "queries": [q],
-                        "quality": classify_source(r["domain"]),
-                        "source_lang": detect_lang(content),
-                        "search_lang": "mixed",
-                    }
+    def region_for(query):
+        for lang, script in [("ko", NATIVE_SCRIPT["ko"]), ("ja", r"[\u3040-\u30ff]"),
+                             ("zh", NATIVE_SCRIPT["zh"]), ("ru", NATIVE_SCRIPT["ru"])]:
+            if re.search(script, query):
+                return LANGUAGES[lang]["region"]
+        return "us-en"
+
+    added = _gather([(q, 3, region_for(q), "mixed") for q in fixes[:GAP_QUERIES]], sources)
+    print(f"   {added} sources added")
 
     # ════════════════════════════════════════════════════════════════
     # SAVE -- write everything to the scratchpad for downstream modes
@@ -563,7 +551,7 @@ def run_explore(args):
             "lang": s.get("source_lang", "?"),
             "url": url,
             "year": s.get("year"),                 # Known for academic papers only
-            "content": s["content"][:3000],        # Truncate content to 3000 chars
+            "content": s["content"][:CONTENT_CHARS],  # Truncate very long pages
         }
         for i, (url, s) in enumerate(sources.items())
     ]

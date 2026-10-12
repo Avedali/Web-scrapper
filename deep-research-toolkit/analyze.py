@@ -47,6 +47,12 @@ from core import (
     NO_EVIDENCE,           # Card text for sources with nothing usable
 )
 
+# How much of each source the language models read. None = all of it.
+# (The models split long text into chunks, so length only costs time.
+# If analyze is too slow on your laptop, set e.g. 10000 -- but text past
+# the limit is then ignored, which may be where the findings are.)
+ANALYZE_CHARS = None
+
 
 # ════════════════════════════════════════════════════════════════════════
 # TEXT CHUNKING -- lets models read entire documents, not just page one
@@ -148,6 +154,27 @@ def run_analyze(args):
     # Each dictionary becomes one row. The keys become column names.
     # So we get columns like: "title", "content", "quality", "lang", etc.
     df = pd.DataFrame(corpus)
+
+    # The language models below read each source's whole text (unless
+    # ANALYZE_CHARS sets a limit -- see the top of this file)
+    df["content"] = df["content"].fillna("")
+    if ANALYZE_CHARS:
+        df["content"] = df["content"].str.slice(0, ANALYZE_CHARS)
+
+    # ── Evidence cards: a 1-2 sentence English summary per source ───
+    # (see core.build_evidence_cards). Used for zero-shot topics and
+    # themes below; cached, so synthesize later reuses them for free.
+    api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
+    model = getattr(args, "model", None) or "google/gemini-2.5-flash-lite"
+    cards = build_evidence_cards(corpus, api_key, model, args.corpus) if api_key else {}
+    if not api_key:
+        print("   No API key -- topics and themes will use the raw pages "
+              "(set a key for English evidence cards)")
+
+    def card_or_text(row):
+        """The source's evidence card if it has a usable one, else its text."""
+        card = cards.get(row["idx"], "")
+        return card if card and not card.startswith(NO_EVIDENCE) else row["content"]
 
     # ════════════════════════════════════════════════════════════════
     # ANALYSIS 1: SENTIMENT (Hugging Face transformer)
@@ -386,7 +413,10 @@ def run_analyze(args):
 
         # Apply the classifier to every document's content
         # This creates a new column "topic_zs" (zs = zero-shot)
-        df["topic_zs"] = df["content"].apply(classify)
+        # Classify each source's evidence card when there is one: a single
+        # English summary of what the source says, instead of ~7 chunks of
+        # raw page text per source -- about 7x faster on a laptop CPU.
+        df["topic_zs"] = df.apply(card_or_text, axis=1).apply(classify)
 
         # Show how many documents fell into each category
         # .value_counts() counts occurrences of each unique value
@@ -537,16 +567,7 @@ def run_analyze(args):
         from sklearn.cluster import KMeans
         from sklearn.feature_extraction.text import CountVectorizer
 
-        api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
-        model = getattr(args, "model", None) or "google/gemini-2.5-flash-lite"
-
-        # ── What to cluster: evidence cards if we can, raw pages if not ─
-        cards = {}
-        if api_key:
-            cards = build_evidence_cards(corpus, api_key, model, args.corpus)
-        else:
-            print("   No API key -- clustering raw pages (set a key for English theme names)")
-
+        # ── What to cluster: evidence cards if we have them, raw pages if not ─
         if cards:
             # Sources with nothing usable don't get a theme
             keep = [i for i, idx in enumerate(df["idx"])

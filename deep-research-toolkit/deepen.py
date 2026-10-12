@@ -31,14 +31,14 @@ Only run AFTER synthesize (it reads synthesize's output).
 
 import json  # Read/write structured data files
 import os    # File/folder operations
-import time  # Pauses between web requests
 
 
 # From our shared toolbox:
 from core import (
-    search_web,       # Search the web
+    search_many,      # Run several web searches at once
+    fetch_pages,      # Read many web pages at once
+    CONTENT_CHARS,    # How much text to keep per source
     search_academic,  # Search Semantic Scholar + arXiv
-    fetch_page,       # Read a web page's content
     call_ai,          # Send a prompt to the AI
     pad,              # Save to scratchpad
     classify_source,  # Label source quality (academic? vendor? etc.)
@@ -129,12 +129,14 @@ def run_deepen(args):
     print(f"\n{'─'*50}\nFINDING EVIDENCE GAPS\n{'─'*50}")
 
     gaps = call_ai(
-        # We give the AI all three pieces: thesis, outline, and brief.
-        # [:1500] and [:3000] truncate to fit within the AI's input limit.
+        # We give the AI all three pieces IN FULL: thesis, outline, and brief.
+        # (They used to be cut to 1,500-3,000 characters -- for a 5,000-word
+        # brief that's roughly the introduction, so gaps in later sections
+        # could never be found.)
         f"You are reviewing a research brief for evidence gaps.\n\n"
-        f"THESIS:\n{thesis[:1500]}\n\n"
-        f"OUTLINE:\n{outline[:1500]}\n\n"
-        f"BRIEF:\n{brief[:3000]}\n\n"
+        f"THESIS:\n{thesis}\n\n"
+        f"OUTLINE:\n{outline}\n\n"
+        f"BRIEF:\n{brief}\n\n"
         f"Which sections have THIN evidence? For each weak section:\n"
         f"1. Name the section\n"
         f"2. What specific claim needs better support\n"
@@ -173,61 +175,52 @@ def run_deepen(args):
     print(f"\n{'─'*50}\nTARGETED SEARCH ({len(fix_queries[:12])} queries)\n{'─'*50}")
 
     new_sources = []  # Will hold only the NEW sources we find
+    queries = fix_queries[:12]
 
-    for q in fix_queries[:12]:
-        print(f"   {q[:55]}...")
+    def add(item):
+        """Number the new source after the existing ones and keep it."""
+        item["idx"] = len(existing) + len(new_sources) + 1
+        new_sources.append(item)
+        existing_urls.add(item["url"])
 
-        # ── Web search ──────────────────────────────────────────────
-        for r in search_web(q, n=3):
+    # ── Web search: all queries at once, then read new pages in parallel
+    results = search_many([(q, 3, "us-en") for q in queries])
+    found = {}  # url -> search result (first query that found it)
+    for q, rs in zip(queries, results, strict=True):
+        print(f"   {q[:55]}...  ({len(rs)} results)")
+        for r in rs:
+            if r["url"] not in existing_urls and r["url"] not in found:
+                found[r["url"]] = r
+    pages = fetch_pages(list(found))
+    for url, r in found.items():
+        if pages.get(url):
+            add({
+                "title": r["title"],
+                "domain": r["domain"],
+                "url": url,
+                "content": pages[url][:CONTENT_CHARS],     # Truncate very long pages
+                "quality": classify_source(r["domain"]),   # academic? vendor? etc.
+                "lang": detect_lang(pages[url]),           # What language?
+            })
+            print(f"      {r['domain']} [{new_sources[-1]['lang']}]")
 
-            # Skip if we already have this URL
-            if r["url"] not in existing_urls:
-                content = fetch_page(r["url"])
-
-                if content:
-                    # Build a source entry. The "idx" (index number) continues
-                    # from where the existing corpus left off.
-                    # len(existing) = how many sources we already had
-                    # len(new_sources) = how many new ones we've found so far
-                    # + 1 because source numbers are 1-based, not 0-based
-                    item = {
-                        "idx": len(existing) + len(new_sources) + 1,
-                        "title": r["title"],
-                        "domain": r["domain"],
-                        "url": r["url"],
-                        "content": content[:3000],                 # Truncate content
-                        "quality": classify_source(r["domain"]),   # academic? vendor? etc.
-                        "lang": detect_lang(content),              # What language?
-                    }
-
-                    new_sources.append(item)     # Add to our new sources list
-                    existing_urls.add(r["url"])   # Mark this URL as "already seen"
-
-                    print(f"      {r['domain']} [{item['lang']}]")
-
-            time.sleep(0.4)  # Pause between page fetches
-
-        # ── Academic search (for research-type queries only) ────────
-        # If the query contains words like "study", "research", "evidence",
-        # or "survey", it's probably looking for academic sources.
-        # In that case, also search Semantic Scholar and arXiv.
-        #
-        # any(kw in q.lower() for kw in [...]) means:
-        # "does the query contain ANY of these keywords?"
+    # ── Academic search (for research-type queries only) ────────────
+    # If the query contains words like "study", "research", "evidence",
+    # or "survey", it's probably looking for academic sources.
+    # In that case, also search Semantic Scholar and arXiv.
+    for q in queries:
         if any(kw in q.lower() for kw in ["study", "research", "evidence", "survey"]):
             for p in search_academic(q, n=2):
                 if p["url"] not in existing_urls:
-                    new_sources.append({
-                        "idx": len(existing) + len(new_sources) + 1,
+                    add({
                         "title": p["title"],
                         "domain": p["domain"],
                         "url": p["url"],
-                        "content": p["snippet"][:3000],  # For papers, content = abstract
+                        "content": p["snippet"][:CONTENT_CHARS],  # For papers, content = abstract
                         "quality": "academic",
                         "year": p.get("year"),           # Publication year (for APA)
                         "lang": "en",
                     })
-                    existing_urls.add(p["url"])
                     print(f"      {p['title'][:50]}...")
 
     # ════════════════════════════════════════════════════════════════

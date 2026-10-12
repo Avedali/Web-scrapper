@@ -95,11 +95,18 @@ else:
 # --- Trafilatura (article text extraction from web pages) ---
 try:
     import trafilatura  # Extracts the article text from a web page,
+    from trafilatura.settings import use_config as _traf_config
                         # ignoring navigation, ads, footers, sidebars.
                         # Best-in-class for this job (benchmarked).
     _TRAF = True
 except ImportError:
     _TRAF = False
+
+# Give up on a page after 15 seconds instead of trafilatura's default 30 --
+# one very slow site shouldn't hold up a batch of downloads.
+if _TRAF:
+    _TRAF_CONFIG = _traf_config()
+    _TRAF_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", "15")
 
 # --- Camoufox (stealth browser for bot-protected sites) ---
 try:
@@ -361,14 +368,17 @@ def search_academic(query, n=5):
     if _S2:
         try:
             # Create a Semantic Scholar client and search
-            for p in SemanticScholar().search_paper(query, limit=n):
+            # retry=False: without an API key Semantic Scholar often answers
+            # "too many requests", and its built-in retries back off for
+            # minutes per query. Fail fast instead -- arXiv still runs.
+            for p in SemanticScholar(retry=False, timeout=20).search_paper(query, limit=n):
                 papers.append({
                     "title": p.title or "",
                     "domain": "semanticscholar.org",
                     # Build a URL to the paper's page
                     "url": p.url or f"https://www.semanticscholar.org/paper/{p.paperId}",
-                    # Take first 500 characters of the abstract
-                    "snippet": (p.abstract or "")[:500],
+                    # The whole abstract -- for papers, it IS the content
+                    "snippet": p.abstract or "",
                     # getattr(p, "year", None) means: get p.year if it exists,
                     # otherwise return None (nothing). Safer than p.year which
                     # would crash if the paper doesn't have a year field.
@@ -390,7 +400,7 @@ def search_academic(query, n=5):
                     "title": p.title,
                     "domain": "arxiv.org",
                     "url": p.entry_id,           # arXiv's unique URL for this paper
-                    "snippet": (p.summary or "")[:500],
+                    "snippet": p.summary or "",   # The whole abstract
                     # p.published is a datetime object; .year extracts just the year
                     "year": p.published.year if p.published else None,
                 })
@@ -428,7 +438,7 @@ def search_hn(query, n=10):
                     "url": f"https://news.ycombinator.com/item?id={item.get('objectID', '')}",
                     # story_text is null (not missing) for link posts, so
                     # .get("story_text", "") would return None here
-                    "snippet": (item.get("story_text") or "")[:300],
+                    "snippet": item.get("story_text") or "",
                     "domain": "news.ycombinator.com",
                     "points": item.get("points", 0),  # Upvotes (popularity)
                 })
@@ -447,9 +457,18 @@ def search_hn(query, n=10):
 # CONTENT EXTRACTION -- reading the actual text from web pages
 # ════════════════════════════════════════════════════════════════════════
 
-def fetch_page(url, max_chars=5000):
+# How much text to keep per source. Measured on 40 real corpus pages: median
+# 11,300 characters, 90th percentile 28,400. The old 3,000-character limit
+# threw away 79% of the text (often everything after the introduction);
+# 8,000 still lost 51%. 30,000 keeps 93% and only cuts the longest pages.
+# Everything downstream (cards, analyze, the brief) reads all of what's kept.
+CONTENT_CHARS = 30000
+
+
+def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
     """
     Visit a web page and extract its main article text.
+    use_browser=False skips the (slow, one-at-a-time) camoufox tier.
 
     This is a three-tier system:
       Tier 1: trafilatura (fast, no browser, works ~80% of the time)
@@ -468,7 +487,7 @@ def fetch_page(url, max_chars=5000):
     if _TRAF:
         try:
             # Step 1: Download the raw HTML of the page
-            html = trafilatura.fetch_url(url)
+            html = trafilatura.fetch_url(url, config=_TRAF_CONFIG)
 
             if html:
                 # Step 2: Extract just the article text from all that HTML
@@ -484,38 +503,13 @@ def fetch_page(url, max_chars=5000):
             pass  # trafilatura failed -- fall through to Tier 2
 
     # ── Tier 2: camoufox (stealth browser, for protected sites) ─────
-    if _CAMO:
+    if _CAMO and use_browser:
         try:
             # "with Camoufox(...) as browser" opens a stealth Firefox browser.
             # headless=True means invisible (no window pops up on your screen).
             # When the "with" block ends, the browser closes automatically.
             with Camoufox(headless=True) as browser:
-                page = browser.new_page()       # Open a new tab
-                page.goto(url, timeout=20000)   # Navigate to the URL (20 second timeout)
-
-                # Wait until the page's HTML is loaded (some pages load slowly)
-                page.wait_for_load_state("domcontentloaded")
-
-                # Run JavaScript IN the page to extract its text.
-                # This is like opening the browser console and typing code.
-                # What the JavaScript does:
-                #   1. Remove navigation, headers, footers, sidebars
-                #   2. Find the main content area (<main>, <article>, etc.)
-                #   3. Return its text content
-                text = page.evaluate("""() => {
-                    for (const s of ['nav','header','footer','aside','.sidebar'])
-                        document.querySelectorAll(s).forEach(e => e.remove());
-                    const m = document.querySelector('main,article,[role="main"]');
-                    return (m || document.body).innerText;
-                }""")
-
-                if text and len(text.strip()) > 100:
-                    # re.sub(r"\s+", " ", text) replaces multiple whitespace
-                    # characters (spaces, tabs, newlines) with a single space.
-                    # .strip() removes leading/trailing whitespace.
-                    # NOTE: r"\s+" NOT r"\\s+" -- double backslash would match
-                    # a literal backslash character, not whitespace.
-                    return re.sub(r"\s+", " ", text).strip()[:max_chars]
+                return _read_with_browser(browser, url, max_chars)
         except Exception as e:
             print(f"      camoufox extraction error: {type(e).__name__}")
 
@@ -523,11 +517,87 @@ def fetch_page(url, max_chars=5000):
     return None  # Couldn't read the page with any method
 
 
+# JavaScript run INSIDE the page to get its main text: remove navigation,
+# headers, footers and sidebars, then take the main content area.
+_EXTRACT_JS = """() => {
+    for (const s of ['nav','header','footer','aside','.sidebar'])
+        document.querySelectorAll(s).forEach(e => e.remove());
+    const m = document.querySelector('main,article,[role="main"]');
+    return (m || document.body).innerText;
+}"""
+
+
+def _read_with_browser(browser, url, max_chars):
+    """Open url in an already-running camoufox browser; its text or None."""
+    page = browser.new_page()                  # Open a new tab
+    try:
+        page.goto(url, timeout=20000)          # 20 second timeout
+        page.wait_for_load_state("domcontentloaded")
+        text = page.evaluate(_EXTRACT_JS)
+        if text and len(text.strip()) > 100:
+            # Collapse runs of whitespace into single spaces
+            return re.sub(r"\s+", " ", text).strip()[:max_chars]
+        return None
+    finally:
+        page.close()
+
+
+def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
+    """
+    Fetch many pages at once. Returns {url: text} for the pages that worked.
+
+    Tier 1 (trafilatura) runs `workers` downloads in parallel -- most of the
+    time is spent waiting on websites, so this is ~6x faster than one by
+    one. Pages that fail are then retried one at a time with the camoufox
+    browser (tier 2), which can't safely run in parallel.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # Run downloads in parallel
+
+    import time
+    started = time.time()
+    urls = list(dict.fromkeys(urls))  # Drop duplicates, keep order
+    print(f"      reading {len(urls)} pages ({workers} at a time)...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        texts = list(pool.map(lambda u: fetch_page(u, max_chars, use_browser=False), urls))
+    pages = {u: t for u, t in zip(urls, texts, strict=True) if t}
+
+    # Retry the failures in ONE browser (opening a browser per page is slow)
+    failed = [u for u in urls if u not in pages]
+    if _CAMO and failed:
+        print(f"      retrying {len(failed)} blocked pages in the stealth browser...")
+        try:
+            with Camoufox(headless=True) as browser:
+                for u in failed:
+                    try:
+                        text = _read_with_browser(browser, u, max_chars)
+                        if text:
+                            pages[u] = text
+                    except Exception:
+                        continue  # This page still won't load -- skip it
+        except Exception as e:
+            print(f"      camoufox unavailable: {type(e).__name__}")
+
+    print(f"      read {len(pages)} of {len(urls)} pages in {time.time() - started:.0f}s")
+    return pages
+
+
+def search_many(jobs, workers=3):
+    """
+    Run several web searches at once. jobs is a list of (query, n, region);
+    returns a list of result lists in the same order. Kept to a few at a
+    time so the search engines don't block us.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # Run searches in parallel
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda job: search_web(job[0], n=job[1], region=job[2]), jobs))
+
+
 # ════════════════════════════════════════════════════════════════════════
 # AI -- talking to AI models via the OpenRouter API
 # ════════════════════════════════════════════════════════════════════════
 
-def call_ai(prompt, api_key, model, temp=0.6, system=""):
+def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=None):
     """
     Send a prompt to an AI model and get back its response.
 
@@ -543,6 +613,8 @@ def call_ai(prompt, api_key, model, temp=0.6, system=""):
                    1 = very creative. 0.6 is a good middle ground for research.
         system   -- optional "system prompt" that tells the AI how to behave
                    (e.g., "you are an academic researcher, be precise")
+        max_tokens -- optional cap on the length of the reply (stops a model
+                   that gets stuck repeating itself from running on)
 
     Returns the AI's response as a text string, or "" if something went wrong.
 
@@ -586,6 +658,7 @@ def call_ai(prompt, api_key, model, temp=0.6, system=""):
                 "model": model,           # Which AI model to use
                 "messages": msgs,         # The conversation so far
                 "temperature": temp,      # How random/creative to be
+                **({"max_tokens": max_tokens} if max_tokens else {}),
             },
 
             timeout=180,  # Wait up to 3 minutes for a response (AI can be slow)
@@ -953,9 +1026,11 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
         if attempt == 0:
             print(f"   Writing evidence cards for {len(todo)} sources...")
         parts = [(f"[{s['idx']}] ({s.get('lang', '?')}) {s.get('title', '')} -- {s.get('domain', '')}",
-                  s.get("content", "")[:3000]) for s in todo]
+                  s.get("content", "")) for s in todo]   # the WHOLE stored text
         answers = ai_map(
-            make_batches(parts, batch_chars=24000),
+            # ~80,000 characters per call (~20k tokens): big enough that a
+            # source is never split across calls (sources are <= CONTENT_CHARS)
+            make_batches(parts, batch_chars=80000),
             lambda batch: (
                 "Below are research sources about AI coding assistants, each "
                 "starting with its number like [12].\n"

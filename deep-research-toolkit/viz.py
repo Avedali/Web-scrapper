@@ -463,8 +463,35 @@ def run_viz(args):
             # "prompt_type" (coding tasks) depending on which simulate version ran
             level_col = "level" if "level" in sim_df.columns else "prompt_type"
 
-            if level_col in sim_df.columns:
+            if level_col in sim_df.columns and "pro_met" in sim_df.columns:
 
+                # Box plot: share of the PROFESSIONAL (senior) spec each page
+                # met, by prompt level -- tested in a browser by simulate.
+                # This is the experiment's real measure: lines of code say
+                # little about whether a page does what a product needs.
+                sim_df = sim_df[sim_df["pro_total"].notna() & (sim_df["pro_total"] > 0)].copy()
+                sim_df["spec_pct"] = 100 * sim_df["pro_met"] / sim_df["pro_total"]
+                fig = px.box(
+                    sim_df, x=level_col, y="spec_pct",
+                    color=level_col,
+                    color_discrete_map={"layman": GRAY, "junior": MUTED, "senior": ACCENT},
+                    category_orders={level_col: ["layman", "junior", "senior"]},
+                    points="all",  # Show each page as a dot
+                    labels={"spec_pct": "% of professional spec met"},
+                )
+                fig.update_yaxes(range=[0, 105])
+
+                means = sim_df.groupby(level_col)["spec_pct"].mean()
+                slide_title = (f"Senior prompts met {means.get('senior', 0):.0f}% of a professional "
+                               f"spec -- layman prompts {means.get('layman', 0):.0f}%")
+                save(fig, "06_skill_vs_output",
+                     "Figure 6: Share of professional requirements met, by prompt sophistication "
+                     "(each page tested in a browser)",
+                     slide_title)
+
+            elif level_col in sim_df.columns:
+
+                # Older simulate results (no browser test): code length instead
                 # Box plot: code length (lines) by skill level
                 # color_discrete_map assigns specific colors to each level:
                 #   layman = gray (not interesting), senior = red (the point)

@@ -47,6 +47,9 @@ and can summarize any part of them on demand.
 
 import os    # File/folder operations and environment variables
 import json  # For loading JSON analysis results
+import re    # Finding [n] source tags in the notes
+
+from collections import Counter  # Count which sources the notes mention most
 
 from pathlib import Path  # Nice file path handling
 
@@ -54,6 +57,8 @@ from core import (
     call_ai,       # AI calls
     make_batches,  # Pack the research into prompt-sized batches
     ai_map,        # Send one prompt per batch, several at once
+    load_evidence_cards,  # One-line English summary per source (if built)
+    NO_EVIDENCE,          # Card text for sources with nothing usable
 )
 
 
@@ -61,10 +66,11 @@ from core import (
 # BATCHING SETTINGS -- tune these if answers are slow or hit rate limits
 # ════════════════════════════════════════════════════════════════════════
 
-BATCH_CHARS = 12000      # Characters of research per AI call (~3000 tokens)
-NOTES_CHARS = 24000      # Max characters of combined notes for the final answer
-MAX_WORKERS = 4          # Batches read at the same time (lower if rate-limited)
-INCLUDE_SOURCES = True   # Also search the raw source texts in corpus.json
+BATCH_CHARS = 40000        # Characters of research per AI call (~10k tokens)
+NOTES_CHARS = 200000       # Max characters of combined notes for the final answer
+MAX_WORKERS = 4            # Batches read at the same time (lower if rate-limited)
+FULL_TEXT_SOURCES = 15     # Sources read in FULL for each question (stage 2)
+INCLUDE_SOURCES = True     # No evidence cards yet? Then read every raw source
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -94,7 +100,7 @@ def run_ask(args):
     # data, which prevents hallucination.
     #
     # args.corpus is the path to the scratchpad folder (default: "scratchpad")
-    parts = _load_context(args.corpus)
+    parts, corpus = _load_context(args.corpus)
 
     if not parts:
         print("No research found. Run 'python agent.py explore' first.")
@@ -140,7 +146,7 @@ def run_ask(args):
         #
         # temp=0.4 is slightly creative but mostly factual.
         # Lower temperature = more predictable/factual answers.
-        answer = _answer(args.question, batches, rules, api_key, args.model)
+        answer = _answer(args.question, batches, corpus, rules, api_key, args.model)
         print(f"\n{answer}")
 
     else:
@@ -196,7 +202,7 @@ def run_ask(args):
                 full_prompt = q
 
             # Send to the AI
-            answer = _answer(full_prompt, batches, rules, api_key, args.model)
+            answer = _answer(full_prompt, batches, corpus, rules, api_key, args.model)
 
             # Print the answer
             print(f"\n{answer}\n")
@@ -213,40 +219,49 @@ def run_ask(args):
 # ANSWERING -- one call if the research fits, map-then-answer if not
 # ════════════════════════════════════════════════════════════════════════
 
-def _answer(prompt, batches, rules, api_key, model):
+def _extract_prompt(question):
+    """Prompt that pulls the notes relevant to `question` out of one batch."""
+    return lambda batch: (
+        "Below is one part of a research team's notes and sources.\n"
+        "Copy out every finding, number, quote, or source detail that helps "
+        "answer the question. Keep the file labels and [n] source tags (they "
+        "tell us which sources to read in full). Be brief but don't drop "
+        "specifics. If nothing in this part is relevant, reply with exactly: NONE\n\n"
+        f"QUESTION:\n{question}\n\nRESEARCH (one part):\n{batch}")
+
+
+def _answer(prompt, batches, corpus, rules, api_key, model):
     """
     Answer one question (prompt may include the conversation history).
 
-    One batch → send it all as context, exactly like a normal question.
-    Several batches → two steps:
-      1. EXTRACT: for each batch, ask the AI to copy out only what's
-         relevant to the question (or say NONE). Batches run in parallel.
-      2. ANSWER: send the combined notes as the context and answer.
+    Stage 1: read the findings + one evidence card per source (in batches,
+             several at once) and copy out what's relevant to the question.
+    Stage 2: read the FULL TEXT of the sources those notes point to most
+             (up to FULL_TEXT_SOURCES), so answers can use details that
+             only appear deep inside a source.
+    Then answer from all the notes. Nothing is truncated: long material is
+    split into batches rather than cut off.
     """
-    if len(batches) == 1:
-        return call_ai(prompt, api_key, model, temp=0.4,
-                       system=rules + "RESEARCH CONTEXT:\n" + batches[0])
+    print(f"   Reading {len(batches)} batches of findings and evidence cards...")
+    notes = ai_map(batches, _extract_prompt(prompt), api_key, model, workers=MAX_WORKERS)
 
-    print(f"   Reading {len(batches)} batches of research...")
-
-    # ai_map keeps the results in batch order (priority files first)
-    notes = ai_map(
-        batches,
-        lambda batch: (
-            "Below is one part of a research team's notes and sources.\n"
-            "Copy out every finding, number, quote, or source detail that "
-            "helps answer the question. Keep the file labels and [n] source "
-            "tags. Be brief but don't drop specifics. If nothing in this "
-            "part is relevant, reply with exactly: NONE\n\n"
-            f"QUESTION:\n{prompt}\n\n"
-            f"RESEARCH (one part):\n{batch}"),
-        api_key, model, workers=MAX_WORKERS,
-    )
+    # Stage 2: which sources do the notes keep pointing to?
+    by_idx = {s.get("idx"): s for s in corpus}
+    mentions = Counter(int(n) for note in notes if note
+                       for n in re.findall(r"\[(\d+)\]", note) if int(n) in by_idx)
+    picks = [i for i, _ in mentions.most_common(FULL_TEXT_SOURCES)]
+    if picks:
+        print(f"   Reading the full text of {len(picks)} relevant sources...")
+        parts = [(f"source [{i}][{by_idx[i].get('lang', '?')}] {by_idx[i].get('title', '')} "
+                  f"({by_idx[i].get('domain', '')}) {by_idx[i].get('url', '')}",
+                  by_idx[i].get("content", "")) for i in picks]
+        notes += ai_map(make_batches(parts, BATCH_CHARS), _extract_prompt(prompt),
+                        api_key, model, workers=MAX_WORKERS)
 
     # call_ai returns "" when a call fails -- warn, but answer with the rest
     failed = sum(1 for n in notes if not n)
     if failed:
-        print(f"   {failed}/{len(batches)} batches failed -- answer may be incomplete")
+        print(f"   {failed}/{len(notes)} reading calls failed -- answer may be incomplete")
 
     relevant = [n.strip() for n in notes
                 if n and n.strip().strip(".").upper() != "NONE"]
@@ -280,10 +295,12 @@ def _load_context(corpus_dir):
       8. Decomposition (research questions)
       9. Everything else (remaining scratchpad files)
      10. Analysis results JSON (raw numbers)
-     11. Raw source texts from corpus.json (if INCLUDE_SOURCES)
+     11. One evidence card per source -- or, if no cards were built yet,
+         the raw source texts (if INCLUDE_SOURCES)
 
     Nothing is truncated here -- batching handles the size.
-    Returns [] if the scratchpad is empty.
+    Returns (parts, corpus): parts is [] if the scratchpad is empty;
+    corpus is the source list (for reading full texts in stage 2).
     """
 
     parts = []  # Will hold (label, text) pairs
@@ -292,7 +309,7 @@ def _load_context(corpus_dir):
 
     # If the scratchpad folder doesn't exist, nothing to load
     if not pad_dir.exists():
-        return []
+        return [], []
 
     # ── Load priority files first ───────────────────────────────────
     priority = [
@@ -321,6 +338,7 @@ def _load_context(corpus_dir):
     # ── Load remaining scratchpad files ─────────────────────────────
     # deepen reports, gap analyses, etc. sorted() = alphabetical, which
     # (because of the numbered prefixes) is also chronological order.
+    loaded.add("synthesis_00_evidence_cards.md")  # Cards are added below
     for p in sorted(pad_dir.glob("*.md")):
         if p.name not in loaded:
             parts.append((p.stem, p.read_text(encoding="utf-8")))
@@ -334,13 +352,24 @@ def _load_context(corpus_dir):
             data = json.load(f)
         parts.append(("analysis_results", json.dumps(data, indent=2)))
 
-    # ── Load the raw sources (what the findings are based on) ───────
-    # With batching these fit too, so the agent can answer "what did
-    # source [12] actually say?" -- not just what the summaries say.
+    # ── The sources themselves ──────────────────────────────────────
+    corpus = []
     corpus_path = pad_dir / "corpus.json"
-    if INCLUDE_SOURCES and corpus_path.exists():
+    if corpus_path.exists():
         with open(corpus_path, encoding="utf-8") as f:
             corpus = json.load(f)
+
+    cards = load_evidence_cards(corpus_dir)
+    if cards:
+        # One line per source -- the full texts are read in stage 2, only
+        # for the sources relevant to the question (see _answer)
+        by_idx = {s.get("idx"): s for s in corpus}
+        parts.append(("evidence cards (one per source)", "\n".join(
+            f"[{i}][{by_idx.get(i, {}).get('lang', '?')}] {c}"
+            for i, c in sorted(cards.items()) if not c.startswith(NO_EVIDENCE))))
+    elif INCLUDE_SOURCES:
+        # No cards yet (analyze/synthesize haven't run): read every raw
+        # source instead -- slower and costlier for big corpora
         for item in corpus:
             parts.append((
                 f"source [{item.get('idx', '?')}][{item.get('lang', '?')}]",
@@ -348,4 +377,4 @@ def _load_context(corpus_dir):
                 f"{item.get('content', '')}",
             ))
 
-    return parts
+    return parts, corpus
