@@ -50,4 +50,5 @@ kaleido                      # Plotly static image export (for PNG slides)
 # --- Code quality analysis (Mode 5: Simulate) ---
 bandit                       # AST-based security vulnerability scanner
 radon                        # Cyclomatic complexity + maintainability index
+playwright                   # Opens generated pages in a browser to check they work
 pylint                       # Code quality score (0-10)

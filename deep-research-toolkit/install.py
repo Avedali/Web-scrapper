@@ -121,6 +121,7 @@ def main():
         "bandit",  # Scans Python code for security vulnerabilities
         "radon",   # Measures code complexity (how tangled/simple the code is)
         "pylint",  # Grades code quality on a 0-10 scale
+        "playwright",  # Opens the simulated pages in a browser to check they work
     ]
 
     # --- Group 7: Citation formatting ---
@@ -290,6 +291,19 @@ def main():
                 print("   Camoufox install failed -- not a problem, toolkit works without it.")
         else:
             print("   Skipped.")
+
+    # ── Browser for simulate's page check (~150MB) ──────────────────────
+    # simulate opens every AI-generated page in an invisible browser to see
+    # whether it actually works. Playwright needs its own copy of Chromium
+    # (it can also use Google Chrome or Microsoft Edge if you have them).
+    if importlib.util.find_spec("playwright"):
+        print("\n   Downloading the browser simulate uses to test pages (~150MB)...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"],
+                                  stdout=subprocess.DEVNULL)
+            print("   Browser ready!")
+        except Exception:
+            print("   Browser download failed -- simulate will try Chrome/Edge instead.")
 
     # ════════════════════════════════════════════════════════════════════
     # STEP 4: TEST THAT EVERYTHING WORKS

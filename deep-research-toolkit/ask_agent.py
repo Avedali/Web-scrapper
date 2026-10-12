@@ -48,10 +48,13 @@ and can summarize any part of them on demand.
 import os    # File/folder operations and environment variables
 import json  # For loading JSON analysis results
 
-from concurrent.futures import ThreadPoolExecutor  # Read several batches at once
 from pathlib import Path  # Nice file path handling
 
-from core import call_ai  # AI calls
+from core import (
+    call_ai,       # AI calls
+    make_batches,  # Pack the research into prompt-sized batches
+    ai_map,        # Send one prompt per batch, several at once
+)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -98,7 +101,7 @@ def run_ask(args):
         return
 
     # Pack the research into batches of up to BATCH_CHARS characters
-    batches = _make_batches(parts)
+    batches = make_batches(parts, BATCH_CHARS)
 
     total = sum(len(b) for b in batches)
     print(f"   Loaded {total} chars of context from scratchpad "
@@ -226,21 +229,19 @@ def _answer(prompt, batches, rules, api_key, model):
 
     print(f"   Reading {len(batches)} batches of research...")
 
-    def extract(batch):
-        return call_ai(
+    # ai_map keeps the results in batch order (priority files first)
+    notes = ai_map(
+        batches,
+        lambda batch: (
             "Below is one part of a research team's notes and sources.\n"
             "Copy out every finding, number, quote, or source detail that "
             "helps answer the question. Keep the file labels and [n] source "
             "tags. Be brief but don't drop specifics. If nothing in this "
             "part is relevant, reply with exactly: NONE\n\n"
             f"QUESTION:\n{prompt}\n\n"
-            f"RESEARCH (one part):\n{batch}",
-            api_key, model, temp=0.2,
-        )
-
-    # pool.map keeps the results in batch order (priority files first)
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        notes = list(pool.map(extract, batches))
+            f"RESEARCH (one part):\n{batch}"),
+        api_key, model, workers=MAX_WORKERS,
+    )
 
     # call_ai returns "" when a call fails -- warn, but answer with the rest
     failed = sum(1 for n in notes if not n)
@@ -253,36 +254,6 @@ def _answer(prompt, batches, rules, api_key, model):
 
     return call_ai(prompt, api_key, model, temp=0.4,
                    system=rules + "RELEVANT NOTES FROM THE RESEARCH:\n" + context)
-
-
-def _make_batches(parts, batch_chars=BATCH_CHARS):
-    """
-    Pack labelled text parts into batches of at most batch_chars characters.
-
-    Parts stay in order (priority files first). A part longer than one
-    batch is split into pieces, and each piece keeps its label
-    ("── name (part 2) ──") so the AI still knows where it came from.
-    """
-    batches = []
-    current = ""
-
-    for label, text in parts:
-        room = batch_chars - len(label) - 30  # Leave space for the header
-        pieces = [text[i:i + room] for i in range(0, len(text), room)] or [""]
-
-        for k, piece in enumerate(pieces, 1):
-            name = label if len(pieces) == 1 else f"{label} (part {k})"
-            block = f"── {name} ──\n{piece}\n"
-
-            # Start a new batch if this block doesn't fit in the current one
-            if current and len(current) + len(block) > batch_chars:
-                batches.append(current)
-                current = ""
-            current += block
-
-    if current:
-        batches.append(current)
-    return batches
 
 
 # ════════════════════════════════════════════════════════════════════════

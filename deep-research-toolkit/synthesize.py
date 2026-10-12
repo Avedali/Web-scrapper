@@ -31,10 +31,12 @@ from pathlib import Path            # Nice file path handling
 
 # From our shared toolbox:
 from core import (
-    call_ai,         # Send prompts to the AI model
-    pad,             # Save work to the scratchpad
-    LANGUAGES,       # The 9-language config (for APA language notes)
-    BANNED_PHRASES,  # LLM-speak phrases to strip (for voice cleaning)
+    call_ai,               # Send prompts to the AI model
+    pad,                   # Save work to the scratchpad
+    build_evidence_cards,  # 1-2 sentence English summary per source
+    NO_EVIDENCE,           # Card text for sources with nothing usable
+    LANGUAGES,             # The 9-language config (for APA language notes)
+    BANNED_PHRASES,        # LLM-speak phrases to strip (for voice cleaning)
 )
 
 
@@ -42,15 +44,21 @@ from core import (
 # HOW MUCH EVIDENCE THE AI SEES -- characters per prompt
 # ════════════════════════════════════════════════════════════════════════
 #
-# These used to be 8000 / 6000 characters with 5 sources per tier, so a
+# The old version showed the AI the first 6000 characters of evidence, so a
 # 2,500-word brief built from a 121-source corpus cited just 2 sources.
-# Current models read far more (the default reads ~1M tokens); a full
-# synthesize run at these sizes costs about a cent. Lower them if you pick
-# a model with a small context window.
+# Now every source is read (as an evidence card), and each section gets the
+# full text of the sources assigned to it. Current models read far more than
+# this (the default reads ~1M tokens); a full synthesize run costs a few
+# cents. Lower these if you pick a model with a small context window.
 
-THESIS_CONTEXT_CHARS = 30000   # Findings + sources shown to the thesis step
-EVIDENCE_CHARS = 40000         # Tagged sources shown when writing each section
-SOURCES_PER_TIER = 15          # Max sources per quality tier in the evidence
+THESIS_CONTEXT_CHARS = 80000   # Findings + ALL evidence cards for the thesis step
+CARDS_CHARS = 60000            # Evidence cards shown when writing each section
+SOURCE_CHARS = 2500            # Full text per source assigned to a section
+MAX_SOURCES_PER_SECTION = 12   # Sources the evidence map assigns per section
+MAX_SECTIONS_PER_SOURCE = 3    # A source is ASSIGNED to at most this many sections
+                               # (any section can still cite it from the cards)
+EVIDENCE_CHARS = 40000         # Fallback evidence block (if cards fail)
+SOURCES_PER_TIER = 15          # Max sources per quality tier in that fallback
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -87,11 +95,30 @@ def run_synthesize(args):
     # len(context) = number of characters (letters) in the text
     print(f"   Loaded {len(context)} chars of evidence from scratchpad/")
 
-    # ── Build the evidence block ────────────────────────────────────
-    # This creates a formatted text block containing all our sources,
-    # tagged with numbers [1], [2], etc. so the AI can cite them.
-    # Built here so the thesis step can cite real sources too.
-    evidence = _build_evidence_block(args.corpus)
+    # ── Read EVERY source: one evidence card each ───────────────────
+    # A card is a 1-2 sentence English summary of a source's findings,
+    # tagged [n] (see core.build_evidence_cards). ~150 cards fit in one
+    # prompt, so the AI can see the whole corpus -- including the
+    # Japanese, Korean, Chinese... sources -- not just the first few.
+    # Cards are cached: if analyze already built them, this is free.
+    corpus = _load_corpus(args.corpus)
+    by_idx = {s["idx"]: s for s in corpus}
+    cards = build_evidence_cards(corpus, api_key, model, args.corpus) if corpus else {}
+    usable = {i: c for i, c in cards.items() if not c.startswith(NO_EVIDENCE)}
+
+    if usable:
+        evidence = "\n".join(
+            f"[{i}][{by_idx[i].get('lang', '?')}][{by_idx[i].get('quality', '?')}] {c}"
+            for i, c in sorted(usable.items()) if i in by_idx)
+        print(f"   Read all {len(corpus)} sources -> {len(usable)} evidence cards "
+              f"({len(cards) - len(usable)} had no usable evidence)")
+    else:
+        # No cards (AI calls failed)? Fall back to source snippets
+        evidence = _build_evidence_block(args.corpus)[:EVIDENCE_CHARS]
+        print("   Evidence cards unavailable -- using source snippets instead")
+
+    pad("synthesis_00_evidence_cards",
+        f"# Evidence cards (one per source, cite as [n])\n\n{evidence}")
 
     # ════════════════════════════════════════════════════════════════
     # 1.b.i: THESIS GENERATION
@@ -117,7 +144,8 @@ def run_synthesize(args):
     # f"""...""" is a multi-line f-string (formatted string).
     # The prompt gets the findings (context) plus the tagged sources,
     # truncated to THESIS_CONTEXT_CHARS (AI models have a maximum input length).
-    thesis_evidence = (context + "\n" + evidence)[:THESIS_CONTEXT_CHARS]
+    thesis_evidence = (context + "\n\nEVIDENCE CARDS (one per source, cite as [n]):\n"
+                       + evidence)[:THESIS_CONTEXT_CHARS]
     thesis_prompt = f"""You are a research advisor helping business students write a capstone paper.
 
 You have access to ALL the evidence they collected -- raw sources, sentiment
@@ -278,6 +306,23 @@ Output a numbered outline with section titles and one-line argument summaries.""
         ]
 
 
+    # ── Assign sources to sections (the "evidence map") ─────────────
+    # Without this, every section got the same pile of evidence and a
+    # cheap model leaned on the same 2-3 strong sources throughout. Now one
+    # AI call reads all the cards and gives each section its OWN sources,
+    # spreading the corpus across the paper. Each section is then written
+    # from the full text of its assigned sources.
+    print(f"\n{'─'*50}\nEVIDENCE MAP (sources per section)\n{'─'*50}")
+    assignment = _assign_sources(section_titles, outline, evidence,
+                                 set(usable), api_key, model) if usable else {}
+    pad("synthesis_02b_evidence_map", "# Evidence map (sources per section)\n\n" + "\n".join(
+        f"- {t}: {', '.join(f'[{i}]' for i in assignment.get(k, [])) or '(none -- uses all cards)'}"
+        for k, t in enumerate(section_titles, 1)))
+    assigned_all = {i for ids in assignment.values() for i in ids}
+    if usable:
+        print(f"   {len(assigned_all)} of {len(usable)} usable sources assigned to "
+              f"{len(section_titles)} sections")
+
     # ── System prompt (rules the AI must follow) ────────────────────
     # The system prompt is like giving the AI its job description.
     # It runs before every section-writing call, setting the ground rules.
@@ -289,7 +334,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
     # the system prompt from getting too long).
     sys_prompt = (
         "You write academic research. STRICT RULES:\n"
-        "- ONLY facts from the evidence block. Tag every claim [n].\n"
+        "- ONLY facts from the sources and evidence cards given. Tag every claim [n].\n"
         "- If evidence is thin, say so. NEVER fill from memory.\n"
         "- Note source language when relevant.\n"
         "- Draw on a RANGE of sources: support each point with several\n"
@@ -304,8 +349,15 @@ Output a numbered outline with section titles and one-line argument summaries.""
     # ── Write each section ──────────────────────────────────────────
     sections = []  # Will hold (title, content) pairs
 
-    for title in section_titles:
-        print(f"    {title}")
+    for k, title in enumerate(section_titles, 1):
+        mine = assignment.get(k, [])
+        print(f"    {title}  ({len(mine)} assigned sources)")
+
+        # Full text of the sources assigned to THIS section
+        assigned_text = "\n\n".join(
+            f"[{i}][{by_idx[i].get('lang', '?')}] {by_idx[i].get('title', '')} "
+            f"({by_idx[i].get('domain', '')})\n{by_idx[i].get('content', '')[:SOURCE_CHARS]}"
+            for i in mine)
 
         # Ask the AI to write this specific section.
         # The section writer has never seen the thesis analysis, so we
@@ -316,7 +368,10 @@ Output a numbered outline with section titles and one-line argument summaries.""
             f"THESES:\n{theses[:8000]}\n\n"
             f"SECTION: {title}\n"
             f"OUTLINE:\n{outline[:6000]}\n\n"  # Include outline for context
-            f"EVIDENCE:\n{evidence[:EVIDENCE_CHARS]}\n\n"  # Sources to cite
+            + (f"ASSIGNED SOURCES -- build this section mainly on these, and use "
+               f"most of them (full text):\n{assigned_text}\n\n" if assigned_text else "")
+            + f"ALL EVIDENCE CARDS (one per source; you may cite any of these too):\n"
+            f"{evidence[:CARDS_CHARS]}\n\n"
             f"400-600 words. Tag every claim [n]. Argue, don't summarize.",
             api_key, model, temp=0.5, system=sys_prompt,
         )
@@ -408,7 +463,16 @@ Output a numbered outline with section titles and one-line argument summaries.""
     lines.append("# Research Brief\n")
     lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("**Pipeline:** explore → analyze → stats → synthesize")
-    lines.append(f"**Thesis:** #{thesis_num} (evidence-derived)\n")
+    lines.append(f"**Thesis:** #{thesis_num} (evidence-derived)")
+
+    # ── Coverage: how much of the corpus does the brief actually use? ─
+    cited = sorted({int(n) for t, c in cleaned
+                    for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", c)
+                    for n in re.split(r"\s*,\s*", grp) if int(n) in by_idx})
+    cited_langs = sorted({by_idx[i].get("lang", "?") for i in cited})
+    coverage = (f"cites {len(cited)} of {len(usable) or len(corpus)} usable sources, "
+                f"in {len(cited_langs)} languages ({', '.join(cited_langs)})")
+    lines.append(f"**Evidence coverage:** {coverage}\n")
     lines.append("---\n")
 
     # Sections
@@ -429,6 +493,7 @@ Output a numbered outline with section titles and one-line argument summaries.""
     print(f"\n{'='*60}")
     print("SYNTHESIS COMPLETE")
     print(f"   {fn}")
+    print(f"   Brief {coverage}")
     print("   Thesis was derived from evidence, not assumed.")
     print("   Run 'deepen' to find targeted support for weak areas.")
     print(f"{'='*60}")
@@ -496,6 +561,60 @@ def _load_all_evidence(corpus_dir):
 
     # Join all parts into one big string
     return "\n".join(parts)
+
+
+def _load_corpus(corpus_dir):
+    """Load corpus.json (list of sources with idx/title/content...), or []."""
+    corpus_path = os.path.join(corpus_dir, "corpus.json")
+    if not os.path.exists(corpus_path):
+        return []
+    with open(corpus_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _assign_sources(section_titles, outline, cards_text, valid_ids, api_key, model):
+    """
+    Ask the AI which sources belong in which section.
+
+    Returns {section number (1-based): [source idx, ...]}, keeping only
+    real source numbers, at most MAX_SOURCES_PER_SECTION each. Sections the
+    AI skipped (or a failed call) get no entry -- they're then written from
+    the evidence cards alone.
+    """
+    numbered = "\n".join(f"SECTION {k}: {t}" for k, t in enumerate(section_titles, 1))
+    reply = call_ai(
+        "You are planning which evidence goes into each section of a paper.\n\n"
+        f"OUTLINE (for each section's argument):\n{outline[:6000]}\n\n"
+        f"SECTIONS:\n{numbered}\n\n"
+        f"EVIDENCE CARDS (one per source, [n] = source number):\n{cards_text[:THESIS_CONTEXT_CHARS]}\n\n"
+        f"For EACH section, list the 6-{MAX_SOURCES_PER_SECTION} sources that best support, "
+        "illustrate or complicate its argument. Spread the evidence: use as many "
+        "DIFFERENT relevant sources across the paper as you can (avoid giving every "
+        "section the same few), and include non-English sources where relevant.\n"
+        "Output exactly one line per section: 'SECTION <k>: n, n, n'",
+        api_key, model, temp=0.2,
+    )
+    assignment = {}
+    for k, ids in re.findall(r"SECTION\s*(\d+)\s*[:：]\s*(.+)", reply or ""):
+        picked = []
+        for n in re.findall(r"\d+", ids):
+            if int(n) in valid_ids and int(n) not in picked:
+                picked.append(int(n))
+        if picked and 1 <= int(k) <= len(section_titles):
+            assignment[int(k)] = picked[:MAX_SOURCES_PER_SECTION]
+
+    # Spread the evidence: models tend to hand the same few strong sources
+    # to every section. Keep each source in its first MAX_SECTIONS_PER_SOURCE
+    # sections only, so later sections are built on other material.
+    uses = defaultdict(int)
+    for k in sorted(assignment):
+        kept = []
+        for i in assignment[k]:
+            if uses[i] < MAX_SECTIONS_PER_SOURCE:
+                uses[i] += 1
+                kept.append(i)
+        assignment[k] = kept
+    return {k: ids for k, ids in assignment.items() if ids}
 
 
 def _build_evidence_block(corpus_dir):

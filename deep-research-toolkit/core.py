@@ -850,3 +850,148 @@ def extract_search_queries(text, min_len=10):
             seen.add(key)
             queries.append(q)
     return queries
+
+
+# ════════════════════════════════════════════════════════════════════════
+# BATCHING -- let the AI read more text than fits in one prompt
+# ════════════════════════════════════════════════════════════════════════
+#
+# Used by ask_agent (answer from ALL research), analyze (topic clustering)
+# and synthesize (read every source before writing).
+
+def make_batches(parts, batch_chars=12000):
+    """
+    Pack labelled text parts into batches of at most batch_chars characters.
+
+    parts is a list of (label, text). Parts stay in order. A part longer than
+    one batch is split into pieces, and each piece keeps its label
+    ("── name (part 2) ──") so the AI still knows where it came from.
+    """
+    batches = []
+    current = ""
+
+    for label, text in parts:
+        room = batch_chars - len(label) - 30  # Leave space for the header
+        pieces = [text[i:i + room] for i in range(0, len(text), room)] or [""]
+
+        for k, piece in enumerate(pieces, 1):
+            name = label if len(pieces) == 1 else f"{label} (part {k})"
+            block = f"── {name} ──\n{piece}\n"
+
+            # Start a new batch if this block doesn't fit in the current one
+            if current and len(current) + len(block) > batch_chars:
+                batches.append(current)
+                current = ""
+            current += block
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
+    """
+    Send one prompt per batch, several at a time, and return the answers
+    IN BATCH ORDER. make_prompt(batch) builds each prompt. A failed call
+    gives "" (call_ai already printed why). Lower workers if rate-limited.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # Run calls in parallel
+
+    def one(batch):
+        return call_ai(make_prompt(batch), api_key, model, temp=temp)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(one, batches))  # map keeps the original order
+
+
+# ════════════════════════════════════════════════════════════════════════
+# EVIDENCE CARDS -- one short English summary per source
+# ════════════════════════════════════════════════════════════════════════
+#
+# A card is 1-2 sentences of the concrete findings, numbers and claims in a
+# source, written in English whatever the source's language, tagged with
+# the source number: "[44] Korean survey: Copilot raised PR completions 26%..."
+#
+# Why: the corpus is ~150 sources in 9 languages, ~400,000 characters.
+# Cards shrink it ~10x while keeping every source, so:
+#   - synthesize can show the AI EVERY source (not the first 10)
+#   - analyze can cluster sources by THEME (clustering raw multilingual text
+#     gives topics labelled "die / der / de")
+# Cards are cached in scratchpad/evidence_cards.json, so re-runs (e.g. after
+# deepen adds sources) only pay for new or changed sources.
+
+CARDS_FILE = "evidence_cards.json"
+NO_EVIDENCE = "NO EVIDENCE"  # Card text for pages with nothing usable
+
+
+def _content_key(item):
+    """Fingerprint of a source's text, to notice when it changed."""
+    import hashlib
+    return hashlib.sha1(item.get("content", "").encode("utf-8")).hexdigest()[:12]
+
+
+def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
+    """
+    Return {idx: card text} for every source in corpus (a list of dicts with
+    idx/title/domain/lang/content), reading sources ~8 at a time in parallel.
+    Uses and updates the cache in corpus_dir/evidence_cards.json.
+    """
+    cache_path = os.path.join(corpus_dir, CARDS_FILE)
+    cache = {}
+    if os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            cache = json.load(f)
+
+    # Sources with no card yet, or whose text changed since the card was made
+    todo = [s for s in corpus
+            if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
+
+    # Two passes: the second retries sources the AI skipped the first time
+    for attempt in range(2):
+        if not todo:
+            break
+        if attempt == 0:
+            print(f"   Writing evidence cards for {len(todo)} sources...")
+        parts = [(f"[{s['idx']}] ({s.get('lang', '?')}) {s.get('title', '')} -- {s.get('domain', '')}",
+                  s.get("content", "")[:3000]) for s in todo]
+        answers = ai_map(
+            make_batches(parts, batch_chars=24000),
+            lambda batch: (
+                "Below are research sources about AI coding assistants, each "
+                "starting with its number like [12].\n"
+                "For EACH source write ONE line: its number, then 1-2 sentences "
+                "IN ENGLISH with its concrete findings, numbers, claims and who "
+                "says them (translate non-English sources). Example:\n"
+                "[12] Stack Overflow survey of 65,000 developers: 76% use or plan "
+                "to use AI tools, but only 43% trust their accuracy.\n"
+                f"If a source has nothing usable (navigation, ads, error page), "
+                f"write: [12] {NO_EVIDENCE}\n"
+                "One line per source, nothing else.\n\n" + batch),
+            api_key, model,
+        )
+        wanted = {s["idx"]: s for s in todo}
+        for line in "\n".join(answers).splitlines():
+            m = re.match(r"^\s*\**\[(\d+)\]\**\s*[:.\-]?\s*(.+)$", line)
+            if m and int(m.group(1)) in wanted:
+                s = wanted[int(m.group(1))]
+                cache[str(s["idx"])] = {"key": _content_key(s), "card": m.group(2).strip()}
+        todo = [s for s in todo if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
+
+    if todo:
+        print(f"   {len(todo)} sources still have no card (AI calls failed or skipped them)")
+
+    Path(corpus_dir).mkdir(exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+    return {s["idx"]: cache[str(s["idx"])]["card"]
+            for s in corpus if str(s["idx"]) in cache}
+
+
+def load_evidence_cards(corpus_dir=SCRATCHPAD):
+    """Return the cached cards as {idx: card text} ({} if none were built)."""
+    cache_path = os.path.join(corpus_dir, CARDS_FILE)
+    if not os.path.exists(cache_path):
+        return {}
+    with open(cache_path, encoding="utf-8") as f:
+        return {int(k): v["card"] for k, v in json.load(f).items()}

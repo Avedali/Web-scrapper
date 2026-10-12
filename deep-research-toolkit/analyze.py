@@ -36,10 +36,16 @@ All results are saved to scratchpad/ for stats mode and viz mode.
 
 import json  # Read/write structured data
 import os    # File/folder operations
+import re    # Pattern matching (reading the AI's theme names)
 
 from collections import defaultdict  # Auto-initializing dictionary (for counting entities)
 
-from core import pad  # Scratchpad saving
+from core import (
+    pad,                   # Scratchpad saving
+    call_ai,               # AI calls (naming themes)
+    build_evidence_cards,  # 1-2 sentence English summary per source
+    NO_EVIDENCE,           # Card text for sources with nothing usable
+)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -493,106 +499,135 @@ def run_analyze(args):
         print(f"   NER unavailable ({type(e).__name__}: {str(e)[:150]})")
 
     # ════════════════════════════════════════════════════════════════
-    # ANALYSIS 4: TOPIC MODELING (BERTopic)
+    # ANALYSIS 4: THEMES (BERTopic on evidence cards)
     # ════════════════════════════════════════════════════════════════
     #
     # Topic modeling discovers themes in a collection of texts WITHOUT
-    # you telling it what to look for. It reads all 80 documents and
-    # says "I found 5 clusters -- here's what each one is about."
+    # you telling it what to look for: "I found 8 clusters -- here's what
+    # each one is about."
     #
-    # BERTopic is the modern approach. It uses transformer embeddings
-    # (converting each document into a list of numbers that represent
-    # its meaning) and then clusters those number-lists to find groups
-    # of documents that are about similar things.
+    # BERTopic turns each text into embeddings (lists of numbers that
+    # represent its meaning) and clusters similar ones together.
     #
-    # KEY ADVANTAGE: language="multilingual" means it understands
-    # Japanese, French, German, etc. natively. A Japanese source about
-    # "engineer shortage" and an English source about "developer hiring
-    # crisis" end up in the same topic because the MEANING is similar,
-    # even though the WORDS are completely different.
+    # WHY CLUSTER EVIDENCE CARDS, NOT THE RAW PAGES?
+    # On raw pages in 9 languages, topics came out labelled with words like
+    # "die / der / de" (German, French and Spanish filler words), and the
+    # page boilerplate (menus, "h2", cookie text) diluted the meaning.
+    # Evidence cards (core.build_evidence_cards) are 1-2 sentence ENGLISH
+    # summaries of each source's findings -- so clustering them groups
+    # sources by what they SAY, whatever language they're in. An AI call
+    # then names each theme in plain English.
+    #
+    # We use k-means (a fixed number of themes) rather than BERTopic's
+    # default HDBSCAN: the cards are all about AI coding tools, so HDBSCAN
+    # lumped ~90% of them into one topic, or left ~45% as "outliers".
+    #
+    # Needs an API key (to write the cards). Without one, we cluster the raw
+    # pages instead and label topics with meaning-based keywords.
     #
     # FALLBACK: If BERTopic isn't installed, we use LDA (Latent Dirichlet
     # Allocation), an older method that works on word counts. LDA is
     # English-only and needs more documents to work well.
 
-    print(f"\n{'─'*40}\nBERTOPIC (neural topic modeling)\n{'─'*40}")
+    print(f"\n{'─'*40}\nTHEMES (BERTopic)\n{'─'*40}")
 
     try:
         from bertopic import BERTopic
+        from bertopic.representation import KeyBERTInspired  # Meaning-based keywords
+        from sklearn.cluster import KMeans
+        from sklearn.feature_extraction.text import CountVectorizer
 
-        # Convert the content column to a plain Python list
-        # (BERTopic expects a list of strings, not a pandas Series)
-        docs = df["content"].tolist()
+        api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
+        model = getattr(args, "model", None) or "google/gemini-2.5-flash-lite"
 
-        # BERTopic needs at least 10 documents to find meaningful topics
+        # ── What to cluster: evidence cards if we can, raw pages if not ─
+        cards = {}
+        if api_key:
+            cards = build_evidence_cards(corpus, api_key, model, args.corpus)
+        else:
+            print("   No API key -- clustering raw pages (set a key for English theme names)")
+
+        if cards:
+            # Sources with nothing usable don't get a theme
+            keep = [i for i, idx in enumerate(df["idx"])
+                    if idx in cards and not cards[idx].startswith(NO_EVIDENCE)]
+            docs = [cards[df["idx"].iloc[i]] for i in keep]
+        else:
+            keep = list(range(len(df)))
+            docs = df["content"].tolist()
+
         if len(docs) >= 10:
+            # About one theme per 12 sources, between 5 and 10 themes
+            n_themes = max(5, min(10, len(docs) // 12))
 
-            # Create and run the BERTopic model.
-            # language="multilingual": use a model that understands many languages
-            # min_topic_size=3: a topic must have at least 3 documents
-            # nr_topics="auto": let BERTopic decide how many topics there are
-            # verbose=False: don't print progress messages
             topic_model = BERTopic(
-                language="multilingual",
-                min_topic_size=3,
-                nr_topics="auto",
+                embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                hdbscan_model=KMeans(n_clusters=n_themes, random_state=42, n_init=10),
+                # Keywords: skip English filler, allow 2-word phrases, and
+                # pick words by meaning (KeyBERTInspired) rather than raw counts
+                vectorizer_model=CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=2),
+                representation_model=KeyBERTInspired(),
                 verbose=False,
             )
 
             # fit_transform does two things:
-            #   fit = learn the topics from the documents
-            #   transform = assign each document to a topic
-            # topics = a list of topic numbers (one per document, -1 = outlier)
-            # probs = confidence scores (how sure the model is about each assignment)
-            topics, probs = topic_model.fit_transform(docs)
+            #   fit = learn the themes from the texts
+            #   transform = assign each text to a theme
+            topics, _ = topic_model.fit_transform(docs)
 
-            # Add the topic assignment to our DataFrame
-            df["bertopic"] = topics
+            # ── Name each theme in English (one AI call) ────────────
+            names = {}
+            if cards:
+                by_topic = {}
+                for t, d in zip(topics, docs, strict=True):
+                    by_topic.setdefault(t, []).append(d)
+                listing = "\n\n".join(
+                    f"THEME {t}:\n" + "\n".join(f"- {d[:200]}" for d in ds[:6])
+                    for t, ds in sorted(by_topic.items()))
+                reply = call_ai(
+                    "Each THEME below is a cluster of research summaries. Give each "
+                    "a short, specific English name (3-7 words) for what its sources "
+                    "have in common. One line per theme: 'THEME <n>: <name>'.\n\n" + listing,
+                    api_key, model, temp=0.2)
+                names = {int(n): name.strip(" *") for n, name in
+                         re.findall(r"THEME\s*(\d+)\s*[:：]\s*(.+)", reply)}
+            # No AI names? Fall back to the theme's top keywords
+            for t in set(topics):
+                if t not in names:
+                    names[t] = ", ".join(w for w, _ in topic_model.get_topic(t)[:4])
+            topic_model.set_topic_labels(names)
 
-            # Get a summary table of all discovered topics
-            topic_info = topic_model.get_topic_info()
+            # ── Store the theme of each source (-1 = no theme) ──────
+            theme_ids = [-1] * len(df)
+            for i, t in zip(keep, topics, strict=True):
+                theme_ids[i] = int(t)
+            df["bertopic"] = theme_ids
+            df["theme"] = [names.get(t, "no usable evidence") for t in theme_ids]
 
-            # Topic -1 is the "outlier" bin (documents that don't fit any topic)
-            # so we subtract 1 from the total count
-            print(f"   Found {len(topic_info) - 1} topics (excluding outliers)")
-
-            # Show the top 8 topics
-            # .head(8) takes the first 8 rows of the table
-            for _, row in topic_info.head(8).iterrows():
-                if row["Topic"] != -1:  # Skip the outlier topic
-                    # row["Name"] is auto-generated from the topic's top words
-                    # row["Count"] is how many documents are in this topic
-                    print(f"      Topic {row['Topic']}: {row['Name'][:60]} (n={row['Count']})")
+            print(f"   {n_themes} themes from {len(docs)} "
+                  f"{'evidence cards' if cards else 'pages'}:")
+            for t, count in df.loc[df["bertopic"] != -1, "bertopic"].value_counts().items():
+                langs = df.loc[df["bertopic"] == t, "lang"].value_counts()
+                lang_mix = ", ".join(f"{lang} {n}" for lang, n in langs.head(4).items())
+                print(f"      {names[t][:45]:45s} n={count:3d}  ({lang_mix})")
 
             # ── Save BERTopic's built-in visualizations ─────────────
             # BERTopic generates its own interactive plotly charts.
             # We save them as HTML files you can open in a browser.
+            # custom_labels=True shows the English theme names.
             charts_dir = os.path.join(args.corpus, "charts")
             os.makedirs(charts_dir, exist_ok=True)
-
-            # Bar chart: top words for each topic
-            try:
-                fig = topic_model.visualize_barchart(top_n_topics=8)
-                fig.write_html(os.path.join(charts_dir, "bertopic_barchart.html"))
-                print(f"   {charts_dir}/bertopic_barchart.html")
-            except Exception:
-                pass
-
-            # Topic map: a 2D plot where similar topics are close together
-            try:
-                fig = topic_model.visualize_topics()
-                fig.write_html(os.path.join(charts_dir, "bertopic_map.html"))
-                print(f"   {charts_dir}/bertopic_map.html")
-            except Exception:
-                pass
-
-            # Heatmap: how similar each pair of topics is to each other
-            try:
-                fig = topic_model.visualize_heatmap()
-                fig.write_html(os.path.join(charts_dir, "bertopic_heatmap.html"))
-                print(f"   {charts_dir}/bertopic_heatmap.html")
-            except Exception:
-                pass
+            for chart, make in [
+                ("bertopic_barchart", lambda: topic_model.visualize_barchart(
+                    top_n_topics=10, custom_labels=True)),
+                ("bertopic_map", lambda: topic_model.visualize_topics(custom_labels=True)),
+                ("bertopic_heatmap", lambda: topic_model.visualize_heatmap(custom_labels=True)),
+            ]:
+                try:
+                    make().write_html(os.path.join(charts_dir, f"{chart}.html"))
+                    print(f"   {charts_dir}/{chart}.html")
+                except Exception:
+                    pass  # e.g. the 2D map needs more themes than we have
 
         else:
             print(f"   Need 10+ documents for BERTopic (have {len(docs)})")
@@ -715,6 +750,10 @@ def run_analyze(args):
     # Add zero-shot topic counts if we ran that analysis
     if "topic_zs" in df.columns:
         results["zero_shot_topics"] = df["topic_zs"].value_counts().to_dict()
+
+    # Add the BERTopic themes (with their English names) if we found any
+    if "theme" in df.columns:
+        results["themes"] = df.loc[df["bertopic"] != -1, "theme"].value_counts().to_dict()
 
     with open(os.path.join(args.corpus, "analysis_results.json"), "w") as f:
         # default=str tells json.dump to convert any weird types to strings

@@ -47,6 +47,7 @@ import time      # Measure how long each AI call takes
 import re        # Extract HTML from AI responses (strip markdown fences)
 
 from datetime import datetime  # Timestamp the results
+from pathlib import Path       # Turn file paths into file:// URLs for the browser
 
 from core import call_ai, pad, SCRATCHPAD  # AI calls + scratchpad
 
@@ -298,6 +299,228 @@ def _signal_is_genuine(signal, text):
 
 
 # ════════════════════════════════════════════════════════════════════════
+# BROWSER CHECK -- does each generated page actually WORK?
+# ════════════════════════════════════════════════════════════════════════
+#
+# The old "valid" count only checked that the file contained <html> and
+# <script>. In a real browser, 2 of 27 "valid" pages crashed with JavaScript
+# errors and a senior-level Kanban board showed no tasks at all.
+#
+# Now each page is opened in a headless (invisible) browser:
+#   - any JavaScript error fails the page
+#   - search page: products with prices must be visible
+#   - Kanban board: tasks must be visible, OR adding a task through the
+#     page's own form must work (simple prompts may start empty)
+#   - data explorer: a table must be visible, OR pasting a small CSV into
+#     the page and pressing its button must produce a table
+# A screenshot of each page is saved next to it (handy for slides).
+#
+# Needs Playwright plus a browser: its own Chromium ("python -m playwright
+# install chromium", done by install.py), or Google Chrome / Microsoft Edge
+# if installed, or the browser at the path in the BROWSER_PATH variable.
+# Without any of these, pages are simply marked "not checked".
+
+PROBE_JS = r"""() => {
+  const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const text = document.body ? document.body.innerText : '';
+  const sel = '[draggable="true"], [class*="card" i], [class*="task" i], [class*="item" i], [class*="product" i]';
+  // "leaf" items = matching elements with no matching element inside them
+  // (task cards, not the columns that hold them), and some text in them
+  const leaves = [...document.querySelectorAll(sel)].filter(visible)
+    .filter(el => !el.querySelector(sel) && el.innerText.trim().length > 0);
+  return {
+    prices: (text.match(/[$€£¥]\s?\d|\d[\d.,]*\s?(€|USD|EUR)/g) || []).length,
+    items: Math.max(leaves.length,
+                    [...document.querySelectorAll('[draggable="true"]')].filter(visible).length),
+    // table rows with data cells (JS-built tables often have no <tbody>)
+    rows: Math.max(
+      [...document.querySelectorAll('tr')].filter(r => visible(r) && r.querySelector('td')).length,
+      [...document.querySelectorAll('[role="row"]')].filter(visible).length),
+    // all visible list items + items (to see what a search ADDED)
+    listed: [...document.querySelectorAll('li')].filter(visible).length + leaves.length,
+    // text boxes that already hold text (some boards show tasks this way)
+    filled: [...document.querySelectorAll('input, textarea')].filter(el => visible(el)
+      && !['checkbox', 'radio', 'button', 'submit', 'hidden'].includes(el.type)
+      && el.value.trim().length > 0).length,
+  };
+}"""
+
+SAMPLE_CSV = "name,department,salary\nAlice,Sales,52000\nBob,IT,61000\nChen,HR,48000\nDara,IT,70500"
+SAMPLE_JSON = ('[{"name": "Alice", "salary": 52000}, {"name": "Bob", "salary": 61000}, '
+               '{"name": "Chen", "salary": 48000}, {"name": "Dara", "salary": 70500}]')
+PROBE_TASK = "Probe task 4321"
+
+
+def _open_browser(playwright):
+    """Return a headless browser, trying each option in turn, or None."""
+    attempts = []
+    if os.environ.get("BROWSER_PATH"):
+        attempts.append({"executable_path": os.environ["BROWSER_PATH"]})
+    attempts += [{}, {"channel": "chrome"}, {"channel": "msedge"}]
+    for options in attempts:
+        try:
+            return playwright.chromium.launch(**options)
+        except Exception:
+            continue
+    return None
+
+
+def _try_add_task(page):
+    """Add a task through the page's own form; True if it then shows up."""
+    try:
+        # Many boards hide the form behind an "Add task" / "+" button
+        add = page.locator("button:visible").filter(has_text=re.compile(r"add|new|\+", re.I))
+        if add.count():
+            add.first.click()
+            page.wait_for_timeout(300)
+        box = page.locator("input[type=text]:visible, input:not([type]):visible, textarea:visible")
+        if not box.count():
+            return False
+        box.first.fill(PROBE_TASK)
+        save = page.locator("button:visible").filter(
+            has_text=re.compile(r"add|save|create|submit|ok|done", re.I))
+        if save.count():
+            save.last.click()     # the last one is usually the form's own button
+        else:
+            box.first.press("Enter")
+        page.wait_for_timeout(500)
+        return PROBE_TASK in page.inner_text("body")
+    except Exception:
+        return False
+
+
+def _try_search(page):
+    """
+    Search for something and return (what's shown, results that appeared).
+    Tries an empty search first (many pages then list everything), then
+    common letters -- a page whose products are "Product 1..4" finds
+    nothing for "a" but everything for "".
+    """
+    try:
+        before = page.evaluate(PROBE_JS)
+        box = page.locator("input[type=search]:visible, input[type=text]:visible, input:not([type]):visible")
+        if not box.count():
+            return before, 0
+        go = page.locator("button:visible").filter(has_text=re.compile(r"search|go|find", re.I))
+        found = before
+        for term in ("", "a", "o"):
+            box.first.fill(term)
+            box.first.press("Enter")
+            if go.count():
+                go.first.click()
+            page.wait_for_timeout(600)   # debounced search boxes wait ~300ms
+            found = page.evaluate(PROBE_JS)
+            gained = found["listed"] - before["listed"]
+            if found["prices"] >= 3 or found["items"] >= 3 or gained >= 3:
+                return found, gained
+        return found, found["listed"] - before["listed"]
+    except Exception:
+        return {"prices": 0, "items": 0, "listed": 0}, 0
+
+
+def _try_paste_data(page):
+    """Paste a small CSV (then JSON) into the page and press its button."""
+    for sample in (SAMPLE_CSV, SAMPLE_JSON):   # "a tool for looking at data" may want JSON
+        rows = _try_paste_csv(page, sample)
+        if rows:
+            return rows
+    return 0
+
+
+def _try_paste_csv(page, sample=SAMPLE_CSV):
+    """Paste sample data into the page and press its button; rows shown."""
+    try:
+        area = page.locator("textarea:visible")
+        if not area.count():
+            return 0
+        area.first.fill(sample)
+        area.first.dispatch_event("input")
+        go = page.locator("button:visible").filter(has_text=re.compile(
+            r"load|parse|render|show|display|submit|go|analy|view|table|process|explore|import|generate|update",
+            re.I))
+        if go.count():
+            go.first.click()
+        page.wait_for_timeout(500)
+        return page.evaluate(PROBE_JS)["rows"]
+    except Exception:
+        return 0
+
+
+def check_pages_in_browser(results, out_dir):
+    """
+    Open every generated page and add to each result:
+      works      True / False (None = couldn't check: no browser)
+      js_error   first JavaScript error message, or ""
+      check      what was checked, in words ("22 prices shown", ...)
+      screenshot the PNG saved next to the page
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("   Browser check skipped -- pip install playwright")
+        for r in results:
+            r.update(works=None, js_error="", check="not checked (no Playwright)")
+        return
+
+    with sync_playwright() as p:
+        browser = _open_browser(p)
+        if browser is None:
+            print("   Browser check skipped -- no browser found. Run: "
+                  "python -m playwright install chromium")
+            for r in results:
+                r.update(works=None, js_error="", check="not checked (no browser)")
+            return
+
+        for r in results:
+            page = browser.new_page(viewport={"width": 1200, "height": 800})
+            page.set_default_timeout(2000)
+            errors = []
+            page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+            page.on("dialog", lambda d: d.accept())   # confirm()/alert() popups
+
+            path = os.path.join(out_dir, r["file"])
+            shot = r["file"].replace(".html", ".png")
+            try:
+                page.goto(Path(path).resolve().as_uri())
+                page.wait_for_timeout(700)            # let scripts build the page
+                page.screenshot(path=os.path.join(out_dir, shot))
+                found = page.evaluate(PROBE_JS)
+
+                if r["task"] == "search":
+                    how, gained = "shown", 0
+                    if found["prices"] < 3 and found["items"] < 3:
+                        (found, gained), how = _try_search(page), "shown after searching"
+                    products = max(found["items"], gained)
+                    if found["prices"] >= 3:
+                        ok, check = True, f"{found['prices']} prices {how}"
+                    else:
+                        ok = products >= 3
+                        check = (f"{products} products {how} (no prices)" if ok
+                                 else "no products shown, even after searching")
+                elif r["task"] == "kanban":
+                    tasks = max(found["items"], found["filled"])
+                    if tasks >= 3:
+                        ok, check = True, f"{tasks} tasks shown"
+                    else:
+                        ok = _try_add_task(page)
+                        check = f"{tasks} tasks shown; adding a task " + (
+                            "worked" if ok else "failed")
+                else:  # explorer
+                    rows = found["rows"] or _try_paste_data(page)
+                    ok = rows >= 3
+                    check = (f"{found['rows']} table rows shown" if found["rows"]
+                             else f"empty; pasting sample data gave {rows} rows")
+            except Exception as e:
+                ok, check, shot = False, f"page failed to load ({type(e).__name__})", ""
+
+            r.update(works=ok and not errors, js_error=errors[0][:120] if errors else "",
+                     check=check, screenshot=shot)
+            page.close()
+        browser.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
 # MAIN FUNCTION
 # ════════════════════════════════════════════════════════════════════════
 
@@ -493,6 +716,14 @@ def run_simulate(args):
                 feat_str = f" [{', '.join(features)}]" if features else ""
                 print(f"{status} {lines:4d} lines, {elapsed:.1f}s{feat_str} → {fname}")
 
+    # ── Open every page in a real browser: does it actually work? ──
+    print(f"\n{'─'*50}\nBROWSER CHECK (do the pages actually work?)\n{'─'*50}")
+    check_pages_in_browser(results, out_dir)
+    for r in results:
+        verdict = {True: "WORKS ", False: "BROKEN", None: "  ?   "}[r["works"]]
+        err = f" -- JS error: {r['js_error'][:60]}" if r["js_error"] else ""
+        print(f"   {verdict} {r['file'][:-5]:50s} {r['check']}{err}")
+
     # ════════════════════════════════════════════════════════════════
     # EXPERIMENT 2: GUARDRAIL TASKS
     # ════════════════════════════════════════════════════════════════
@@ -585,17 +816,40 @@ def run_simulate(args):
         for level in ["layman", "junior", "senior"]:
             tr = [r for r in results if r["task"] == task["id"] and r["level"] == level]
             avg_lines = sum(r["lines"] for r in tr) / max(len(tr), 1)
-            valid = sum(1 for r in tr if r["has_html"] and r["has_script"])
+            # "works" = opened in a browser without JS errors and showed
+            # (or could create) real content -- see check_pages_in_browser
+            checked = [r for r in tr if r.get("works") is not None]
+            works = sum(1 for r in checked if r["works"])
             responsive = sum(1 for r in tr if r.get("has_responsive"))
             errors = sum(1 for r in tr if r.get("has_error_handling"))
+            works_text = (f"{works}/{len(checked)} work in a browser, " if checked
+                          else "browser check not run, ")
 
             report += (
                 f"- **{level}**: avg {avg_lines:.0f} lines, "
-                f"{valid}/{len(tr)} valid, "
+                f"{works_text}"
                 f"{responsive}/{len(tr)} responsive, "
                 f"{errors}/{len(tr)} with error handling\n"
             )
         report += "\n"
+
+    # ── Pages that don't work, and why ──────────────────────────────
+    broken = [r for r in results if r.get("works") is False]
+    if broken:
+        report += "## Pages that don't work in a browser\n\n"
+        for r in broken:
+            why = f"JavaScript error: {r['js_error']}" if r["js_error"] else r["check"]
+            report += f"- `{r['file']}` -- {why}\n"
+        report += "\n"
+
+    # ── What the browser saw on every page (with screenshots) ───────
+    if any(r.get("works") is not None for r in results):
+        report += "## Browser check (every page)\n\n| Page | Works | What the browser saw |\n|---|---|---|\n"
+        for r in results:
+            mark = {True: "yes", False: "**NO**", None: "?"}[r.get("works")]
+            seen = r["check"] + (f"; JS error: {r['js_error']}" if r.get("js_error") else "")
+            report += f"| `{r['file']}` | {mark} | {seen} |\n"
+        report += "\nA screenshot of each page is saved next to it (same name, `.png`).\n\n"
 
     # ── Feature comparison across levels ────────────────────────────
     report += "## Feature Gap: Layman vs Senior\n\n"
