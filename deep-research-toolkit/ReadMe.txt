@@ -43,7 +43,7 @@ Scratchpad: All intermediate work (definitions, queries, claim ledger, fact-chec
 
 Simulation Pages: The HTML pages each model built, to open in a browser
 
-Quick Start:
+Quick Start (step by step: START_HERE.txt):
 
 1. Install Thonny (thonny.org), which comes with Python
 2. Open install.py, click Run, paste the OpenRouter API key when asked
@@ -55,6 +55,7 @@ Recommended order: explore → analyze → stats → synthesize → deepen → a
 
 Files:
 
+START_HERE.txt: Step-by-step setup and first run on a Mac
 install.py: Installs everything (run once)
 launcher.py: Menu (run every time)
 agent.py: Command line entry point (python3 agent.py explore, ...)

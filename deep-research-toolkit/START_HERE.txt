@@ -1,0 +1,74 @@
+START HERE (Mac)
+
+Takes 15 minutes to set up, then about 2.5 hours of running on its own.
+
+
+1. Get an OpenRouter key (the toolkit's only key)
+
+Go to https://openrouter.ai and sign up
+Add credit: https://openrouter.ai/settings/credits, add $5 (a full run costs about $0.40)
+Make a key: https://openrouter.ai/settings/keys, click Create Key, give it any name
+Copy the key (it starts with sk-or-v1-). It is shown only once: paste it into Notes for now
+
+
+2. Check Python
+
+Open Terminal: press cmd+space, type Terminal, press Enter
+Type this and press Enter:
+
+python3 --version
+
+If it says Python 3.10 or higher: go to step 3
+If it says 3.9, "command not found", or a window offers to install tools: get Python from
+https://www.python.org/downloads (big yellow button, open the downloaded file, click through),
+then close Terminal and open it again
+
+
+3. Download and unzip
+
+Download deep-research-toolkit.zip
+Double-click it in your Downloads folder (Safari may have unzipped it already)
+You now have a folder called deep-research-toolkit in Downloads
+
+
+4. Install (once)
+
+In Terminal, type these two lines, pressing Enter after each:
+
+cd ~/Downloads/deep-research-toolkit
+python3 install.py
+
+(If the folder is somewhere else: type cd and a space, drag the folder onto the Terminal window, press Enter)
+
+It asks three things:
+Install full NLP? (y/n): type y and press Enter (n only on slow WiFi)
+Paste your key here: press cmd+V, then Enter
+Camoufox ... Install? (y/n): type y and press Enter
+Wait 2-5 minutes until it says Press Enter to close, then press Enter
+
+
+5. Run
+
+python3 launcher.py
+
+Type R and press Enter, then y and Enter
+Walk away: about 2.5 hours. Keep the Mac plugged in and the lid open
+
+
+6. Results (in the deep-research-toolkit folder)
+
+brief_<date>_<time>.md: the research brief (open with any text editor, or drag into a Markdown viewer)
+scratchpad/charts_slide/: charts for slides
+scratchpad/charts_paper/: charts for the paper
+scratchpad/: everything else, including the run log
+
+
+Next time: open Terminal and type only
+
+cd ~/Downloads/deep-research-toolkit
+python3 launcher.py
+
+
+Before sharing the folder: run python3 launcher.py, type 9, then y (deletes your key from the folder)
+
+Something went wrong? The last lines in Terminal say what; send a screenshot of them
