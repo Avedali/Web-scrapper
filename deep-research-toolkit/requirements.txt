@@ -46,6 +46,7 @@ matplotlib
 seaborn
 plotly                       # Interactive charts for presentations
 kaleido                      # Plotly static image export (for PNG slides)
+wordcloud                    # Word cloud of the brief's findings
 
 # --- Code quality analysis (Mode 5: Simulate) ---
 bandit                       # AST-based security vulnerability scanner
