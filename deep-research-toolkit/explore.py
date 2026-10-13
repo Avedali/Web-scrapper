@@ -50,9 +50,9 @@ RESULTS_PER_QUERY = 5      # Search results read per query
 GAP_QUERIES = 12           # Fix-up searches suggested by red team + bias check
 
 
+# No product names: they would steer every search toward those products
 DEFAULT_TOPIC = (
-    "How AI-powered coding assistants (GitHub Copilot, Cursor, ChatGPT, "
-    "Claude Code, Windsurf) are transforming the software development "
+    "How AI-powered coding assistants are transforming the software development "
     "industry: productivity, workforce, business models, and risks"
 )
 
@@ -73,6 +73,7 @@ MAX_TERMS = 12             # Terms looked up
 
 
 # Sales lines at the end of a dictionary snippet
+_SNIPPET_DATE = re.compile(r"^(\w{3} \d{1,2}, \d{4}|\d+ (days?|hours?|weeks?|months?) ago)\s*(·|\.\.\.|…)\s*")
 _SITE_TAIL = re.compile(r"(\s*(Learn more|See examples of .*? used in a sentence|How to use .*? in a "
                         r"sentence|See more|Read more)\.?(\.\.\.)?)+\s*$", re.I)
 
@@ -90,14 +91,17 @@ def define_terms(topic, api_key, model):
         "List the key terms of this research topic: the words and phrases a reader must "
         "understand to research it. Write each as it would appear as a dictionary or "
         "encyclopedia entry (e.g. 'machine learning', not 'ML-driven'). For a phrase that is "
-        "not a common entry, also list its parts that are. One term per line. Do not define "
-        f"them.\n\nTOPIC: {topic}",
+        "not a common entry, also list its parts that are. One term per line, as: term | what "
+        "kind of thing it is in this topic, in 1-3 words (e.g. 'Cursor | code editor'). Do "
+        f"not define them.\n\nTOPIC: {topic}",
         api_key, model, temp=0)
-    terms = []
+    terms, kinds = [], {}
     for line in (reply or "").splitlines():
-        t = re.sub(r"^[\s\-*•\d.)]+", "", line).strip().strip('"*').strip()
+        t, _, kind = re.sub(r"^[\s\-*•\d.)]+", "", line).partition("|")
+        t = t.strip().strip('"*').strip()
         if 2 <= len(t) <= 60 and t.lower() not in {x.lower() for x in terms}:
             terms.append(t)
+            kinds[t] = kind.strip().strip('"*').strip()[:30]
     terms = terms[:MAX_TERMS]
 
     # One result per reference site; terms with none are retried unquoted
@@ -106,14 +110,19 @@ def define_terms(topic, api_key, model):
         for r in results or []:
             site = _reference_site(r.get("url", ""))
             text = re.sub(r"\s+", " ", r.get("snippet", "")).strip()
+            text = _SNIPPET_DATE.sub("", text).split(" See full list on ")[0]   # Date prefix, merged snippets
             text = _SITE_TAIL.sub("", text).strip()
             if site and site not in sites and len(text) > 20:
                 sites.add(site)
                 kept.append({"site": site, "text": text, "url": r["url"]})
         return kept[:DEFINITIONS_PER_TERM]
 
+    # Two searches per term: a dictionary one, and an encyclopedia one with the kind of thing,
+    # so "Cursor" also finds the company's entry, not only the screen marker
     found = search_many([(f'"{t}" definition', 10, "us-en") for t in terms])
-    senses = {t: lookup(r) for t, r in zip(terms, found)}
+    encyclopedic = search_many([(f"{t} {kinds.get(t, '')} wikipedia".replace("  ", " "), 8, "us-en")
+                                for t in terms])
+    senses = {t: lookup((enc or [])[:4] + (r or [])) for t, r, enc in zip(terms, found, encyclopedic)}
     missing = [t for t in terms if not senses[t]]
     for t, r in zip(missing, search_many([(f"{t} definition", 10, "us-en") for t in missing])):
         senses[t] = lookup(r)
