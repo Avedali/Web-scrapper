@@ -369,10 +369,12 @@ def main():
     print()
     print("   WHAT TO DO NEXT:")
     print()
-    print("   Open launcher.py in Thonny and click Run.")
-    print("   Or type: python launcher.py")
+    # Macs and Linux have only python3; Windows has python
+    command = "python launcher.py" if os.name == "nt" else "python3 launcher.py"
+    print(f"   In this window, type:  {command}")
+    print("   (In Thonny: open launcher.py and click Run.)")
     print()
-    print("   The launcher has a simple menu -- just type a number.")
+    print("   The launcher has a simple menu -- type R to run everything.")
     print()
     if not key:
         print("    Don't forget to add your API key to .env!")
