@@ -177,7 +177,7 @@ def run_viz(args):
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
                 srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
-                if not re.search(r"\d", title) and c["form"] in ("dots", "box"):
+                if not re.search(r"\d", title) and len({p["idx"] for p in c["points"]}) > 1:
                     # A title that only names the topic: give the range the figures span
                     lo, hi = min(p["lo"] for p in c["points"]), max(p["hi"] for p in c["points"])
                     title = (f"{c['measure']}: {_fmt(lo, c['unit'])} to {_fmt(hi, c['unit'])} "
@@ -576,7 +576,7 @@ MAX_NUMBERED = 80     # Findings with numbers shown to the AI for one theme
 MAX_POINTS = 20       # Figures in one table
 TABLES_PER_THEME = 3  # Tables of figures the AI may extract for one theme
 DISTRIBUTION_MIN = 8  # Figures of one measure that make a box plot
-MEDIAN_MIN = 5        # Figures needed for a median line on a dot plot
+BAR_MAX = 8           # Categories a bar chart shows; more make a lollipop chart
 MAX_LINES = 5         # Lines in one line chart
 
 # How a figure was obtained (one marker each, in chart order) and what kind of number it is
@@ -813,22 +813,24 @@ def _country(label):
 
 
 def _form(c):
-    """The chart for a table, from the shape of its data (data-to-viz.com):
-      line        the same category in 2+ years
-      dumbbell    two figures per category from one study (perceived vs measured, before vs after)
-      heatmap     3+ categories × 3+ series from one study
-      grouped     2 series, or a small grid, from one study
-      stacked     parts of one whole (up to 6)
-      treemap     parts of one whole (7 or more)
-      map         one figure per country
-      bar         one figure per category from one study (up to 4 categories)
-      lollipop    one figure per category from one study (5 or more)
-      box         one measure from many sources (DISTRIBUTION_MIN or more figures)
-      dots        one measure from a few sources (a Cleveland dot plot)
-    Comparisons need figures from one study; otherwise the figures are shown as dots or a box.
+    """The chart for a table, from the shape of its data, by the data-to-viz.com decision tree
+    (the R Graph Gallery's guide):
+      line        a category measured in 2+ years (time series)
+      dumbbell    two series per category, paired in one study (perceived vs measured)
+      heatmap     3+ categories × 3+ series
+      grouped     categories × 2+ series, otherwise
+      stacked     parts of one whole from one study (up to 6); treemap for 7 or more
+      map         one value per country
+      bar         one value per category (up to BAR_MAX); lollipop for more
+      box         one category with DISTRIBUTION_MIN+ values (box with every point shown)
+    One category from several sources: the sources are the categories ("JetBrains, 2025").
+    Several categories with several sources each: one bar per category and source, side by side.
     """
     pts = c["points"]
-    one_study = bool(set.intersection(*(p["sources"] for p in pts)))
+    # One wording per category: "Increased" and "Increasing productivity" are the same answer
+    first = {}
+    for p in pts:
+        p["label"] = first.setdefault(tuple(sorted(_stem(w) for w in re.findall(r"\w+", p["label"].lower()))), p["label"])
     by_label = {}
     for p in pts:
         by_label.setdefault(p["label"], []).append(p)
@@ -837,21 +839,34 @@ def _form(c):
         return "line"
     series = {p["series"] for p in pts if p["series"]}
     if len(series) >= 2:
-        pairs_one_study = all(set.intersection(*(p["sources"] for p in v)) for v in by_label.values())
-        if len(series) == 2 and pairs_one_study:
+        paired = all(set.intersection(*(p["sources"] for p in v)) for v in by_label.values())
+        if len(series) == 2 and paired:
             return "dumbbell"
-        if one_study:
-            return "heatmap" if len(series) >= 3 and len(by_label) >= 3 else "grouped"
-        for p in pts:   # Different studies: each figure on its own row
-            p["label"] = f"{p['label']}, {p['series']}"
-        return "box" if len(pts) >= DISTRIBUTION_MIN else "dots"
+        return "heatmap" if len(series) >= 3 and len(by_label) >= 3 else "grouped"
+    one_study = bool(set.intersection(*(p["sources"] for p in pts)))
     if c["parts"] and one_study and 90 <= sum(p["hi"] for p in pts) <= 110:
         return "stacked" if len(pts) <= 6 else "treemap"
     if len(pts) >= 3 and all(_country(p["label"]) for p in pts) and len({_country(p["label"]) for p in pts}) == len(pts):
         return "map"
-    if one_study:
-        return "bar" if len(pts) <= 4 else "lollipop"
-    return "box" if len(pts) >= DISTRIBUTION_MIN else "dots"
+    if len(by_label) == 1:
+        if len(pts) >= DISTRIBUTION_MIN:
+            return "box"
+        for p in pts:   # The sources are the categories
+            p["label"], p["by_source"] = _source_label(p), True
+    elif len(by_label) < len(pts):
+        order = list(by_label)
+        for p in pts:
+            p["label"] = f"{p['label']}: {_source_label(p)}"
+            p["by_source"] = True
+        pts.sort(key=lambda p: (order.index(p["label"].rsplit(": ", 1)[0]), -p["hi"]))
+        c["ordered"] = True   # Keep each category's bars together
+    return "bar" if len(pts) <= BAR_MAX else "lollipop"
+
+
+def _source_label(p):
+    """A figure's source as a row label: who measured it, else the cited source ("JetBrains, 2025")."""
+    year = p["year"] or (re.findall(r"\d{4}|n\.d\.", p.get("cite", "")) or [""])[-1]
+    return ", ".join(x for x in (p["who"], year) if x) if p["who"] else p.get("cite", "").strip("()") or "source"
 
 
 def _draw(c, go, colors, this_year):
@@ -870,17 +885,13 @@ def _draw(c, go, colors, this_year):
             text = f"{_fmt(p['lo'], unit, signed)} to {_fmt(p['hi'], unit, signed)}"
         else:
             text = f"{p['lo']:g}-{_fmt(p['hi'], unit)}"
-        return ("up to " if p["statistic"] == "up to" else "") + text
+        return ("up to " if p["statistic"] == "up to" and p["lo"] == p["hi"] else "") + text
 
-    if form == "dots":
-        # One wording per category ("Increased" / "Increasing productivity"), source under it
-        first = {}
-        for p in pts:
-            p["label"] = first.setdefault(tuple(sorted(_stem(w) for w in re.findall(r"\w+", p["label"].lower()))), p["label"])
+    several = len({p["idx"] for p in pts}) > 1
     for p in pts:
-        extra = ", ".join(x for x in (p["who"], f"n={p['n']}" if p["n"] else "") if x)
-        p["row"] = _wrap(p["label"] + (f" ({extra})" if extra and form in ("dots", "box") else ""))
-        if form == "dots" and p.get("cite"):
+        p["row"] = _wrap(p["label"])
+        # Figures from different sources: each row says which source it comes from
+        if several and form in ("bar", "lollipop") and p.get("cite") and not p.get("by_source"):
             p["row"] += f"<br><span style='font-size:11px;color:#6B6B6B'>{_wrap(p['cite'], 34)}</span>"
         p["hover"] = (f"{p['label']}{' (' + p['series'] + ')' if p['series'] else ''}: {show(p)}"
                       f"<br>Measured by: {p['who'] or 'not stated'}"
@@ -903,52 +914,24 @@ def _draw(c, go, colors, this_year):
         if signed:
             (fig.add_vline if horizontal else fig.add_hline)(0, line_color=GRAY, line_width=1)
 
-    if form in ("dots", "box"):
-        # Dots: one row per figure, by method then value. Box: spread of all figures as points
-        pts.sort(key=lambda p: (METHODS.index(p["method"]), p["hi"]))
-        if form == "box":
-            fig.add_trace(go.Box(x=[(p["lo"] + p["hi"]) / 2 for p in pts], y0=0, orientation="h",
-                                 boxpoints=False, fillcolor="rgba(0,0,0,0)", line_color=GRAY,
-                                 name="Spread", showlegend=False, hoverinfo="skip"))
-            # Jitter so equal values stay visible
-            for i, p in enumerate(pts):
-                p["jitter"] = ((i * 7) % 11 - 5) / 14
-            fig.update_yaxes(visible=False, range=[-0.8, 0.8])
-            rows = None
-        else:
-            rows = _unique([p["row"] for p in pts])
-            for p, row in zip(pts, rows):
-                p["row"] = row
+    if form == "box":
+        # Box of all figures, every figure shown as a point (jittered so equal values stay visible)
+        fig.add_trace(go.Box(x=[(p["lo"] + p["hi"]) / 2 for p in pts], y0=0, orientation="h",
+                             boxpoints=False, fillcolor="rgba(0,0,0,0)", line_color=GRAY,
+                             name="Spread", showlegend=False, hoverinfo="skip"))
+        for i, p in enumerate(pts):
+            p["jitter"] = ((i * 7) % 11 - 5) / 14
         for method in METHODS:
             mp = [p for p in pts if p["method"] == method]
-            if not mp:
-                continue
-            symbol, color = style[method]
-            ys = [p["jitter"] for p in mp] if form == "box" else [p["row"] for p in mp]
-            for p, y in zip(mp, ys):
-                if p["lo"] != p["hi"] and form == "dots":
-                    fig.add_trace(go.Scatter(x=[p["lo"], p["hi"]], y=[y, y], mode="lines",
-                                             line=dict(color=color, width=3), showlegend=False, hoverinfo="skip"))
-            fig.add_trace(go.Scatter(
-                x=[p["hi"] if form == "dots" else (p["lo"] + p["hi"]) / 2 for p in mp], y=ys,
-                name=method.capitalize(), mode="markers" + ("+text" if form == "dots" else ""),
-                marker=dict(symbol=symbol, size=13 if form == "dots" else 11, color=color,
-                            line=dict(width=2, color=color), opacity=1 if form == "dots" else 0.8),
-                text=[show(p) for p in mp] if form == "dots" else None, textposition="middle right",
-                cliponaxis=False, hovertext=[p["hover"] for p in mp], hoverinfo="text"))
-        # Median line from MEDIAN_MIN+ figures, leaving out "up to" maxima
-        typical = sorted((p["lo"] + p["hi"]) / 2 for p in pts if p["statistic"] != "up to")
-        if len(typical) >= MEDIAN_MIN:
-            k = len(typical) // 2
-            median = typical[k] if len(typical) % 2 else (typical[k - 1] + typical[k]) / 2
-            fig.add_vline(x=median, line_dash="dash", line_color=GRAY, line_width=1,
-                          annotation_text=f"median {_fmt(round(median, 1), unit, signed)}",
-                          annotation_position="top", annotation_font_color=GRAY)
+            if mp:
+                symbol, color = style[method]
+                fig.add_trace(go.Scatter(
+                    x=[(p["lo"] + p["hi"]) / 2 for p in mp], y=[p["jitter"] for p in mp],
+                    name=method.capitalize(), mode="markers",
+                    marker=dict(symbol=symbol, size=11, color=color, line=dict(width=2, color=color), opacity=0.8),
+                    hovertext=[p["hover"] for p in mp], hoverinfo="text"))
+        fig.update_yaxes(visible=False, range=[-0.8, 0.8])
         legend = True
-        if rows:
-            pad = max(0, 4 - len(rows)) * 0.4   # Few rows: keep them together, not at the edges
-            fig.update_yaxes(categoryorder="array", categoryarray=rows,
-                             range=[len(rows) - 0.5 + pad, -0.5 - pad])
         value_axis()
 
     elif form in ("bar", "lollipop"):
@@ -964,10 +947,13 @@ def _draw(c, go, colors, this_year):
                 cliponaxis=False, hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
             fig.update_layout(bargap=0.35)
         else:
+            # Stem from 0; a range ("20-40%") is a thick segment on the stem
             for p, row in zip(pts, rows):
-                fig.add_trace(go.Scatter(x=[p["lo"] if p["lo"] != p["hi"] else 0, p["hi"]], y=[row, row],
-                                         mode="lines", line=dict(color=GRAY, width=2), showlegend=False,
-                                         hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=[0, p["hi"]], y=[row, row], mode="lines",
+                                         line=dict(color=GRAY, width=2), showlegend=False, hoverinfo="skip"))
+                if p["lo"] != p["hi"]:
+                    fig.add_trace(go.Scatter(x=[p["lo"], p["hi"]], y=[row, row], mode="lines",
+                                             line=dict(color=DARK, width=7), showlegend=False, hoverinfo="skip"))
             fig.add_trace(go.Scatter(x=[p["hi"] for p in pts], y=rows, mode="markers+text",
                                      marker=dict(size=12, color=DARK), text=[show(p) for p in pts],
                                      textposition="middle right", cliponaxis=False,
