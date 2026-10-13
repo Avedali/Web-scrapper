@@ -14,7 +14,9 @@ Synthesize: Writes a research brief from checked claims, each tied to the quote 
 
 Deepen: Finds thin themes in the brief and searches for more evidence
 
-Viz: Draws charts of the findings, chosen from the shape of the data (data-to-viz.com), with APA sources under each chart
+Viz: Draws charts of the findings, chosen from the shape of the data (data-to-viz.com decision tree), with APA sources under each chart
+
+Chart types: bar, lollipop, grouped bar, heatmap, dumbbell, radar, line, slope, stacked area, donut, stacked bar, 100% stacked bars, treemap, sunburst, scatter, bubble, connected scatter, funnel, waterfall, sankey, box, violin, histogram, map, bubble map
 
 Chart on request: Option 6, then type a topic (or: python3 agent.py viz "adoption by country"). Charts only the findings about it, in charts_slide/requested/, or says there is not enough data
 

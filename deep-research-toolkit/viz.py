@@ -573,11 +573,27 @@ WORDCLOUD_SKIP |= {"der", "die", "das", "und", "mit", "von", "für", "den", "dem
                    "uma", "para", "com", "mais", "não", "dos", "das", "pelo", "pela"}
 
 MAX_NUMBERED = 80     # Findings with numbers shown to the AI for one theme
-MAX_POINTS = 20       # Figures in one table
+MAX_POINTS = 30       # Figures in one table
 TABLES_PER_THEME = 3  # Tables of figures the AI may extract for one theme
-DISTRIBUTION_MIN = 8  # Figures of one measure that make a box plot
+DISTRIBUTION_MIN = 8  # Figures of one category that make a box plot
+GROUP_MIN = 5         # Figures per category for a box plot per category
+VIOLIN_MIN = 12       # Figures per category for a violin plot
+HISTOGRAM_MIN = 15    # Figures of one category for a histogram
 BAR_MAX = 8           # Categories a bar chart shows; more make a lollipop chart
 MAX_LINES = 5         # Lines in one line chart
+
+# What a table's figures are, as the AI says it (the chart is then chosen from the data)
+SHAPES = {
+    "compare": "figures for different groups, options or sources, to compare",
+    "parts": "the parts of one whole that add up to about 100% (or several wholes, one per series)",
+    "nested parts": "parts of a whole where each part belongs to a larger group, given in the series column",
+    "stages": "successive stages where each is a subset of the one before (heard of → tried → use daily)",
+    "change": "a starting total, the changes that add to or take from it, and the end total "
+              "(write 'total' in the series column of the start and end rows)",
+    "flow": "amounts moving from one group to another: the category is where from, the series where to",
+    "relation": "two or three different measures for the same items, to see how they relate "
+                "(the second in the x column, a third in the size column)",
+}
 
 # How a figure was obtained (one marker each, in chart order) and what kind of number it is
 METHODS = ["experiment", "observational data", "survey", "vendor claim", "forecast", "not stated"]
@@ -611,8 +627,8 @@ def _theme_charts(brief, by_idx, api_key, model):
     charts = []
     for t in brief.get("themes", []):
         found = {f["id"]: f for f in by_theme.get(t["title"], [])[:MAX_NUMBERED]}
-        if len(found) < 2:
-            print(f"   {t['title']}: fewer than 2 findings with numbers, no chart")
+        if sum(len(re.findall(r"\d+(?:[.,]\d+)?", f["claim"])) for f in found.values()) < 2:
+            print(f"   {t['title']}: fewer than 2 figures, no chart")
             continue
         reply = call_ai(
             f"RESEARCH QUESTION: {brief.get('question', '')}\n"
@@ -640,8 +656,10 @@ def _theme_charts(brief, by_idx, api_key, model):
             "what the chart is, how it was made or how to read it.>\n"
             "ORDERED: <yes if the categories have a natural order, e.g. age bands or company "
             "sizes; otherwise no>\n"
-            "PARTS: <yes if the figures are the parts of one whole from one source that add up "
-            "to about 100%; otherwise no>\n"
+            "SHAPE: <what the figures are, one of: " + "; ".join(f"{k} = {v}" for k, v in SHAPES.items())
+            + ". Most tables are compare.>\n"
+            "MEASURE X: <for relation only: the second measure, with its unit in brackets>\n"
+            "MEASURE SIZE: <for relation only, if there is a third measure: it, with its unit in brackets>\n"
             f"Then 2 to {MAX_POINTS} rows:\n"
             "- C12 | <category: who or what the figure is about (a group, a country, an answer "
             "option), at most 6 words> | <series: a second split when one category has several "
@@ -649,7 +667,8 @@ def _theme_charts(brief, by_idx, api_key, model):
             "<who measured it, at most 4 words> | <method: " + " / ".join(METHODS) + "> | <kind of "
             "number: " + " / ".join(STATISTICS) + "> | <the number as written in the finding, "
             "e.g. 14 or 35-45; negative for a decrease> | <sample size, or empty> | <year, or "
-            "empty>\n\n"
+            "empty> | <x: for relation, the second measure's number; otherwise empty> | <size: for "
+            "relation, the third measure's number; otherwise empty>\n\n"
             "If no table fits, answer only: NONE\n\n"
             "FINDINGS:\n" + "\n".join(f"{i}: {f['claim']}" for i, f in found.items()),
             api_key, model, temp=0) or ""
@@ -707,16 +726,31 @@ def _read_table(reply, found, by_idx):
         text = text.lower()
         return next((a for a in allowed if a in text), "not stated")
 
-    measure = field("MEASURE")
-    unit = re.search(r"\(([^)]*)\)\s*$", measure)
-    unit = unit.group(1) if unit else ""
-    unit = re.sub(r"^\s*(percentage|percent|per cent|pct)(?=\s|$)", "%", unit, flags=re.I)   # "percentage of developers" → "% of developers"
+    def measure_unit(text):
+        """("Share of developers", "% of developers") from "Share of developers (percentage of developers)"."""
+        unit = re.search(r"\(([^)]*)\)\s*$", text)
+        unit = unit.group(1) if unit else ""
+        unit = re.sub(r"^\s*(percentage|percent|per cent|pct)(?=\s|$)", "%", unit, flags=re.I)
+        return re.sub(r"\s*\([^)]*\)\s*$", "", text), unit
+
+    def checked(raw, f, sources):
+        """A number from a cell, if it is written in the finding and in one of its sources."""
+        m = re.fullmatch(r"([-+−]?)\s*(\d[\d.,]*)\s*%?", raw.strip())
+        if not m or not (_in_text(m.group(2), f["claim"]) and any(_in_text(m.group(2), s.get("content", "")) for s in sources)):
+            return None
+        return (-1 if m.group(1) in ("-", "−") else 1) * float(_readings_one(m.group(2)))
+
+    measure, unit = measure_unit(field("MEASURE"))
+    shape = pick(field("SHAPE"), sorted(SHAPES, key=len, reverse=True))
+    shape = "compare" if shape == "not stated" else shape
+    if field("PARTS").lower().startswith("y") and shape == "compare":
+        shape = "parts"
     points = []
     for line in reply.splitlines():
         parts = [x.strip() for x in line.strip().lstrip("-• ").split("|")]
         if len(parts) < 7 or parts[0] not in found:
             continue
-        parts += [""] * (9 - len(parts))
+        parts += [""] * (11 - len(parts))
         f = found[parts[0]]
         m = re.fullmatch(r"([-+−]?)\s*(\d[\d.,]*)\s*%?(?:\s*(?:-|–|to)\s*(\d[\d.,]*)\s*%?)?", parts[6])
         if not m:
@@ -748,22 +782,28 @@ def _read_table(reply, found, by_idx):
             "idx": lead.get("idx"), "sources": set(f["sources"]),
             "source": f"{lead.get('title', '')[:80]} ({lead.get('domain', '')})",
             "cite": apa_in_text([lead]) if lead else "",
+            "x": checked(parts[9], f, sources) if parts[9] else None,
+            "size": checked(parts[10], f, sources) if parts[10] else None,
         })
     points = points[:MAX_POINTS]
     if len(points) < 2:
         return None
 
-    return {"title": _checked_title(field("TITLE"), points), "measure": re.sub(r"\s*\([^)]*\)\s*$", "", measure), "unit": unit,
-            "ordered": field("ORDERED").lower().startswith("y"),
-            "parts": field("PARTS").lower().startswith("y"), "points": points}
+    measure_x, unit_x = measure_unit(field("MEASURE X"))
+    measure_size, unit_size = measure_unit(field("MEASURE SIZE"))
+    return {"title": _checked_title(field("TITLE"), points), "measure": measure, "unit": unit,
+            "ordered": field("ORDERED").lower().startswith("y"), "shape": shape,
+            "parts": shape in ("parts", "nested parts"), "points": points,
+            "measure_x": measure_x, "unit_x": unit_x, "measure_size": measure_size, "unit_size": unit_size}
 
 
 def _checked_title(title, points):
     """The title, or "" if it uses a number that is not on the chart or in its findings."""
     allowed = set().union(*(verify.numbers(p["claim"]) for p in points))
     for p in points:
-        for v in (p["lo"], p["hi"]):
-            allowed |= verify._readings(f"{abs(v):g}") | {f"{round(abs(v)):g}"}   # 54.9 may be written 55
+        for v in (p["lo"], p["hi"], p.get("x"), p.get("size")):
+            if v is not None:
+                allowed |= verify._readings(f"{abs(v):g}") | {f"{round(abs(v)):g}"}   # 54.9 may be written 55
         allowed.add(p["year"])
     unknown = {x for x in re.findall(r"\d+(?:[.,]\d+)?", title)
                if not (verify._readings(x.replace(",", ".")) & allowed)}
@@ -814,19 +854,24 @@ def _country(label):
 
 def _form(c):
     """The chart for a table, from the shape of its data, by the data-to-viz.com decision tree
-    (the R Graph Gallery's guide):
-      line        a category measured in 2+ years (time series)
-      dumbbell    two series per category, paired in one study (perceived vs measured)
-      heatmap     3+ categories × 3+ series
-      grouped     categories × 2+ series, otherwise
-      stacked     parts of one whole from one study (up to 6); treemap for 7 or more
-      map         one value per country
-      bar         one value per category (up to BAR_MAX); lollipop for more
-      box         one category with DISTRIBUTION_MIN+ values (box with every point shown)
+    (the R Graph Gallery's guide) and plotly's chart types:
+      relation    two measures per item: scatter; a third: bubble; one item over 3+ years: connected scatter
+      flow        from → to amounts: sankey
+      stages      shrinking stages of one study: funnel
+      change      start, changes, end of one study: waterfall
+      time        3+ years: line; parts of a whole over 3+ years: stacked area; 2 years: slope chart
+      parts       one whole: donut (2-4 parts), stacked bar (5-6), treemap (7+); several wholes:
+                  100% stacked bars; parts in larger groups: sunburst
+      subgroups   two series paired in one study: dumbbell; up to 3 items × 5+ series: radar;
+                  3+ × 3+: heatmap; otherwise grouped bars
+      map         one value per country: choropleth for shares and rates, bubble map for counts
+      spread      one category with HISTOGRAM_MIN+ figures: histogram; DISTRIBUTION_MIN+: box;
+                  several categories with GROUP_MIN+ figures each: box per category (VIOLIN_MIN+: violin)
+      compare     one value per category: bar (up to BAR_MAX) or lollipop
     One category from several sources: the sources are the categories ("JetBrains, 2025").
     Several categories with several sources each: one bar per category and source, side by side.
     """
-    pts = c["points"]
+    pts, shape = c["points"], c.get("shape", "compare")
     # One wording per category: "Increased" and "Increasing productivity" are the same answer
     first = {}
     for p in pts:
@@ -834,23 +879,68 @@ def _form(c):
     by_label = {}
     for p in pts:
         by_label.setdefault(p["label"], []).append(p)
-    years = {p["year"] for p in pts if p["year"]}
-    if len(years) >= 2 and any(len({p["year"] for p in v if p["year"]}) >= 2 for v in by_label.values()):
-        return "line"
+    one_study = bool(set.intersection(*(p["sources"] for p in pts)))
+    years_of = {k: {p["year"] for p in v if p["year"]} for k, v in by_label.items()}
     series = {p["series"] for p in pts if p["series"]}
+
+    if shape == "relation" and sum(p["x"] is not None for p in pts) >= 3:
+        c["points"] = pts = [p for p in pts if p["x"] is not None]
+        if any(len({p["year"] for p in v if p["x"] is not None and p["year"]}) >= 3 for v in by_label.values()):
+            return "connected"
+        return "bubble" if all(p["size"] is not None and p["size"] > 0 for p in pts) else "scatter"
+    if shape == "flow" and all(p["series"] for p in pts):
+        return "sankey"
+    if shape == "stages" and one_study and len(pts) >= 3:
+        if all(a["hi"] >= b["hi"] for a, b in zip(pts, pts[1:])):
+            return "funnel"
+    if shape == "change" and one_study and sum(p["series"].lower() != "total" for p in pts) >= 2:
+        return "waterfall"
+
+    # Time
+    if c["parts"] and len({p["year"] for p in pts if p["year"]}) >= 3 and len(by_label) >= 2:
+        return "area"
+    if any(len(y) >= 3 for y in years_of.values()):
+        return "line"
+    if any(len(y) == 2 for y in years_of.values()):
+        return "slope" if sum(len(y) == 2 for y in years_of.values()) >= 2 else "line"
+
+    # Parts of a whole
+    if c["parts"]:
+        if shape == "nested parts" and series:
+            return "sunburst"
+        wholes = {}
+        for p in pts:
+            wholes[p["series"]] = wholes.get(p["series"], 0) + p["hi"]
+        if len(wholes) >= 2 and all(80 <= v <= 120 for v in wholes.values()):
+            return "stacked100"
+        if one_study and 90 <= sum(p["hi"] for p in pts) <= 110:
+            return "donut" if len(pts) <= 4 else "stacked" if len(pts) <= 6 else "treemap"
+
+    # Subgroups: categories × series
     if len(series) >= 2:
         paired = all(set.intersection(*(p["sources"] for p in v)) for v in by_label.values())
         if len(series) == 2 and paired:
             return "dumbbell"
+        full = all(len({p["series"] for p in v}) == len(series) for v in by_label.values())
+        if len(by_label) <= 3 and len(series) >= 5 and full:
+            return "radar"
         return "heatmap" if len(series) >= 3 and len(by_label) >= 3 else "grouped"
-    one_study = bool(set.intersection(*(p["sources"] for p in pts)))
-    if c["parts"] and one_study and 90 <= sum(p["hi"] for p in pts) <= 110:
-        return "stacked" if len(pts) <= 6 else "treemap"
+
+    # Geography
     if len(pts) >= 3 and all(_country(p["label"]) for p in pts) and len({_country(p["label"]) for p in pts}) == len(pts):
-        return "map"
+        rate = "%" in c["unit"] or re.search(r"\bper\b|rate|average|share|index|score", c["unit"] + " " + c["measure"], re.I)
+        return "map" if rate else "bubblemap"
+
+    # Spread of many figures
+    if len(by_label) == 1 and len(pts) >= HISTOGRAM_MIN:
+        return "histogram"
+    if len(by_label) == 1 and len(pts) >= DISTRIBUTION_MIN:
+        return "box"
+    if len(by_label) >= 2 and all(len(v) >= GROUP_MIN for v in by_label.values()):
+        return "violin" if all(len(v) >= VIOLIN_MIN for v in by_label.values()) else "boxes"
+
+    # Compare one value per category
     if len(by_label) == 1:
-        if len(pts) >= DISTRIBUTION_MIN:
-            return "box"
         for p in pts:   # The sources are the categories
             p["label"], p["by_source"] = _source_label(p), True
     elif len(by_label) < len(pts):
@@ -1041,6 +1131,198 @@ def _draw(c, go, colors, this_year):
                         countrycolor="#B0B0B0", showcoastlines=True, coastlinecolor="#B0B0B0",
                         projection_type="natural earth", fitbounds=False, projection_rotation_lon=0,
                         lataxis_range=[-58, 85], lonaxis_range=[-180, 180])
+
+    elif form == "donut":
+        # Parts of one whole, largest first from 12 o'clock
+        pts.sort(key=lambda p: -p["hi"])
+        shades = ["#1D3557", "#457B9D", "#A8DADC", "#D3E9EA"]
+        fig.add_trace(go.Pie(
+            labels=[p["label"] for p in pts], values=[p["hi"] for p in pts], hole=0.5, sort=False,
+            direction="clockwise", marker=dict(colors=shades[:len(pts)], line=dict(color="white", width=2)),
+            text=[show(p) for p in pts], texttemplate="%{label}<br>%{text}", textposition="outside",
+            hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+
+    elif form == "stacked100":
+        # One 100% bar per whole (the series), split into its parts
+        wholes = list(dict.fromkeys(p["series"] for p in pts))
+        shades = iter(["#1D3557", "#457B9D", "#7FA7C9", "#A8DADC", "#D3E9EA", "#E8E8E8", "#B0B0B0"])
+        for part in dict.fromkeys(p["label"] for p in pts):
+            sp = {p["series"]: p for p in pts if p["label"] == part}
+            fig.add_trace(go.Bar(
+                y=[_wrap(w) for w in wholes], x=[sp[w]["hi"] if w in sp else 0 for w in wholes],
+                name=_wrap(part, 40), orientation="h", marker_color=next(shades, GRAY),
+                text=[show(sp[w]) if w in sp else "" for w in wholes], textposition="inside",
+                insidetextanchor="middle", hovertext=[sp[w]["hover"] if w in sp else "" for w in wholes],
+                hoverinfo="text"))
+        legend = True
+        fig.update_layout(barmode="stack", bargap=0.35, legend_traceorder="normal")
+        fig.update_yaxes(autorange="reversed")
+        fig.update_xaxes(range=[0, 101], title=axis)
+
+    elif form == "area":
+        # Parts of a whole over the years, stacked
+        shades = iter(["#1D3557", "#457B9D", "#7FA7C9", "#A8DADC", "#D3E9EA", "#B0B0B0"])
+        for part in dict.fromkeys(p["label"] for p in pts):
+            sp = sorted((p for p in pts if p["label"] == part and p["year"]), key=lambda p: p["year"])
+            color = next(shades, GRAY)
+            fig.add_trace(go.Scatter(
+                x=[int(p["year"]) for p in sp], y=[p["hi"] for p in sp], name=_wrap(part, 40),
+                stackgroup="one", mode="lines", line=dict(width=0.5, color=color), fillcolor=color,
+                hovertext=[p["hover"] for p in sp], hoverinfo="text"))
+        # Each part's value at the first and last year, in the middle of its band
+        years = sorted({p["year"] for p in pts if p["year"]})
+        for year, side in ((years[0], "left"), (years[-1], "right")):
+            base = 0
+            for part in dict.fromkeys(p["label"] for p in pts):
+                p = next((q for q in pts if q["label"] == part and q["year"] == year), None)
+                if p:
+                    fig.add_annotation(x=int(year), y=base + p["hi"] / 2, text=show(p), showarrow=False,
+                                       xanchor=side, xshift=6 if side == "left" else -6,
+                                       font=dict(color="white", size=13))
+                    base += p["hi"]
+        legend = True
+        fig.update_xaxes(title="", dtick=1, tickformat="d")
+        fig.update_yaxes(title=axis, range=[0, 100] if share else None)
+
+    elif form == "slope":
+        # Two years per category: a line from the first to the second, values at both ends
+        years = sorted({p["year"] for p in pts if p["year"]})
+        a, b = years[0], years[-1]
+        for name in dict.fromkeys(p["label"] for p in pts):
+            pair = {p["year"]: p for p in pts if p["label"] == name and p["year"] in (a, b)}
+            if len(pair) < 2:
+                continue
+            up = pair[b]["hi"] >= pair[a]["hi"]
+            fig.add_trace(go.Scatter(
+                x=[a, b], y=[pair[a]["hi"], pair[b]["hi"]], mode="lines+markers+text",
+                line=dict(color=DARK if up else ACCENT, width=2), marker=dict(size=9),
+                text=[f"{_wrap(name, 26)}  {show(pair[a])}", f"{show(pair[b])}  {_wrap(name, 26)}"],
+                textposition=["middle left", "middle right"], cliponaxis=False, showlegend=False,
+                hovertext=[pair[a]["hover"], pair[b]["hover"]], hoverinfo="text"))
+        fig.update_xaxes(type="category", title="", range=[-0.9, 1.9])
+        fig.update_yaxes(title=axis, showticklabels=False)
+
+    elif form in ("scatter", "bubble", "connected"):
+        # Two measures per item; a third as bubble size; an item over the years as a connected path
+        ax = f"{c['measure_x']} ({c['unit_x']})" if c.get("unit_x") else c.get("measure_x") or "x"
+        if form == "connected":
+            palette = iter([DARK, BLUE, ACCENT, MUTED, GRAY])
+            for name in dict.fromkeys(p["label"] for p in pts):
+                sp = sorted((p for p in pts if p["label"] == name and p["year"]), key=lambda p: p["year"])
+                fig.add_trace(go.Scatter(
+                    x=[p["x"] for p in sp], y=[p["hi"] for p in sp], name=_wrap(name, 40),
+                    mode="lines+markers+text", text=[p["year"] for p in sp], textposition="top center",
+                    line=dict(color=next(palette, GRAY), width=2), marker=dict(size=9),
+                    hovertext=[p["hover"] for p in sp], hoverinfo="text"))
+            legend = True
+        else:
+            size = ([12] * len(pts) if form == "scatter" else
+                    [10 + 40 * (p["size"] / max(q["size"] for q in pts)) ** 0.5 for p in pts])
+            fig.add_trace(go.Scatter(
+                x=[p["x"] for p in pts], y=[p["hi"] for p in pts], mode="markers+text",
+                text=[_wrap(p["label"], 20) for p in pts], textposition="top center", cliponaxis=False,
+                marker=dict(size=size, color=DARK, opacity=0.75, line=dict(color="white", width=1)),
+                hovertext=[p["hover"] + (f"<br>{c['measure_size']}: {p['size']:g} {c['unit_size']}"
+                                         if p["size"] is not None else "") for p in pts],
+                hoverinfo="text", showlegend=False))
+        fig.update_xaxes(title=ax, showgrid=True, gridcolor="#EEEEEE")
+        fig.update_yaxes(title=axis, showgrid=True, gridcolor="#EEEEEE")
+
+    elif form == "sankey":
+        # Amounts from one group (category) to another (series)
+        nodes = list(dict.fromkeys([p["label"] for p in pts] + [p["series"] for p in pts]))
+        if "%" in unit:
+            # Shares of different wholes do not add up: each source lists its own split
+            names = [_wrap(n, 30) + "".join(f"<br>→ {p['series']}: {show(p)}" for p in pts if p["label"] == n)
+                     for n in nodes]
+        else:
+            names = [f"{_wrap(n, 30)}: {_fmt(sum(p['hi'] for p in pts if n in (p['label'], p['series'])), unit)}"
+                     for n in nodes]
+        fig.add_trace(go.Sankey(
+            node=dict(label=names, color=DARK, pad=18, thickness=16),
+            link=dict(source=[nodes.index(p["label"]) for p in pts], target=[nodes.index(p["series"]) for p in pts],
+                      value=[p["hi"] for p in pts], color="rgba(69,123,157,0.35)",
+                      customdata=[p["hover"] for p in pts], hovertemplate="%{customdata}<extra></extra>")))
+
+    elif form == "funnel":
+        # Each stage a subset of the one before, in the order given
+        fig.add_trace(go.Funnel(
+            y=[_wrap(p["label"]) for p in pts], x=[p["hi"] for p in pts], marker=dict(color=DARK),
+            text=[show(p) for p in pts], textinfo="text+percent initial", textposition="inside",
+            hovertext=[p["hover"] for p in pts], hoverinfo="text", connector=dict(fillcolor="#D3E9EA")))
+
+    elif form == "waterfall":
+        # Start total, what each change adds or takes away, end total
+        kinds = ["absolute" if i == 0 and p["series"].lower() == "total" else
+                 "total" if p["series"].lower() == "total" else "relative" for i, p in enumerate(pts)]
+        fig.add_trace(go.Waterfall(
+            x=[_wrap(p["label"], 16) for p in pts], y=[p["hi"] for p in pts], measure=kinds,
+            text=[_fmt(p["hi"], unit) if k != "relative" else show(p) for p, k in zip(pts, kinds)],
+            textposition="outside", cliponaxis=False, increasing=dict(marker=dict(color=BLUE)), decreasing=dict(marker=dict(color=ACCENT)),
+            totals=dict(marker=dict(color=DARK)), connector=dict(line=dict(color=GRAY, width=1)),
+            hovertext=[p["hover"] for p in pts], hoverinfo="text"))
+        fig.update_yaxes(title=axis)
+
+    elif form == "sunburst":
+        # Parts inside their larger groups (series), the groups' size the sum of their parts
+        groups = list(dict.fromkeys(p["series"] for p in pts))
+        fig.add_trace(go.Sunburst(
+            ids=groups + [f"{p['series']}/{p['label']}" for p in pts],
+            labels=[_wrap(g, 18) for g in groups] + [f"{_wrap(p['label'], 18)}<br>{show(p)}" for p in pts],
+            parents=[""] * len(groups) + [p["series"] for p in pts],
+            values=[0] * len(groups) + [p["hi"] for p in pts], branchvalues="remainder",
+            marker=dict(colorscale=[[0, "#D3E9EA"], [1, DARK]]),
+            hovertext=groups + [p["hover"] for p in pts], hoverinfo="text"))
+
+    elif form == "radar":
+        # Up to 3 items across 5+ series of the same measure
+        axes = list(dict.fromkeys(p["series"] for p in pts))
+        palette = iter([DARK, ACCENT, BLUE])
+        for name in dict.fromkeys(p["label"] for p in pts):
+            cell = {p["series"]: p for p in pts if p["label"] == name}
+            color = next(palette, GRAY)
+            fig.add_trace(go.Scatterpolar(
+                r=[cell[a]["hi"] for a in axes] + [cell[axes[0]]["hi"]], theta=[_wrap(a, 16) for a in axes] + [_wrap(axes[0], 16)],
+                name=_wrap(name, 40), fill="toself", opacity=0.6, line=dict(color=color),
+                hovertext=[cell[a]["hover"] for a in axes] + [cell[axes[0]]["hover"]], hoverinfo="text"))
+        legend = True
+        fig.update_layout(polar=dict(radialaxis=dict(range=[0, 100] if share else None, tickfont=dict(size=10),
+                                                     angle=90, tickangle=90)))
+
+    elif form in ("boxes", "violin"):
+        # Several figures per category: their spread, every figure shown
+        for name in dict.fromkeys(p["label"] for p in pts):
+            sp = [p for p in pts if p["label"] == name]
+            kw = dict(x=[(p["lo"] + p["hi"]) / 2 for p in sp], y=[_wrap(name)] * len(sp), orientation="h",
+                      name=_wrap(name, 30), line_color=DARK, fillcolor="rgba(168,218,220,0.4)",
+                      hovertext=[p["hover"] for p in sp], hoverinfo="text", showlegend=False)
+            if form == "violin":
+                fig.add_trace(go.Violin(points="all", pointpos=0, jitter=0.4, box_visible=True, **kw))
+            else:
+                fig.add_trace(go.Box(boxpoints="all", pointpos=0, jitter=0.4, **kw))
+        fig.update_yaxes(autorange="reversed")
+        value_axis()
+
+    elif form == "histogram":
+        # How the figures for one measure are spread
+        values = [(p["lo"] + p["hi"]) / 2 for p in pts]
+        fig.add_trace(go.Histogram(x=values, nbinsx=max(5, round(len(values) ** 0.5) + 2),
+                                   marker=dict(color=DARK, line=dict(color="white", width=1)),
+                                   hovertemplate="%{x}: %{y} figures<extra></extra>", showlegend=False))
+        fig.update_xaxes(title=axis)
+        fig.update_yaxes(title="Number of figures", dtick=1)
+
+    elif form == "bubblemap":
+        # Counts per country as circles sized by value
+        top = max(p["hi"] for p in pts) or 1
+        fig.add_trace(go.Scattergeo(
+            locations=[_country(p["label"]) for p in pts], mode="markers+text", text=[show(p) for p in pts],
+            textposition="top center", marker=dict(size=[8 + 42 * (p["hi"] / top) ** 0.5 for p in pts],
+                                                   color=DARK, opacity=0.7, line=dict(color="white", width=1)),
+            hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+        fig.update_geos(showframe=False, showland=True, landcolor="#F4F4F4", showcountries=True,
+                        countrycolor="#B0B0B0", showcoastlines=True, coastlinecolor="#B0B0B0",
+                        projection_type="natural earth", lataxis_range=[-58, 85], lonaxis_range=[-180, 180])
 
     else:
         # Line chart: up to MAX_LINES categories with the most years; forecasts get open markers
