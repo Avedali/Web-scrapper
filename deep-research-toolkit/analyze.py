@@ -422,21 +422,6 @@ def run_analyze(args):
                 lang_mix = ", ".join(f"{lang} {n}" for lang, n in langs.head(4).items())
                 print(f"      {names[t][:45]:45s} n={count:3d}  ({lang_mix})")
 
-            # ── Save BERTopic HTML charts ───────────────────────────
-            charts_dir = os.path.join(args.corpus, "charts")
-            os.makedirs(charts_dir, exist_ok=True)
-            for chart, make in [
-                ("bertopic_barchart", lambda: topic_model.visualize_barchart(
-                    top_n_topics=10, custom_labels=True)),
-                ("bertopic_map", lambda: topic_model.visualize_topics(custom_labels=True)),
-                ("bertopic_heatmap", lambda: topic_model.visualize_heatmap(custom_labels=True)),
-            ]:
-                try:
-                    make().write_html(os.path.join(charts_dir, f"{chart}.html"))
-                    print(f"   {charts_dir}/{chart}.html")
-                except Exception:
-                    pass  # The 2D map needs more themes than some runs have
-
         else:
             print(f"   Need 10+ documents for BERTopic (have {len(docs)})")
 
