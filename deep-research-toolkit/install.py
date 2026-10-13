@@ -109,6 +109,7 @@ def main():
         "ddgs",                 # Multi-engine web search (primary)
         "multi_search_engine",  # Google fallback for non-English queries
         "trafilatura",          # Article text extraction
+        "pypdf",                # Text of PDF reports and papers
     ]
 
     academic = [
@@ -336,6 +337,7 @@ def main():
         "requests": "requests",
         "pandas": "pandas",
         "trafilatura": "trafilatura",
+        "pypdf": "pypdf",
         "ddgs": "ddgs",
         "multi_search_engine": "multi_search",  # Install name differs from import name
         "HF transformers": "transformers",

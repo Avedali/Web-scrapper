@@ -68,6 +68,12 @@ except Exception:
     _CAMO = False
 
 try:
+    from pypdf import PdfReader   # Reads PDF sources (reports, papers)
+    _PDF = True
+except ImportError:
+    _PDF = False
+
+try:
     from langdetect import detect as _detect_lang
     _LANG = True
 except ImportError:
@@ -292,6 +298,47 @@ def search_hn(query, n=10):
 CONTENT_CHARS = 30000  # Characters kept per source (keeps 93% of measured page text)
 
 
+# Search ads and redirect links (sponsored pages, not sources) and video pages
+_AD_URL = re.compile(r"bing\.com/(aclick|ck/a)|googleadservices\.|doubleclick\.net|google\.[a-z.]+/aclk|duckduckgo\.com/y\.js"
+                     r"|youtube\.com/|youtu\.be/", re.I)   # Video pages: no article text to read
+
+# Error, block and bot-check pages, recognised by their opening words
+_ERROR_PAGE = re.compile(
+    r"are you a robot|captcha|verify you are (a )?human|security verification|performing security|"
+    r"access denied|403 forbidden|http status 404|page not found|404 not found|something.s wrong here|"
+    r"enable javascript|just a moment\.\.\.|checking your browser", re.I)
+
+
+def page_problem(text):
+    """Return why a page is not a usable source ("blocked or error page", ...), or "" if it is."""
+    t = (text or "").strip()
+    if len(t) < 200:
+        return "too short or empty"
+    sample = t[:3000]
+    readable = sum(ch.isalnum() or ch.isspace() or ch in ".,;:!?'\"()[]-%/&" for ch in sample)
+    if readable / len(sample) < 0.75 or sample.count("�") > 5:
+        return "unreadable (binary or garbled)"
+    if _ERROR_PAGE.search(t[:400]):
+        return "blocked or error page"
+    if t[:300].count("{{") >= 2:
+        return "page template, no content"
+    return ""
+
+
+def _read_pdf(url, max_chars):
+    """Return the text of a PDF (with pypdf), or None; arXiv /pdf/ links are PDFs too."""
+    if not _PDF:
+        return None
+    import io
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
+        return None
+    reader = PdfReader(io.BytesIO(r.content))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages[:40])
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    return text[:max_chars] if len(text) > 100 else None
+
+
 PAGE_META = {}  # url → {authors, site, date}, for APA references
 
 
@@ -316,6 +363,13 @@ def _page_meta(html, url=None):
 
 def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
     """Return a page's article text (up to max_chars) or None: trafilatura, then camoufox if use_browser."""
+
+    # PDFs: read with pypdf (trafilatura would return the raw bytes as text)
+    if re.search(r"\.pdf($|\?)|arxiv\.org/pdf/", url, re.I):
+        try:
+            return _read_pdf(url, max_chars)
+        except Exception:
+            return None
 
     # Tier 1: trafilatura; under 100 characters counts as a failed extraction
     if _TRAF:
@@ -375,6 +429,8 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
     import time
     started = time.time()
     urls = list(dict.fromkeys(urls))
+    ads = [u for u in urls if _AD_URL.search(u)]
+    urls = [u for u in urls if not _AD_URL.search(u)]
     print(f"      reading {len(urls)} pages ({workers} at a time)...")
     texts = _read_pages_isolated(urls, max_chars, workers)
     pages = {u: texts[u] for u in urls if texts.get(u)}
@@ -395,7 +451,18 @@ def fetch_pages(urls, max_chars=CONTENT_CHARS, workers=8):
         except Exception as e:
             print(f"      camoufox unavailable: {type(e).__name__}")
 
-    print(f"      read {len(pages)} of {len(urls)} pages in {time.time() - started:.0f}s")
+    # Leave out error pages, bot checks, binary text and near-empty pages
+    from collections import Counter
+    dropped = Counter()
+    for u in list(pages):
+        why = page_problem(pages[u])
+        if why:
+            dropped[why] += 1
+            del pages[u]
+    if ads:
+        dropped["search ad or video"] = len(ads)
+    print(f"      read {len(pages)} of {len(urls)} pages in {time.time() - started:.0f}s"
+          + (f"; left out: {', '.join(f'{n} {why}' for why, n in dropped.items())}" if dropped else ""))
     return pages
 
 
@@ -841,7 +908,19 @@ def load_title_translations(corpus, corpus_dir=SCRATCHPAD):
 
 
 def detect_lang(text):
-    """Return the base language code ("en", "zh") of text over 50 characters, else "unknown"."""
+    """Return the base language code ("en", "zh") of text over 50 characters, else "unknown".
+    Korean, Japanese, Chinese and Russian are told by their script, which the detector gets wrong."""
+    sample = (text or "")[:2000]
+    letters = len(re.findall(r"[^\W\d_]", sample)) or 1
+    share = {lang: len(re.findall(script, sample)) / letters
+             for lang, script in [("ko", r"[\uac00-\ud7a3]"), ("kana", r"[\u3040-\u30ff]"),
+                                  ("han", r"[\u4e00-\u9fff]"), ("ru", r"[\u0400-\u04ff]")]}
+    if share["ko"] > 0.2:
+        return "ko"
+    if share["kana"] + share["han"] > 0.2:
+        return "ja" if share["kana"] > 0.03 else "zh"   # Japanese mixes kana into its kanji
+    if share["ru"] > 0.2:
+        return "ru"
     if _LANG and text and len(text) > 50:
         try:
             return _detect_lang(text[:500]).split("-")[0]
@@ -1005,12 +1084,83 @@ def build_evidence_cards(corpus, api_key, model, corpus_dir=SCRATCHPAD):
     if todo:
         print(f"   {len(todo)} sources still have no card (AI calls failed or skipped them)")
 
+    # Cards the AI left in the source's language (mostly Japanese, Chinese,
+    # Korean or Russian script) are translated; a translation must keep the numbers
+    def foreign(card):
+        letters = re.findall(r"[^\W\d_]", card) or ["x"]
+        return len(re.findall(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7a3\u0400-\u04ff]", card)) / len(letters) > 0.3
+    redo = [k for k, v in cache.items() if foreign(v["card"])]
+    if redo:
+        print(f"   Translating {len(redo)} cards written in their source's language...")
+    for start in range(0, len(redo), 40):
+        batch = redo[start:start + 40]
+        reply = call_ai("Translate each line into English. Keep every number and name. One line "
+                        "each, starting with its label:\nT1: <translation>\n\n"
+                        + "\n".join(f"T{i}: {cache[k]['card']}" for i, k in enumerate(batch, 1)),
+                        api_key, model, temp=0) or ""
+        for m in re.finditer(r"^\W*T(\d+)\W*:\s*(.+)$", reply, re.M):
+            i = int(m.group(1)) - 1
+            if 0 <= i < len(batch):
+                old_card, new_card = cache[batch[i]]["card"], m.group(2).strip()
+                if set(re.findall(r"\d+", old_card)) <= set(re.findall(r"\d+", new_card)):
+                    cache[batch[i]]["card"] = new_card
+
     Path(corpus_dir).mkdir(exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
     return {s["idx"]: cache[str(s["idx"])]["card"]
             for s in corpus if str(s["idx"]) in cache}
+
+
+# The source types, as the AI is asked to choose them (labels as classify_source writes them)
+SOURCE_TYPES = {
+    "vendor/primary": "a company writing about AI or software tools it makes or sells",
+    "consulting": "a consultancy or market-research firm",
+    "journalism": "news media or a magazine",
+    "academic": "a university, research paper or journal",
+    "government": "a government body",
+    "intl institution": "an international organisation (OECD, UN, EU...)",
+    "experiential/forum": "a forum, Q&A site or community discussion",
+    "experiential/blog": "a personal or developer blog, or an individual's tutorial",
+    "SEO risk": "a content farm, listicle, affiliate or review site made to rank in search",
+}
+TYPES_FILE = "source_types.json"
+
+
+def type_sources(corpus, cards, api_key, model, corpus_dir=SCRATCHPAD):
+    """
+    Give a type to each source the domain rules left "unclassified": the AI chooses
+    from SOURCE_TYPES by the site, title and evidence card. Cached in
+    corpus_dir/source_types.json; sets s["quality"] and returns how many changed.
+    """
+    path = os.path.join(corpus_dir, TYPES_FILE)
+    cache = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    todo = [s for s in corpus if s.get("quality") == "unclassified" and s.get("url") not in cache]
+    for start in range(0, len(todo), 60):
+        batch = todo[start:start + 60]
+        reply = call_ai(
+            "For each source below, choose who published it, from these types:\n"
+            + "\n".join(f"{t}: {d}" for t, d in SOURCE_TYPES.items())
+            + "\nunclassified: none fits, or you cannot tell\n"
+            "Answer one line per source: S1: <type>\n\n"
+            + "\n".join(f"S{i}: {s.get('domain', '')} | {s.get('title', '')[:100]} | "
+                         f"{cards.get(s['idx'], '')[:200]}" for i, s in enumerate(batch, 1)),
+            api_key, model, temp=0) or ""
+        for m in re.finditer(r"^\W*S(\d+)\W*:\s*(.+?)\s*$", reply, re.M):
+            i, label = int(m.group(1)) - 1, m.group(2).strip().strip("*").lower()
+            match = next((t for t in SOURCE_TYPES if t.lower() == label), None)
+            if 0 <= i < len(batch) and match:
+                cache[batch[i]["url"]] = match
+    if todo:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=1, ensure_ascii=False)
+    changed = 0
+    for s in corpus:
+        if s.get("quality") == "unclassified" and cache.get(s.get("url")):
+            s["quality"] = cache[s["url"]]
+            changed += 1
+    return changed
 
 
 def load_evidence_cards(corpus_dir=SCRATCHPAD):

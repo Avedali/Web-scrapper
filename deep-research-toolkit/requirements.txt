@@ -10,6 +10,7 @@ multi_search_engine          # Fallback: Google search when DDG returns empty (n
 
 # --- Content extraction ---
 trafilatura
+pypdf                        # Text of PDF reports and papers
 camoufox[geoip]
 
 # --- Academic search ---

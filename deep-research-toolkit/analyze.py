@@ -24,6 +24,7 @@ from core import (
     pad,
     call_ai,
     build_evidence_cards,
+    type_sources,
     NO_EVIDENCE,
 )
 
@@ -136,12 +137,6 @@ def run_analyze(args):
     except ImportError:
         sys.exit("pip install pandas")
 
-    df = pd.DataFrame(corpus)
-
-    df["content"] = df["content"].fillna("")
-    if ANALYZE_CHARS:
-        df["content"] = df["content"].str.slice(0, ANALYZE_CHARS)
-
     # ── Evidence cards: cached English summary per source ──────────
     api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
     model = getattr(args, "model", None) or "google/gemini-2.5-flash-lite"
@@ -149,6 +144,25 @@ def run_analyze(args):
     if not api_key:
         print("   No API key -- topics and themes will use the raw pages "
               "(set a key for English evidence cards)")
+
+    # Types for the sources the domain rules could not place; saved to corpus.json
+    if api_key:
+        typed = type_sources(corpus, cards, api_key, model, args.corpus)
+        if typed:
+            with open(corpus_path, "w", encoding="utf-8") as f:
+                json.dump(corpus, f, indent=2, ensure_ascii=False)
+            left = sum(1 for s in corpus if s.get("quality") == "unclassified")
+            print(f"   Source types: {typed} sources typed by the AI, {left} still unclassified")
+
+    # Sources whose card found no evidence (off-topic or empty pages) stay out of the analysis
+    no_evidence = {i for i, c in cards.items() if c.startswith(NO_EVIDENCE)}
+    if no_evidence:
+        print(f"   Leaving out {len(no_evidence)} sources with no usable evidence")
+    df = pd.DataFrame([s for s in corpus if s["idx"] not in no_evidence])
+
+    df["content"] = df["content"].fillna("")
+    if ANALYZE_CHARS:
+        df["content"] = df["content"].str.slice(0, ANALYZE_CHARS)
 
     def card_or_text(row):
         """The source's evidence card if it has a usable one, else its text."""

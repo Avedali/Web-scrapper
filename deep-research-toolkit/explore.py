@@ -25,6 +25,7 @@ from core import (
     search_many,
     region_for,
     fetch_pages,
+    page_problem,
     PAGE_META,
     CONTENT_CHARS,
     search_academic,
@@ -83,6 +84,45 @@ def _reference_site(url):
     u = url.lower().split("://")[-1]
     return next((d for d in REFERENCE_DOMAINS if u.startswith(d) or f".{d}" in u.split("/")[0]
                  or ("/" in d and d in u)), None)
+
+
+def _clean_sources(sources):
+    """
+    Drop unusable pages (see core.page_problem) and duplicates: the same arXiv paper under
+    /abs, /pdf or /html, the same title, or the same opening text (a syndicated copy).
+    Of two copies, the longer text is kept, in the first one's place.
+    """
+    def keys(url, s):
+        out = []
+        m = re.search(r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})", url)
+        if m:
+            out.append("arxiv " + m.group(1))
+        title = re.sub(r"\W+", "", (s.get("title") or "").lower())
+        if len(title) >= 20:
+            out.append("title " + title[:60])
+        text = re.sub(r"\W+", "", (s.get("content") or "").lower())
+        if len(text) >= 300:
+            out.append("text " + text[:400])
+        return out
+
+    kept, owner, dropped = {}, {}, Counter()
+    for url, s in sources.items():
+        why = page_problem(s.get("content", ""))
+        if why:
+            dropped[why] += 1
+            continue
+        first = next((owner[k] for k in keys(url, s) if k in owner), None)
+        if first is None:
+            kept[url] = s
+            for k in keys(url, s):
+                owner[k] = url
+            continue
+        dropped["duplicate"] += 1
+        if len(s.get("content", "")) > len(kept[first].get("content", "")):
+            kept[first] = {**s, "queries": kept[first].get("queries", []) + s.get("queries", [])}
+    if dropped:
+        print(f"   Left out before saving: {', '.join(f'{n} {why}' for why, n in dropped.items())}")
+    return kept
 
 
 def define_terms(topic, api_key, model):
@@ -521,6 +561,7 @@ def run_explore(args):
     print(f"   {added} sources added")
 
     # ── Save: corpus.json and sources_meta.json, old ones backed up ─
+    sources = _clean_sources(sources)
     if not sources:
         sys.exit("No sources found -- check the internet connection and try again. "
                  "Any previous corpus was kept.")
