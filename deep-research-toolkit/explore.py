@@ -19,7 +19,7 @@ import json
 import sys
 import os
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from core import (
     search_many,
@@ -483,15 +483,32 @@ def run_explore(args):
     # ── Phase 6.5: Bias check (geographic, optimism, demographic skew) ─
     print(f"\n{'─'*50}\n BIAS CHECK\n{'─'*50}")
 
+    # Facts counted in code, so the audit rests on counts rather than impressions
+    years = Counter(str(s.get("date") or s.get("year") or "")[:4] or "no date" for s in sources.values())
+    figures = Counter()   # A figure repeated by many sources often traces back to one study
+    for src in sources.values():
+        figures.update(set(re.findall(r"(?<![\d.])\d{1,3}(?:\.\d)?\s?%", src.get("content", ""))))
+    counted = (f"PUBLICATION YEARS: {dict(sorted(years.items()))}\n"
+               "FIGURES REPEATED ACROSS SOURCES (figure: number of sources): "
+               + ", ".join(f"{f}: {n}" for f, n in figures.most_common(12) if n >= 3))
+
     bias = critique_call(
-        "Audit this collection of sources for bias. Under each heading, say whether the "
-        "collection is skewed, and how, with counts or source numbers as evidence:\n"
-        "Geographic: which countries and regions the sources speak for\n"
-        "Corporate: share of vendor and seller sources against independent ones\n"
-        "Optimism: whether the sources lean toward benefits or toward risks\n"
-        "Temporal: whether the sources are recent or dated\n"
-        "Linguistic: whether some languages are thin or only repeat English sources\n"
-        "Demographic: whose experience is missing (e.g. junior developers, non-tech companies)")
+        "Audit this collection of sources for the biases below, before it is used for a "
+        "research brief. Under each heading, say whether the collection shows the bias, how "
+        "strongly, and the evidence: counts from COUNTED IN CODE or source numbers.\n"
+        "Self-interest: sources that gain from the claims they make (vendors about their own "
+        "tools, consultancies selling AI services, review or affiliate sites)\n"
+        "Circular sourcing: the same few figures or studies repeated by many sources, which "
+        "makes one study look like broad agreement; name the figures and where they come from\n"
+        "Evidence type: self-reported surveys and opinions against measured outcomes; small "
+        "lab tasks against real company data\n"
+        "Hype: launches, success stories and positive results against negative or null findings\n"
+        "Recency: figures about older tools presented as current\n"
+        "Selection: who is studied and who is missing (e.g. experienced vs junior developers, "
+        "big tech vs smaller or non-tech companies, regulated sectors such as finance)\n"
+        "Geographic: which markets the evidence comes from, and whether non-English sources "
+        "add local evidence or repeat English ones\n\n"
+        f"COUNTED IN CODE:\n{counted}")
 
     pad("065_bias", f"# Bias Audit\n\n{bias}")
 
