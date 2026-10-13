@@ -166,10 +166,13 @@ GUARDRAIL_TASKS = [
 ]
 
 # Default OpenRouter models
-DEFAULT_MODELS = [
+DEFAULT_MODELS = [   # US, EU and Chinese models
     "meta-llama/llama-4-scout",
     "mistralai/mistral-small-3.2-24b-instruct",
     "openai/gpt-4o-mini",
+    "deepseek/deepseek-chat-v3.1",
+    "qwen/qwen3-coder",
+    "moonshotai/kimi-k2",
 ]
 
 
