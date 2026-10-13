@@ -223,7 +223,10 @@ def main():
             print("\n  Generating charts in two formats:")
             print("     - Paper: captioned, labeled (for the written paper)")
             print("     - Slides: minimal, finding as title (for the presentation)\n")
-            run_mode("viz")
+            print("  Chart on one topic? Type it (e.g. adoption by country),")
+            print("  or press Enter for all charts.\n")
+            request = input("  Topic: → ").strip()
+            run_mode("viz", [request] if request else None)
 
         # --- 7: Simulate ---
         elif choice == "7":

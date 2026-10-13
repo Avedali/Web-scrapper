@@ -16,6 +16,8 @@ Deepen: Finds thin themes in the brief and searches for more evidence
 
 Viz: Draws charts of the findings, chosen from the shape of the data (data-to-viz.com), with APA sources under each chart
 
+Chart on request: Option 6, then type a topic (or: python3 agent.py viz "adoption by country"). Charts only the findings about it, in charts_slide/requested/, or says there is not enough data
+
 Simulate: Gives AI models the same coding tasks at three prompt skill levels and tests the pages they build
 
 Ask: Answers teammates' questions about the research, with 5-turn memory
@@ -37,7 +39,7 @@ Output:
 
 Research Brief: Markdown report with numbered citations and a fact-check verdict (PASS or NEEDS REVIEW) at the top
 
-Charts: Findings charts in charts_paper/ and charts_slide/, method charts in appendix/, as PNG and interactive HTML
+Charts: Findings charts in charts_paper/ and charts_slide/, sentiment charts with their test results in appendix/, topic-model charts in charts_method/, as PNG and interactive HTML
 
 Scratchpad: All intermediate work (definitions, queries, claim ledger, fact-check log, run log)
 

@@ -10,6 +10,7 @@ Uses pingouin if installed (effect sizes, power, Bayes Factor), else scipy.
 # IMPORTS
 # ════════════════════════════════════════════════════════════════════════
 
+import json
 import sys
 import os
 
@@ -19,6 +20,9 @@ from core import pad
 # ════════════════════════════════════════════════════════════════════════
 # MAIN: corpus or survey path
 # ════════════════════════════════════════════════════════════════════════
+
+
+MIN_GROUP = 10   # Categories with fewer sources are merged into "other" for chi-squared
 
 def run_stats(args):
     """Run survey stats if --data is given, else corpus stats."""
@@ -50,8 +54,9 @@ def run_stats(args):
 # ════════════════════════════════════════════════════════════════════════
 
 def _corpus_stats(df, args):
-    """Run the corpus tests on analyze mode's columns; saves scratchpad stats_report."""
+    """Run the corpus tests on analyze mode's columns; saves scratchpad stats_report and stats_results.json."""
     import pandas as pd
+    results = {}   # Key test results, for the charts (viz)
 
     report = "# Statistical Analysis\n\n"
 
@@ -111,6 +116,9 @@ def _corpus_stats(df, args):
                 report += (f"## Mann-Whitney U\nU={u:.1f}, p={p:.4f}\n"
                            + _mwu_in_words(vendor, non_vendor, p) + "\n")
 
+            results["vendor_vs_other"] = {"p": p, "n_vendor": len(vendor), "n_other": len(non_vendor),
+                                          "mean_vendor": float(vendor.mean()), "mean_other": float(non_vendor.mean())}
+
     # ── TEST 2: Kruskal-Wallis (sentiment across languages) ─────────
     # Checks whether sentiment differs across 3+ languages with 3+ sources each
     if "lang" in df.columns and "sentiment" in df.columns:
@@ -136,6 +144,8 @@ def _corpus_stats(df, args):
                 print(f"   H = {h:.2f}, p = {p:.4f}")
                 report += (f"## Kruskal-Wallis\nH={h:.2f}, p={p:.4f}\n"
                            + _kruskal_in_words(groups, p) + "\n")
+
+            results["languages"] = {"p": p, "languages": sorted(groups)}
 
     # ── TEST 3: Spearman correlations ───────────────────────────────
     # Checks whether numeric columns rise or fall together (rank-based)
@@ -187,8 +197,16 @@ def _corpus_stats(df, args):
 
         from itertools import combinations
 
+        # Categories with fewer than MIN_GROUP sources are merged into "other",
+        # so each cell can reach the 5 expected cases the test needs
+        merged = df[cat_pairs].copy()
+        for c in cat_pairs:
+            counts = merged[c].value_counts()
+            small = counts[counts < MIN_GROUP].index
+            merged[c] = merged[c].where(~merged[c].isin(small), "other")
+
         for c1, c2 in combinations(cat_pairs, 2):
-            ct = pd.crosstab(df[c1], df[c2])
+            ct = pd.crosstab(merged[c1], merged[c2])
 
             if ct.shape[0] >= 2 and ct.shape[1] >= 2:
 
@@ -213,12 +231,12 @@ def _corpus_stats(df, args):
                         report += (f"## {c1} × {c2}\nFisher's exact p={p_fisher:.4f}, "
                                    f"odds={odds:.2f}\n\n")
                     else:
-                        sig = "*" if p < 0.05 else " "
-                        print(f"   {sig} {c1} × {c2}: χ²={chi2:.1f}, p={p:.4f}, V={v:.3f}")
-                        print(f"      CAUTION: {pct_low:.0f}% of cells have expected "
-                              f"freq < 5 -- p-value may be unreliable")
-                        report += (f"## {c1} × {c2}\nχ²={chi2:.1f}, p={p:.4f}, V={v:.3f}\n"
-                                   f"{pct_low:.0f}% cells < 5 expected -- interpret with caution\n\n")
+                        # Still too sparse after merging: a p-value here would not be valid
+                        print(f"     {c1} × {c2}: not tested ({pct_low:.0f}% of cells expect fewer "
+                              "than 5 sources; the test needs at most 20%)")
+                        report += (f"## {c1} × {c2}\nNot tested: {pct_low:.0f}% of cells expect fewer "
+                                   "than 5 sources, even after merging small groups (the test needs at "
+                                   "most 20%). More sources per group are needed.\n\n")
                 else:
                     sig = "*" if p < 0.05 else " "
                     print(f"   {sig} {c1} × {c2}: χ²={chi2:.1f}, p={p:.4f}, V={v:.3f}")
@@ -322,6 +340,8 @@ def _corpus_stats(df, args):
 
     # ── Save ────────────────────────────────────────────────────────
     pad("stats_report", report)
+    with open(os.path.join(args.corpus, "stats_results.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=1)
     print(f"\n{'='*60}\nSTATS COMPLETE\n{'='*60}")
 
 

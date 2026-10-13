@@ -19,7 +19,7 @@ import os
 import re
 import datetime
 
-from core import (call_ai, source_label, apa_reference, apa_in_text,
+from core import (call_ai, source_label, LANGUAGES, apa_reference, apa_in_text,
                   load_title_translations)
 import verify
 
@@ -57,6 +57,8 @@ def run_viz(args):
         sys.exit("Run 'python agent.py analyze' first.")
 
     df = pd.read_csv(csv_path)
+    tests_path = os.path.join(args.corpus, "stats_results.json")   # Test results from stats, if run
+    tests = json.load(open(tests_path, encoding="utf-8")) if os.path.exists(tests_path) else {}
     if "quality" in df.columns:
         df["source_type"] = df["quality"].map(source_label)
     charts = 0
@@ -166,13 +168,12 @@ def run_viz(args):
             by_idx = {int(src["idx"]): src for src in json.load(f)}
         load_title_translations(list(by_idx.values()), args.corpus)
 
-        # ── Up to 3 charts per theme, form chosen by _form ──────────
         api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            print("   No API key: skipping the findings charts (they need one AI call per theme)")
-        else:
-            colors = {"accent": ACCENT, "dark": DARK, "muted": MUTED, "gray": GRAY, "blue": "#457B9D"}
-            for c in _theme_charts(brief, by_idx, api_key, args.model):
+        colors = {"accent": ACCENT, "dark": DARK, "muted": MUTED, "gray": GRAY, "blue": "#457B9D"}
+
+        def draw_all(charts_list):
+            """Draw and save each chart, with its sources cited APA style."""
+            for c in charts_list:
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
                 srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
@@ -181,6 +182,33 @@ def run_viz(args):
                      note=_wrap(f"Sources: {apa_in_text(srcs)}", 150),
                      paper_note="Sources:<br>" + "<br>".join(
                          _wrap(re.sub(r"\*([^*]+)\*", r"<i>\1</i>", apa_reference(x)), 160) for x in srcs))
+
+        # ── A chart on request ("adoption by country"): only that, in requested/ ─
+        request = (getattr(args, "question", None) or "").strip()
+        if request:
+            if not api_key:
+                sys.exit("A chart on request needs the API key (run install.py).")
+            folder = re.sub(r"\W+", "_", request.lower()).strip("_")[:40] or "request"
+            paper_root = os.path.join(args.corpus, "charts_paper", "requested", folder)
+            slide_root = os.path.join(args.corpus, "charts_slide", "requested", folder)
+            asked, matched = _request_brief(brief, request)
+            print(f"   Request: {request}\n   {matched} findings with numbers match it")
+            made = _theme_charts(asked, by_idx, api_key, args.model) if matched >= 2 else []
+            if not made:
+                print(f"\n   Not enough data for a chart on '{request}': "
+                      + ("fewer than 2 findings with numbers match it." if matched < 2 else
+                         f"{matched} findings match, but no 2 of them measure the same thing.")
+                      + "\n   Try a broader request, or run deepen to look for more evidence.")
+                return
+            draw_all(made)
+            print(f"\n   {charts} chart(s) saved in {slide_root}/ and {paper_root}/")
+            return
+
+        # ── Up to 3 charts per theme, form chosen by _form ──────────
+        if not api_key:
+            print("   No API key: skipping the findings charts (they need one AI call per theme)")
+        else:
+            draw_all(_theme_charts(brief, by_idx, api_key, args.model))
 
         # ── Word cloud of the findings ──────────────────────────────
         try:
@@ -262,16 +290,19 @@ def run_viz(args):
         n_total = len(df)
 
         is_vendor = df["quality"].str.contains("vendor", case=False, na=False)
+        test = tests.get("vendor_vs_other")
         if is_vendor.any() and (~is_vendor).any():
             v_mean = df.loc[is_vendor, "sentiment"].mean()
             o_mean = df.loc[~is_vendor, "sentiment"].mean()
             slide_title = (f"Sources from AI tool makers average {v_mean:+.2f} sentiment.<br>"
-                           f"Other sources average {o_mean:+.2f}")
+                           f"Other sources average {o_mean:+.2f}"
+                           + (f" ({_verdict(test['p'])})" if test else ""))
         else:
             slide_title = "Sentiment by source type"
 
         save(fig, "sentiment_by_source_type",
-             f"Sentiment of each source, by type of source (N={n_total})",
+             f"Sentiment of each source, by type of source (N={n_total})"
+             + (f". Tool makers against all others: Mann-Whitney U test, {_p_text(test['p'])}" if test else ""),
              slide_title, appendix=True)
 
     # ════════════════════════════════════════════════════════════════
@@ -285,7 +316,11 @@ def run_viz(args):
             n=("sentiment", "count"),
         ).reset_index()
 
-        data = data[data["n"] >= 2].sort_values("m")
+        test = tests.get("languages")
+        # The languages the stats test compared (3+ sources each), else those with 2+
+        keep = data["lang"].isin(test["languages"]) if test else data["n"] >= 2
+        data = data[keep].sort_values("m")
+        data["lang"] = [LANGUAGES.get(c, {}).get("name", c) for c in data["lang"]]   # "zh" → "Chinese"
 
         if len(data) >= 2:
 
@@ -308,7 +343,7 @@ def run_viz(args):
                     mode="markers+text",
                     marker=dict(size=14, color=color),
                     text=[f"{row['m']:+.2f} (n={int(row['n'])})"],
-                    textposition="middle right",
+                    textposition="middle left" if row["m"] < 0 else "middle right",
                     showlegend=False,
                 ))
 
@@ -316,13 +351,17 @@ def run_viz(args):
 
             lo_x, hi_x = min(0, data["m"].min()), max(0, data["m"].max())
             span = (hi_x - lo_x) or 1
-            fig.update_xaxes(range=[lo_x - 0.05 * span, hi_x + 0.3 * span])
+            fig.update_xaxes(range=[lo_x - (0.3 if lo_x < 0 else 0.05) * span, hi_x + 0.3 * span])
 
             lo, hi = data.iloc[0], data.iloc[-1]
             save(fig, "sentiment_by_language",
-                 "Average sentiment of the sources in each language",
+                 "Average sentiment of the sources in each language"
+                 + (f". Kruskal-Wallis test across languages: {_p_text(test['p'])}" if test else ""),
                  f"Most positive: {hi['lang']} ({hi['m']:+.2f}). "
-                 f"Least positive: {lo['lang']} ({lo['m']:+.2f})", appendix=True)
+                 f"Least positive: {lo['lang']} ({lo['m']:+.2f})"
+                 + (f"<br>Languages differ ({_verdict(test['p'])})" if test and test["p"] < 0.05 else
+                    f"<br>No clear difference between languages ({_p_text(test['p'])})" if test else ""),
+                 appendix=True)
 
     # ════════════════════════════════════════════════════════════════
     # CHART 3: Language coverage (treemap)
@@ -617,6 +656,38 @@ def _theme_charts(brief, by_idx, api_key, model):
             c["form"] = _form(c)
             charts.append(c)
     return charts
+
+
+REQUEST_MATCH = 0.35   # Meaning-similarity a finding needs to count as about the request
+
+
+def _request_brief(brief, request):
+    """
+    A one-theme brief for a chart on request: the brief's findings with numbers that are
+    about the request (by meaning when the matching model is installed, else by shared
+    words), plus every finding of a theme whose title the request names.
+    Returns (brief, number of matching findings).
+    """
+    numbered = [f for f in brief.get("findings", []) if re.search(r"\d", f["claim"])]
+    named = {t["title"] for t in brief.get("themes", [])
+             if request.lower() in t["title"].lower() or t["title"].lower() in request.lower()}
+    model = verify._match_model()
+    if model is not None and numbered:
+        from sentence_transformers import util
+        score = util.cos_sim(model.encode([request], convert_to_tensor=True),
+                             model.encode([f["claim"] for f in numbered], convert_to_tensor=True))[0].tolist()
+        need = REQUEST_MATCH
+    else:
+        words = set(re.findall(r"\w{4,}", request.lower()))
+        score = [len(words & set(re.findall(r"\w{4,}", f["claim"].lower()))) for f in numbered]
+        need = max(1, len(words) // 2)
+    # Most relevant first, so the cap on findings shown to the AI drops the least relevant
+    ranked = sorted(((sc + (1 if f.get("theme") in named else 0), f) for sc, f in zip(score, numbered)
+                     if sc >= need or f.get("theme") in named), key=lambda x: -x[0])
+    found = [dict(f, theme=request) for _, f in ranked[:MAX_NUMBERED]]
+    return ({"question": brief.get("question", ""),
+             "themes": [{"title": request, "key_finding": f"What the evidence says about {request}"}],
+             "findings": found}, len(found))
 
 
 def _read_table(reply, found, by_idx):
@@ -1006,3 +1077,14 @@ def _unique(labels):
         seen[label] = seen.get(label, 0) + 1
         out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
     return out
+
+
+def _p_text(p):
+    """A p-value as text: "p<0.001" or "p=0.032"."""
+    return "p<0.001" if p < 0.001 else f"p={p:.3f}"
+
+
+def _verdict(p):
+    """What a test result means, in plain words."""
+    return (f"a difference unlikely to be chance, {_p_text(p)}" if p < 0.05
+            else f"not clearly different from chance, {_p_text(p)}")
