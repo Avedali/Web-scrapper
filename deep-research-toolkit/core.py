@@ -559,7 +559,14 @@ def call_ai(prompt, api_key, model, temp=0.6, system="", max_tokens=16000):
 
             r.raise_for_status()
 
-            return r.json()["choices"][0]["message"]["content"] or ""
+            choice = r.json()["choices"][0]
+            # A reply the provider broke off ("error") is retried; "length" (max_tokens
+            # reached) and "stop" are complete replies
+            if choice.get("finish_reason") == "error" and attempt < len(waits):
+                print(f"   AI reply broke off -- retrying in {waits[attempt]}s", flush=True)
+                time.sleep(waits[attempt])
+                continue
+            return choice["message"]["content"] or ""
 
         except (requests.ConnectionError, requests.Timeout) as e:
             if attempt < len(waits):

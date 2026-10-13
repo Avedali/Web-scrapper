@@ -387,14 +387,14 @@ def run_explore(args):
         ("JetBrains developer ecosystem survey AI", "us-en"),
         ("OECD AI software workers report", "us-en"),
         ("EU AI Act software development", "us-en"),
-        ("GitHub Copilot productivity Microsoft study", "us-en"),
+        ("AI pair programming controlled experiment productivity", "us-en"),
         ("AIコーディングアシスタント 調査 日本", "jp-jp"),
         ("中国AI编程工具 开发者 报告", "cn-zh"),
     ]], sources)
     print(f"   {added} authoritative sources")
 
     # Semantic Scholar + arXiv; the abstract is the content
-    for q in ["AI code generation productivity", "GitHub Copilot study", "LLM code quality"]:
+    for q in ["AI code generation productivity", "AI coding assistant randomized controlled trial", "LLM code quality"]:
         for p in search_academic(q, n=3):
             if p["url"] not in sources:
                 sources[p["url"]] = {
@@ -413,7 +413,7 @@ def run_explore(args):
     # ── Phase 5: Experiential sources (developer voices) ────────────
     print(f"\n{'─'*50}\n EXPERIENTIAL\n{'─'*50}")
 
-    for q in ["Copilot experience", "Cursor AI review", "coding assistant"]:
+    for q in ["AI coding assistant experience", "AI code editor review", "coding assistant"]:
         for r in search_hn(q, n=5):
             if r["url"] not in sources:
                 sources[r["url"]] = {
@@ -428,9 +428,11 @@ def run_explore(args):
                 }
 
     added = _gather([(q, 5, region, "mixed") for q, region in [
-        ("site:dev.to Copilot review developer", "us-en"),
-        ('"mon expérience avec Copilot" développeur', "fr-fr"),
-        ("Copilot 使ってみた エンジニア", "jp-jp"),
+        ("site:dev.to AI coding assistant experience developer", "us-en"),
+        ('"mon expérience" assistant de code IA développeur', "fr-fr"),
+        ("AIコーディング 使ってみた エンジニア", "jp-jp"),
+        ("AI编程助手 使用体验 程序员", "cn-zh"),
+        ("AI 코딩 도우미 사용 후기 개발자", "kr-kr"),
     ]], sources, quality="experiential/blog")
     print(f"   {added} developer blog posts")
 
@@ -444,18 +446,35 @@ def run_explore(args):
         lc[s.get("source_lang", "?")] += 1
         qc[s["quality"]] += 1
 
-    critique = call_ai(
-        f"Red-team this research. Look for: hallucination risks, SEO sources, "
-        f"contradictions, gaps, single-source claims, stale data, vendor bias.\n\n"
-        f"SOURCES: {len(sources)} | LANGS: {dict(lc)} | QUALITY: {dict(qc)}\n\n"
-        + "\n".join(
-            f"[{s['quality']}][{s.get('source_lang', '?')}] {s['title']}"
-            for s in list(sources.values())[:25]
-        )
-        + "\n\nFor each gap, suggest a specific fix query. " + QUERY_FORMAT,
-        api_key, model, temp=0.4,
-        max_tokens=3000,   # Caps a model stuck repeating itself
-    )
+    # Every source as one line: number, type, language, title, site, opening text
+    # (the numbers are the ones the corpus and the brief use)
+    listing = "\n".join(
+        f"[{i}] [{s['quality']}] [{s.get('source_lang', '?')}] {s['title'][:120]} ({s.get('domain', '')}): "
+        + re.sub(r"\s+", " ", s.get("content", ""))[:200]
+        for i, s in enumerate(sources.values(), 1))
+    profile = f"SOURCES: {len(sources)} | LANGUAGES: {dict(lc)} | TYPES: {dict(qc)}"
+
+    def critique_call(task):
+        """Ask for one critique of all sources; ask again once if it gave no search queries."""
+        prompt = (f"TOPIC: {topic}\n{profile}\n\n{task}\n\nName the sources each point is about "
+                  f"by their numbers, e.g. [12, 40]. End with up to {GAP_QUERIES} searches that "
+                  "would fix the weaknesses you found, in the language of the sources they should "
+                  f"find. {QUERY_FORMAT}\n\nSOURCES (number, type, language, title, site, opening "
+                  f"text):\n{listing}")
+        reply = call_ai(prompt, api_key, model, temp=0.4, max_tokens=6000)
+        if not extract_search_queries(reply):
+            reply = call_ai(prompt, api_key, model, temp=0.6, max_tokens=6000) or reply
+        return reply
+
+    critique = critique_call(
+        "Red-team this collection of sources before it is used for a research brief. Under each "
+        "heading, list the concrete problems you see:\n"
+        "Self-interested sources: vendors or sellers making claims about their own products\n"
+        "Low-quality pages: SEO pages, listicles, pages with no evidence\n"
+        "Contradictions: sources that disagree, and on what\n"
+        "Missing coverage: subtopics, regions, languages, years or source types that are absent "
+        "or thin\n"
+        "Stale data: sources whose figures are likely out of date")
 
     pad("06_red_team", f"# Red Team\n\n{critique}")
 
@@ -464,13 +483,15 @@ def run_explore(args):
     # ── Phase 6.5: Bias check (geographic, optimism, demographic skew) ─
     print(f"\n{'─'*50}\n BIAS CHECK\n{'─'*50}")
 
-    bias = call_ai(
-        f"Bias audit. Check: geographic, optimism/pessimism, corporate, "
-        f"demographic, temporal, linguistic.\nLANGS: {dict(lc)}\n"
-        f"Suggest up to 12 fix queries (include non-English native script). " + QUERY_FORMAT,
-        api_key, model, temp=0.4,
-        max_tokens=3000,
-    )
+    bias = critique_call(
+        "Audit this collection of sources for bias. Under each heading, say whether the "
+        "collection is skewed, and how, with counts or source numbers as evidence:\n"
+        "Geographic: which countries and regions the sources speak for\n"
+        "Corporate: share of vendor and seller sources against independent ones\n"
+        "Optimism: whether the sources lean toward benefits or toward risks\n"
+        "Temporal: whether the sources are recent or dated\n"
+        "Linguistic: whether some languages are thin or only repeat English sources\n"
+        "Demographic: whose experience is missing (e.g. junior developers, non-tech companies)")
 
     pad("065_bias", f"# Bias Audit\n\n{bias}")
 
@@ -532,6 +553,6 @@ def run_explore(args):
     # ── Done ────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"EXPLORATION COMPLETE -- {len(sources)} sources gathered")
-    print("   No thesis yet. Run 'analyze' and 'stats' next,")
-    print("   then 'synthesize' to let the data speak.")
+    print("   Next: analyze and stats, then synthesize writes the brief.")
+    print("   Weak spots found: scratchpad/06_red_team.md and 065_bias.md")
     print(f"{'='*60}")
