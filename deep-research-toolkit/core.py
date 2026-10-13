@@ -5,11 +5,10 @@ How it works:
   AI: sends prompts to models through the OpenRouter API
   Scratchpad: saves and loads each mode's work
   Sources: classifies sources by type, writes APA references, detects language
-  Evidence cards: one short English summary per source, cached
-"""
+  Evidence cards: one short English summary per source, cached"""
 
 # ════════════════════════════════════════════════════════════════════════
-# IMPORTS
+# IMPORTS AND OPTIONAL LIBRARIES: each optional one sets a flag
 # ════════════════════════════════════════════════════════════════════════
 
 import json
@@ -20,11 +19,6 @@ import importlib.util
 import requests
 from urllib.parse import urlparse
 from pathlib import Path
-
-
-# ════════════════════════════════════════════════════════════════════════
-# OPTIONAL LIBRARIES: each sets a flag; missing ones disable their feature
-# ════════════════════════════════════════════════════════════════════════
 
 # ddgs queries several engines; duckduckgo_search is its old name (now returns nothing)
 try:
@@ -49,7 +43,6 @@ if _SEARCH_DDG or _SEARCH_GOOGLE:
 else:
     _SEARCH = "none"
 
-# Trafilatura: article text extraction
 try:
     import trafilatura
     from trafilatura.settings import use_config as _traf_config
@@ -219,7 +212,6 @@ def search_web(query, n=5, region="us-en"):
     for r in results:
         r["domain"] = urlparse(r.get("url", "")).netloc
 
-    # Drop results without an absolute http URL
     return [r for r in results if r["domain"] and r["url"].startswith("http")]
 
 
@@ -283,7 +275,6 @@ def search_hn(query, n=10):
         except Exception as e:
             print(f"      HN search error: {type(e).__name__}: {e}")
     else:
-        # No python-hn: web search limited to HN
         results = search_web(f"site:news.ycombinator.com {query}", n=n)
 
     return results
@@ -319,8 +310,7 @@ def _page_meta(html, url=None):
 
 
 def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
-    """Return a page's article text (up to max_chars) or None: trafilatura, then camoufox.
-    use_browser=False skips the slow camoufox tier."""
+    """Return a page's article text (up to max_chars) or None: trafilatura, then camoufox if use_browser."""
 
     # Tier 1: trafilatura; under 100 characters counts as a failed extraction
     if _TRAF:
@@ -758,8 +748,7 @@ def _apa_date(s, year_only=False):
 
 def apa_reference(s):
     """Return a source as an APA 7 reference; with no person named, the site is the author:
-    Doe, J., & Lee, K. (2024, March 5). *Title* [English title]. Site. URL
-    """
+    Doe, J., & Lee, K. (2024, March 5). *Title* [English title]. Site. URL"""
     title = (s.get("title") or s.get("domain") or "").strip().rstrip(".")
     translated = f" [{s['title_en'].strip().rstrip('.')}]" if s.get("title_en") else ""
     people = [_apa_person(a) for a in (s.get("authors") or [])][:20]
@@ -788,7 +777,7 @@ def apa_in_text(sources):
     return "(" + "; ".join(sorted(dict.fromkeys(one(s) for s in sources))) + ")"
 
 
-TITLES_FILE = "title_translations.json"  # English title cache, in corpus_dir
+TITLES_FILE = "title_translations.json"
 
 
 def translate_titles(corpus, api_key, model, corpus_dir=SCRATCHPAD):
@@ -859,8 +848,7 @@ def print_capabilities():
 
 
 def extract_quoted_queries(text, min_len=10):
-    """Return one-line quoted strings (straight or curly quotes) of at least min_len characters.
-    Matches every quote before filtering, so a short quote cannot pair the wrong quote marks."""
+    """Return one-line quoted strings (straight or curly quotes) of at least min_len characters."""
     quoted = re.findall(r'["\u201c]([^"\u201c\u201d\n]*)["\u201d]', text or "")
     return [q.strip() for q in quoted if len(q.strip()) >= min_len]
 
@@ -926,9 +914,8 @@ def ai_map(batches, make_prompt, api_key, model, temp=0.2, workers=4):
 # ════════════════════════════════════════════════════════════════════════
 # EVIDENCE CARDS: one short English summary per source
 # ════════════════════════════════════════════════════════════════════════
-# Cards shrink the multilingual corpus ~10x, so synthesize and analyze see every source
 
-CARDS_FILE = "evidence_cards.json"  # Card cache, in corpus_dir
+CARDS_FILE = "evidence_cards.json"
 NO_EVIDENCE = "NO EVIDENCE"  # Card text for pages with nothing usable
 CARD_VERSION = "v2"          # Change when the card prompt changes, so old cards are rewritten
 CHARS_PER_CARD_SENTENCE = 3000   # One card sentence per 3,000 characters of source text

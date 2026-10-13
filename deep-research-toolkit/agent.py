@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """agent.py: command-line entry point of the Deep Research Toolkit.
 Run: python agent.py MODE [--key KEY] ["question"]
-Modes: explore, synthesize, deepen, analyze, stats, viz, ask, simulate, verify
-Typical workflow: explore → analyze → stats → synthesize → deepen → analyze → viz → simulate
-"""
+Typical workflow: explore → analyze → stats → synthesize → deepen → analyze → viz → simulate"""
 import argparse
 import faulthandler
 import os
