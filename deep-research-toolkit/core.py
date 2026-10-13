@@ -1070,7 +1070,7 @@ def site_name(s):
     site = (s.get("site") or "").strip()
     if site and "." not in site and site.lower().replace(" ", "") != key:
         return site
-    return SITE_NAMES.get(key, key.capitalize())
+    return SITE_NAMES.get(key, " ".join(w.capitalize() for w in key.split("-")))   # "ai-tool-lab" → "Ai Tool Lab"
 
 
 # Words that make an author name an organization, written as is ("The Glean Team")
