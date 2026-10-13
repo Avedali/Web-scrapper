@@ -46,6 +46,8 @@ from core import (
     build_evidence_cards,  # English summary per source, 1-6 sentences
     NO_EVIDENCE,           # Card text for sources with nothing usable
     apa_reference,         # One source as an APA reference
+    translate_titles,      # English titles of non-English sources, for APA
+    load_title_translations,  # The same, read from their cache
     BANNED_PHRASES,        # LLM-speak phrases to remove (used by _plain_words)
     source_label,          # Plain name of a source type, for readers
 )
@@ -353,6 +355,7 @@ def run_synthesize(args):
     # 6. REFERENCES AND PLAIN WORDS
     # ════════════════════════════════════════════════════════════════
     print(f"\n{'─'*50}\n6. REFERENCES AND PLAIN WORDS\n{'─'*50}")
+    translate_titles(corpus, api_key, model, args.corpus)   # "Title [English title]" for APA
     apa_text = _build_apa(args.corpus)
     pad("synthesis_04_apa", f"# References (APA 7th)\n\n{apa_text}")
     body = theme_sections + [("Where the evidence disagrees", disagreements),
@@ -1207,16 +1210,11 @@ def _build_evidence_block(corpus_dir):
 
 def _build_apa(corpus_dir):
     """
-    Generate APA 7th edition references from the corpus.
-
-    APA format for a web source looks like:
-    Author. (Year). Title. Site Name. Retrieved Month Day, Year, from URL
-
-    Since we usually don't know the author (we scraped the pages),
-    we use the title and domain as available fields. When the publication
-    year is unknown, APA uses "n.d." (no date) and never the current year.
-
-    Non-English sources get a language note: [In Japanese].
+    The brief's reference list, one APA 7th edition reference per source
+    (core.apa_reference): the author(s) the page names, or the organization
+    behind the site; the publication date, or "n.d." when the page gives
+    none; the title, with its English translation in square brackets for a
+    non-English source; the URL.
 
     We read corpus.json instead of sources_meta.json, so each reference number
     is the same "idx" the evidence block uses for its [n] tags. deepen
@@ -1231,6 +1229,7 @@ def _build_apa(corpus_dir):
 
     with open(corpus_path, encoding="utf-8") as f:
         corpus = json.load(f)  # List of sources, each with its "idx"
+    load_title_translations(corpus, corpus_dir)   # English titles of non-English sources
 
     # Each entry keeps the source's number, the same "idx" the [n] tags use
     entries = [f"[{s.get('idx', pos)}] {apa_reference(s)}" for pos, s in enumerate(corpus, 1)]

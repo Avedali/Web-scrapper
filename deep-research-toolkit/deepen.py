@@ -38,6 +38,7 @@ from core import (
     search_many,      # Run several web searches at once
     region_for,       # Search region matching a query's script (ja, ko, ...)
     fetch_pages,      # Read many web pages at once
+    PAGE_META,        # Author, site and date of each page read
     CONTENT_CHARS,    # How much text to keep per source
     search_academic,  # Search Semantic Scholar + arXiv
     call_ai,          # Send a prompt to the AI
@@ -196,6 +197,7 @@ def run_deepen(args):
                 "content": pages[url][:CONTENT_CHARS],     # Cut long pages to CONTENT_CHARS
                 "quality": classify_source(r["domain"]),   # academic? vendor? etc.
                 "lang": detect_lang(pages[url]),           # What language?
+                **PAGE_META.get(url, {}),                  # Author(s), site name, date (for APA)
             })
             print(f"      {r['domain']} [{new_sources[-1]['lang']}]")
 
@@ -214,6 +216,7 @@ def run_deepen(args):
                         "content": p["snippet"][:CONTENT_CHARS],  # For papers, content = abstract
                         "quality": "academic",
                         "year": p.get("year"),           # Publication year (for APA)
+                        "authors": p.get("authors") or [],   # Paper authors (for APA)
                         "lang": "en",
                     })
                     print(f"      {p['title'][:50]}...")

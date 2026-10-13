@@ -393,6 +393,7 @@ def search_academic(query, n=5):
                     # otherwise return None (nothing). Safer than p.year which
                     # would crash if the paper doesn't have a year field.
                     "year": getattr(p, "year", None),
+                    "authors": [a.name for a in (getattr(p, "authors", None) or []) if getattr(a, "name", None)],
                     "citations": getattr(p, "citationCount", None),
                 })
         except Exception as e:
@@ -413,6 +414,7 @@ def search_academic(query, n=5):
                     "snippet": p.summary or "",   # The whole abstract
                     # p.published is a datetime object; .year extracts only the year
                     "year": p.published.year if p.published else None,
+                    "authors": [a.name for a in (p.authors or [])],
                 })
         except Exception as e:
             print(f"      arXiv error: {type(e).__name__}: {e}")
@@ -475,6 +477,36 @@ def search_hn(query, n=10):
 CONTENT_CHARS = 30000
 
 
+# Author, site name and publication date of each page read, by URL (filled
+# by fetch_page and the page-reading helper process; used for APA references)
+PAGE_META = {}
+
+
+def _page_meta(html, url=None):
+    """
+    The author(s), site name and publication date a page states in its HTML
+    (trafilatura reads the page's metadata tags). Returns {"authors": [...],
+    "site": "...", "date": "YYYY-MM-DD"}, with empty values when not stated.
+    """
+    try:
+        # original_date: the date the page was first published, not last edited
+        doc = trafilatura.extract_metadata(html, default_url=url,
+                                           date_config={"original_date": True, "extensive_search": True})
+    except Exception:
+        doc = None
+    if not doc:
+        return {"authors": [], "site": "", "date": ""}
+    authors = [a.strip() for a in re.split(r";|\band\b|\s&\s", doc.author or "") if a.strip()]
+    date = doc.date or ""
+    # A date in the web address (/2025/07/29/) is the publication date; the
+    # page's own tags sometimes give the date it was last edited instead
+    m = re.search(r"/(20\d\d)/(\d{1,2})/(\d{1,2})/", url or "")
+    if m and 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31:
+        date = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return {"authors": authors[:20], "site": (doc.sitename or "").strip(),
+            "date": date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else ""}
+
+
 def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
     """
     Visit a web page and extract its main article text.
@@ -508,6 +540,7 @@ def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
                 # Return it only if it has more than 100 characters.
                 # A result of 10 characters probably means extraction failed.
                 if text and len(text.strip()) > 100:
+                    PAGE_META[url] = _page_meta(html, url)   # Author, site and date, for APA references
                     return text[:max_chars]  # Truncate to max length
         except Exception:
             pass  # trafilatura failed; go on to Tier 2
@@ -628,6 +661,8 @@ def _read_pages_isolated(urls, max_chars, workers):
             elif "done" in msg:
                 reading.discard(msg["done"])
                 results[msg["done"]] = msg["text"]
+                if msg.get("meta"):
+                    PAGE_META[msg["done"]] = msg["meta"]
         return reading, proc.wait()
 
     results = {}
@@ -683,7 +718,8 @@ def _read_pages_worker():
 
     def read_one(url):
         emit({"start": url})
-        emit({"done": url, "text": fetch_page(url, job["max_chars"], use_browser=False)})
+        text = fetch_page(url, job["max_chars"], use_browser=False)
+        emit({"done": url, "text": text, "meta": PAGE_META.get(url)})
 
     with ThreadPoolExecutor(max_workers=job["workers"]) as pool:
         list(pool.map(read_one, job["urls"]))
@@ -1005,35 +1041,169 @@ def classify_source(domain):
     return "unclassified"  # Doesn't match any pattern
 
 
-def apa_reference(s, retrieved=None):
+# Site names that the web address alone spells wrong ("stackoverflow" → "Stack Overflow")
+SITE_NAMES = {"github": "GitHub", "stackoverflow": "Stack Overflow", "semanticscholar": "Semantic Scholar",
+              "arxiv": "arXiv", "mckinsey": "McKinsey & Company", "ibm": "IBM", "jetbrains": "JetBrains",
+              "linkedin": "LinkedIn", "youtube": "YouTube", "techcrunch": "TechCrunch", "openai": "OpenAI",
+              "deepmind": "DeepMind", "nytimes": "The New York Times", "wsj": "The Wall Street Journal",
+              "ft": "Financial Times", "bbc": "BBC", "oecd": "OECD", "nist": "NIST", "mit": "MIT",
+              "hbr": "Harvard Business Review", "bcg": "Boston Consulting Group", "pwc": "PwC",
+              "kpmg": "KPMG", "ey": "EY", "wikipedia": "Wikipedia", "medium": "Medium", "dev": "DEV Community",
+              "qiita": "Qiita", "zenn": "Zenn", "naver": "Naver", "csdn": "CSDN", "habr": "Habr"}
+_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+           "October", "November", "December"]
+
+
+def site_name(s):
     """
-    One source as an APA 7th edition reference. The scraped pages rarely name
-    an author, and APA then puts the title first:
-      Title. (Year). *Site*. [In Japanese]. Retrieved Month Day, Year, from URL
-    An unknown year is "n.d." (no date), never the current year.
+    The organization behind a source: the site name the page states, or one
+    made from its web address ("www.glean.com" → "Glean", "itmedia.co.jp" →
+    "Itmedia").
     """
-    from datetime import datetime
-    lang = s.get("lang", "")
-    note = f" [In {LANGUAGES.get(lang, {}).get('name', lang)}]." if lang and lang not in ("en", "unknown") else ""
-    when = retrieved or datetime.now().strftime("%B %d, %Y")
-    return (f"{s.get('title', '').strip() or s.get('domain', '')}. ({s.get('year') or 'n.d.'}). "
-            f"*{s.get('domain', '')}*.{note} Retrieved {when}, from {s.get('url', '')}")
+    parts = [p for p in (s.get("domain") or "").lower().split(".") if p not in ("www", "m")]
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "or", "ac", "gov", "org", "ne", "go", "edu"):
+        key = parts[-3]
+    else:
+        key = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+    # The site name the page states, unless it is only the web address again
+    # ("glean.com", "Stackoverflow")
+    site = (s.get("site") or "").strip()
+    if site and "." not in site and site.lower().replace(" ", "") != key:
+        return site
+    return SITE_NAMES.get(key, key.capitalize())
+
+
+# Words that make an author name an organization, written as is ("The Glean Team")
+_GROUP_WORDS = {"team", "staff", "editor", "editors", "editorial", "newsroom", "inc", "ltd", "llc",
+                "gmbh", "corp", "corporation", "group", "press", "media", "news", "blog", "admin",
+                "rédaction", "redaction", "redaktion", "research", "institute", "university", "foundation"}
+
+
+def _is_group(name):
+    """True if an author name is an organization rather than a person."""
+    words = re.findall(r"[^\W\d_]+", name.lower())
+    return name.lower().startswith("the ") or bool(_GROUP_WORDS & set(words)) or len(words) > 4
+
+
+def _apa_person(name):
+    """A person's name as APA writes it: "Jane A. Doe" → "Doe, J. A."; "Doe, Jane" → "Doe, J."."""
+    if _is_group(name):
+        return name
+    if "," in name:
+        last, first = [x.strip() for x in name.split(",", 1)]
+    else:
+        words = name.split()
+        if len(words) < 2:
+            return name
+        last, first = words[-1], " ".join(words[:-1])
+    initials = " ".join(f"{w[0]}." for w in re.split(r"[\s-]+", first) if w and w[0].isalpha())
+    return f"{last}, {initials}" if initials else last
+
+
+def _apa_surname(name):
+    """The surname of a person, for in-text citations."""
+    if _is_group(name):
+        return name
+    return name.split(",")[0].strip() if "," in name else name.split()[-1]
+
+
+def _apa_date(s, year_only=False):
+    """ "2024, March 5" (or "2024" when only the year is known) or "n.d." (no date)."""
+    date = s.get("date") or ""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date)
+    if m and not year_only:
+        return f"{m.group(1)}, {_MONTHS[int(m.group(2)) - 1]} {int(m.group(3))}"
+    return (m.group(1) if m else str(s.get("year") or "")) or "n.d."
+
+
+def apa_reference(s):
+    """
+    One source as an APA 7th edition reference for a web page or paper:
+      Doe, J., & Lee, K. (2024, March 5). *Title* [English title]. Site. URL
+    With no person named as author, the organization behind the site is the
+    author, and the site name is not repeated:
+      GitHub. (2024). *Title*. URL
+    A title in another language is followed by its English translation in
+    square brackets (s["title_en"], see translate_titles).
+    """
+    title = (s.get("title") or s.get("domain") or "").strip().rstrip(".")
+    translated = f" [{s['title_en'].strip().rstrip('.')}]" if s.get("title_en") else ""
+    people = [_apa_person(a) for a in (s.get("authors") or [])][:20]
+    date = _apa_date(s)
+    url = s.get("url", "")
+    if people:
+        names = people[0] if len(people) == 1 else ", ".join(people[:-1]) + ", & " + people[-1]
+        names += "" if names.endswith(".") else "."     # "Doe, J." already ends with one
+        return f"{names} ({date}). *{title}*{translated}. {site_name(s)}. {url}".strip()
+    return f"{site_name(s)}. ({date}). *{title}*{translated}. {url}".strip()
 
 
 def apa_in_text(sources):
     """
-    APA in-text citation of several sources with no author: the first words
-    of each title in quotes, then the year, separated by semicolons:
-    ("Octoverse 2024 report," 2024; "State of AI in business," n.d.)
+    APA in-text citation of several sources, in alphabetical order:
+    (Doe & Lee, 2024; GitHub, 2023; Glean, n.d.). One author: surname;
+    two: both; three or more: first surname "et al."; none: the organization.
     """
-    def short(title):
-        """The first 5 words, or 40 characters for titles without spaces (Japanese, Chinese)."""
-        words = (title or "").split()
-        text = " ".join(words[:5])
-        text = text[:40] if len(text) > 40 else text
-        return text + ("..." if text != (title or "").strip() else "")
-    return "(" + "; ".join(f"\"{short(s.get('title') or s.get('domain', ''))},\" {s.get('year') or 'n.d.'}"
-                           for s in sources) + ")"
+    def one(s):
+        people = s.get("authors") or []
+        if len(people) == 1:
+            who = _apa_surname(people[0])
+        elif len(people) == 2:
+            who = f"{_apa_surname(people[0])} & {_apa_surname(people[1])}"
+        elif people:
+            who = f"{_apa_surname(people[0])} et al."
+        else:
+            who = site_name(s)
+        return f"{who}, {_apa_date(s, year_only=True)}"
+    return "(" + "; ".join(sorted(dict.fromkeys(one(s) for s in sources))) + ")"
+
+
+TITLES_FILE = "title_translations.json"
+
+
+def translate_titles(corpus, api_key, model, corpus_dir=SCRATCHPAD):
+    """
+    English translations of the titles of non-English sources, for APA
+    references ("Title [English title]"). Cached in
+    corpus_dir/title_translations.json, so each title is translated once.
+    Sets s["title_en"] on each source and returns the cache {url: title}.
+    """
+    path = os.path.join(corpus_dir, TITLES_FILE)
+    cache = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+    todo = [s for s in corpus if s.get("lang") not in ("en", "unknown", "?", None, "")
+            and s.get("title") and s.get("url") not in cache]
+    for start in range(0, len(todo), 60):
+        batch = todo[start:start + 60]
+        reply = call_ai("Translate each title into English. One line each, starting with its "
+                        "label:\nT1: <translation>\n\n"
+                        + "\n".join(f"T{i}: {s['title']}" for i, s in enumerate(batch, 1)),
+                        api_key, model, temp=0) or ""
+        for m in re.finditer(r"^\W*T(\d+)\W*:\s*(.+)$", reply, re.M):
+            i = int(m.group(1)) - 1
+            if 0 <= i < len(batch):
+                cache[batch[i]["url"]] = m.group(2).strip()
+    if todo:
+        Path(corpus_dir).mkdir(exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=1, ensure_ascii=False)
+    for s in corpus:
+        if s.get("url") in cache:
+            s["title_en"] = cache[s["url"]]
+    return cache
+
+
+def load_title_translations(corpus, corpus_dir=SCRATCHPAD):
+    """Set s["title_en"] from the cache translate_titles saved (no AI call)."""
+    path = os.path.join(corpus_dir, TITLES_FILE)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+        for s in corpus:
+            if s.get("url") in cache:
+                s["title_en"] = cache[s["url"]]
 
 
 def detect_lang(text):

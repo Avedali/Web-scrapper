@@ -40,6 +40,7 @@ from core import (
     search_many,         # Run several web searches at once
     region_for,          # Search region matching a query's script (ja, ko, ...)
     fetch_pages,         # Read many web pages at once
+    PAGE_META,           # Author, site and date of each page read
     CONTENT_CHARS,       # How much text to keep per source
     search_academic,     # Search Semantic Scholar + arXiv
     search_hn,           # Search Hacker News
@@ -353,6 +354,7 @@ def _gather(jobs, sources, quality=None):
             "quality": quality or classify_source(r["domain"]),  # academic? vendor? etc.
             "source_lang": detect_lang(content),     # Language the page is written in
             "search_lang": search_lang,              # Language we searched in
+            **PAGE_META.get(url, {}),                # Author(s), site name, date (for APA)
         }
         added += 1
     return added
@@ -540,6 +542,7 @@ def run_explore(args):
                     "queries": [q],
                     "quality": "academic",     # Papers are always academic quality
                     "year": p.get("year"),     # Publication year (for APA references)
+                    "authors": p.get("authors") or [],   # Paper authors (for APA references)
                     "source_lang": "en",
                     "search_lang": "en",
                 }
@@ -711,6 +714,9 @@ def run_explore(args):
             "lang": s.get("source_lang", "?"),
             "url": url,
             "year": s.get("year"),                 # Known for academic papers only
+            "date": s.get("date", ""),             # Publication date the page states
+            "authors": s.get("authors") or [],     # Author(s) the page or paper names
+            "site": s.get("site", ""),             # Site name the page states
             "content": s["content"][:CONTENT_CHARS],  # Cut long pages to CONTENT_CHARS
         }
         for i, (url, s) in enumerate(sources.items())

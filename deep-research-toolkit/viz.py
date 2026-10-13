@@ -41,7 +41,8 @@ import os    # File/folder operations
 import re    # Reading the AI's chart designs
 import datetime   # This year, to mark forecasts on trend charts
 
-from core import call_ai, source_label, apa_reference, apa_in_text   # AI calls; labels; APA citations
+from core import (call_ai, source_label, apa_reference, apa_in_text,   # AI calls; labels; APA citations
+                  load_title_translations)
 import verify                             # Checks each charted number against its source
 
 
@@ -235,6 +236,7 @@ def run_viz(args):
             brief = json.load(f)
         with open(os.path.join(args.corpus, "corpus.json"), encoding="utf-8") as f:
             by_idx = {int(src["idx"]): src for src in json.load(f)}
+        load_title_translations(list(by_idx.values()), args.corpus)   # For the APA references
 
         # ── Charts of the evidence behind each key finding ──────────
         # Up to 3 per theme, in the order of the key findings. The AI
