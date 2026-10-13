@@ -1,7 +1,6 @@
 """
 stats.py: Mode 2b, statistical tests on analyze mode's output or a survey CSV.
 Run: python agent.py stats [--data survey.csv] (or launcher.py, option 3)
-
 Corpus (default): Mann-Whitney, Kruskal-Wallis, Spearman, chi-squared, SEM on corpus_analyzed.csv
 Survey (--data): logistic regression on each binary AI-related column
 Uses pingouin if installed (effect sizes, power, Bayes Factor), else scipy.
@@ -56,7 +55,6 @@ def _corpus_stats(df, args):
 
     report = "# Statistical Analysis\n\n"
 
-    # pingouin if available, scipy otherwise
     try:
         import pingouin as pg
         HAS_PG = True
@@ -71,7 +69,6 @@ def _corpus_stats(df, args):
         sys.exit("pip install scipy")
 
     # ── TEST 0: Descriptive statistics ──────────────────────────────
-    # Mean sentiment with 95% CI (mean ± 1.96 SE)
     if "sentiment" in df.columns:
         print(f"\n{'─'*40}\nDESCRIPTIVE\n{'─'*40}")
 
@@ -181,7 +178,6 @@ def _corpus_stats(df, args):
     if "topic_zs" in df.columns:
         cat_pairs.append("topic_zs")
 
-    # Sources with no usable evidence have no theme
     if "theme" in df.columns:
         df["theme"] = df["theme"].where(df["theme"] != "no usable evidence")
         cat_pairs.append("theme")
@@ -244,7 +240,6 @@ def _corpus_stats(df, args):
                 topic_dummies = pd.get_dummies(df["topic_zs"], prefix="t", drop_first=True).astype(int)
                 sem_df = pd.concat([sem_df, topic_dummies], axis=1)
 
-            # semopy-safe names; q_/t_ prefixes kept for pick()
             sem_df.columns = [c.replace(" ", "_").replace("/", "_").replace(".", "_")
                               .replace("-", "_")
                               for c in sem_df.columns]
@@ -261,7 +256,7 @@ def _corpus_stats(df, args):
             t_cols = pick("t_")
 
             if q_cols and len(sem_df) >= 30:
-                q_predictors = " + ".join(q_cols[:4])  # At most 4 predictors per group
+                q_predictors = " + ".join(q_cols[:4])
 
                 if has_topic and t_cols:
                     t_predictors = " + ".join(t_cols[:4])
@@ -280,7 +275,6 @@ def _corpus_stats(df, args):
                 sem_model = SEModel(model_spec)
                 sem_model.fit(sem_df)
 
-                # Regression paths only (op "~")
                 results = sem_model.inspect()
                 paths = results[results["op"] == "~"]
 
@@ -343,7 +337,6 @@ def _survey_stats(df, args):
     print(f"   Shape: {df.shape}")
     print(f"   Columns: {list(df.columns)[:15]}")
 
-    # AI-related columns by name keyword
     ai_cols = [
         c for c in df.columns
         if any(kw in c.lower() for kw in ["ai", "copilot", "assistant", "tool", "llm"])
@@ -364,7 +357,6 @@ def _survey_stats(df, args):
 
                 nums = df.select_dtypes(include="number").columns.tolist()
 
-                # Up to 5 numeric predictors
                 preds = [c for c in nums if c != col][:5]
                 if not preds:
                     print("   No numeric predictor columns -- skipping")

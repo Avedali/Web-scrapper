@@ -328,7 +328,6 @@ def run_explore(args):
 
     all_queries = {}
 
-    # Topic translated per language, kept in the file for checking
     topics = {"en": topic}
     for lc, info in LANGUAGES.items():
         if lc != "en":
@@ -475,7 +474,6 @@ def run_explore(args):
     print(f"   {added} sources added")
 
     # ── Save: corpus.json and sources_meta.json, old ones backed up ─
-    # Empty run: stop so a good corpus is not replaced
     if not sources:
         sys.exit("No sources found -- check the internet connection and try again. "
                  "Any previous corpus was kept.")
