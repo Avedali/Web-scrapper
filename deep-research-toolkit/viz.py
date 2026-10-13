@@ -501,15 +501,6 @@ def run_viz(args):
                  "How each AI model handled 3 requests for insecure code",
                  "Not all AI models warn about insecure code", keep_legend=True)
 
-    # ── BERTopic charts (saved by analyze) ──────────────────────────
-    bt_dir = os.path.join(args.corpus, "charts")
-    existing_bt = (
-        [f for f in os.listdir(bt_dir) if f.startswith("bertopic")]
-        if os.path.exists(bt_dir) else []
-    )
-    if existing_bt:
-        print(f"   BERTopic charts already in {bt_dir}/: {', '.join(existing_bt)}")
-
     print(f"\n{'='*60}")
     print(f"{charts} charts generated in two formats:")
     print(f"   Paper:  {paper_root}/ (captioned, axis labels)")
