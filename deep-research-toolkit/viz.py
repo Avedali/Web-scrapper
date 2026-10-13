@@ -20,7 +20,7 @@ import re
 import datetime
 
 from core import (call_ai, source_label, LANGUAGES, apa_reference, apa_in_text,
-                  load_title_translations)
+                  load_title_translations, source_date)
 import verify
 
 
@@ -166,6 +166,15 @@ def run_viz(args):
             brief = json.load(f)
         with open(os.path.join(args.corpus, "corpus.json"), encoding="utf-8") as f:
             by_idx = {int(src["idx"]): src for src in json.load(f)}
+        # Runs saved before corpus.json kept search snippets: take them (and dates) from sources_meta.json
+        meta_path = os.path.join(args.corpus, "sources_meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            for src in by_idx.values():
+                for key in ("snippet", "date", "page_title", "authors", "site"):
+                    if not src.get(key) and meta.get(src.get("url"), {}).get(key):
+                        src[key] = meta[src["url"]][key]
         load_title_translations(list(by_idx.values()), args.corpus)
 
         api_key = getattr(args, "key", None) or os.environ.get("OPENROUTER_API_KEY")
@@ -180,8 +189,9 @@ def run_viz(args):
                 if not re.search(r"\d", title) and len({p["idx"] for p in c["points"]}) > 1 and c.get("shape") != "related":
                     # A title that only names the topic: give the range the figures span
                     lo, hi = min(p["lo"] for p in c["points"]), max(p["hi"] for p in c["points"])
-                    title = (f"{c['measure']}: {_fmt(lo, c['unit'])} to {_fmt(hi, c['unit'])} "
-                             f"across {len({p['idx'] for p in c['points']})} sources")
+                    count = len({p["idx"] for p in c["points"]})
+                    title = (f"{c['measure']}: {_fmt(lo, c['unit'])} in all {count} sources" if lo == hi else
+                             f"{c['measure']}: {_fmt(lo, c['unit'])} to {_fmt(hi, c['unit'])} across {count} sources")
                 save(fig, re.sub(r"\W+", "_", f"{c['theme']} {c['form']}".lower()).strip("_")[:50],
                      f"{c['theme']}: {title}", _wrap(title, 70), keep_legend=legend,
                      note=_wrap(f"Sources: {apa_in_text(srcs)}", 150),
@@ -597,6 +607,11 @@ SHAPES = {
                 "(the second in the x column, a third in the size column)",
 }
 
+# Sources whose figures stay out of charts: content farms always; blogs, forums and
+# untyped pages when they have no date
+NEVER_CHARTED = {"SEO risk"}
+CHARTED_IF_DATED = {"unclassified", "experiential/blog", "experiential/forum"}
+
 # How a figure was obtained (one marker each, in chart order) and what kind of number it is
 METHODS = ["experiment", "observational data", "survey", "vendor claim", "forecast", "not stated"]
 STATISTICS = ["average", "median", "up to", "share", "change", "not stated"]
@@ -683,7 +698,7 @@ def _theme_charts(brief, by_idx, api_key, model):
             api_key, model, temp=0) or ""
         blocks = re.split(r"(?m)^\W*TABLE\W*$", reply)[1:]
         made = [c for c in (_read_table(b, found, by_idx) for b in blocks) if c][:TABLES_PER_THEME]
-        made = [c for c in (_same_measure(c, api_key, model) for c in made) if c]
+        made = [c for c in (_same_measure(c, api_key, verify.CHECK_MODEL) for c in made) if c]
         if not made:
             print(f"   {t['title']}: no chart (no 2 figures in the same unit)")
         for c in made:
@@ -738,7 +753,7 @@ def _read_table(reply, found, by_idx):
     def measure_unit(text):
         """("Share of developers", "% of developers") from "Share of developers (percentage of developers)"."""
         unit = re.search(r"\(([^)]*)\)\s*$", text)
-        unit = unit.group(1) if unit else ""
+        unit = unit.group(1) if unit else (text if re.match(r"\s*(%|percent|percentage)", text, re.I) else "")
         unit = re.sub(r"^\s*(percentage|percent|per cent|pct)(?=\s|$)", "%", unit, flags=re.I)
         return re.sub(r"\s*\([^)]*\)\s*$", "", text), unit
 
@@ -761,15 +776,29 @@ def _read_table(reply, found, by_idx):
             continue
         parts += [""] * (11 - len(parts))
         f = found[parts[0]]
+        # A row whose method and kind-of-number cells hold neither is shifted: a column is missing
+        if pick(parts[4], METHODS) == "not stated" == pick(parts[5], STATISTICS) and not (
+                "not stated" in parts[4].lower() and "not stated" in parts[5].lower()):
+            print(f"   left out of the chart (row in the wrong format): {line.strip()[:80]}")
+            continue
         m = re.fullmatch(r"([-+−]?)\s*(\d[\d.,]*)\s*%?(?:\s*(?:-|–|to)\s*(\d[\d.,]*)\s*%?)?", parts[6])
         if not m:
             continue
         sources = [by_idx[s] for s in f["sources"][:3] if s in by_idx]
+        kept = [s for s in sources if s.get("quality") not in NEVER_CHARTED
+                and (source_date(s) or s.get("quality") not in CHARTED_IF_DATED)]
+        if sources and not kept:
+            print(f"   left out of the chart (undated blog/forum or content-farm source): {parts[0]} {parts[6]}")
+            continue
+        sources = kept or sources
         raws = [r for r in (m.group(2), m.group(3)) if r]
         # Each number must be in the finding and in one of its sources
         if not all(_in_text(r, f["claim"]) and any(_in_text(r, s.get("content", "")) for s in sources)
                    for r in raws):
             print(f"   left out of the chart (number not found in its source): {parts[0]} {parts[6]}")
+            continue
+        if any(_is_year(r, f["claim"]) for r in raws):
+            print(f"   left out of the chart (the number is a year): {parts[0]} {parts[6]}")
             continue
         sign = -1 if m.group(1) in ("-", "−") else 1
         values = sorted(sign * float(_readings_one(r)) for r in raws)
@@ -779,12 +808,14 @@ def _read_table(reply, found, by_idx):
         year = year if re.fullmatch(r"(19|20)\d\d", year) and year in f["claim"] else ""
         n = re.sub(r"[^\d,.]", "", parts[7])
         n = n if n and _in_text(n, f["claim"]) else ""
-        label = parts[1][:50]
+        label = _shorten(parts[1], 70)
         if any(not _in_text(x, f["claim"]) for x in re.findall(r"\d+(?:[.,]\d+)?", label)):
+            label = ""
+        if label.lower().strip(". ") in ("not stated", "unknown", "n/a", "none", "-", "empty"):
             label = ""
         lead = sources[0] if sources else {}
         points.append({
-            "label": label or parts[0], "series": series, "claim": f["claim"],
+            "label": label, "series": series, "claim": f["claim"],
             "who": "" if parts[3].lower().strip(".") in ("", "not stated", "unknown", "n/a") else parts[3][:30],
             "method": pick(parts[4], METHODS), "statistic": pick(parts[5], STATISTICS), "n": n,
             "lo": values[0], "hi": values[-1], "year": year,
@@ -794,6 +825,9 @@ def _read_table(reply, found, by_idx):
             "x": checked(parts[9], f, sources) if parts[9] else None,
             "size": checked(parts[10], f, sources) if parts[10] else None,
         })
+    for p in points:   # No label from the AI: name the figure by its source
+        if not p["label"]:
+            p["label"], p["by_source"] = _source_label(p), True
     points = points[:MAX_POINTS]
     if len(points) < 2:
         return None
@@ -917,8 +951,13 @@ def _form(c):
     if shape == "stages" and one_study and len(pts) >= 3:
         if all(a["hi"] >= b["hi"] for a, b in zip(pts, pts[1:])):
             return "funnel"
-    if shape == "change" and one_study and sum(p["series"].lower() != "total" for p in pts) >= 2:
-        return "waterfall"
+    if shape == "change" and one_study and len(by_label) == len(pts) and len(pts) >= 3:
+        total = [p["series"].lower() == "total" for p in pts]
+        start, end = pts[0]["hi"], pts[-1]["hi"]
+        steps = sum(p["hi"] for p, t in zip(pts[1:-1], total[1:-1]) if not t)
+        # Start and end are totals, changes in between, and start + changes = end (within 5%)
+        if total[0] and total[-1] and not any(total[1:-1]) and abs(start + steps - end) <= 0.05 * max(abs(end), 1):
+            return "waterfall"
 
     # Time
     if c["parts"] and len({p["year"] for p in pts if p["year"]}) >= 3 and len(by_label) >= 2:
@@ -990,7 +1029,7 @@ def _draw(c, go, colors, this_year):
     pts, unit, form = c["points"], c["unit"], c["form"]
     signed = any(p["lo"] < 0 for p in pts)
     share = bool(re.search(r"%\s*of", unit)) and max(p["hi"] for p in pts) <= 100 and not signed
-    axis = f"{c['measure']} ({unit})" if unit else c["measure"]
+    axis = f"{c['measure']} ({unit})" if unit and unit != c["measure"] else c["measure"]
 
     def show(p):
         """A figure as text: "up to 55%", "35-45%", "+6% to +9%"."""
@@ -1055,11 +1094,23 @@ def _draw(c, go, colors, this_year):
             pts.sort(key=lambda p: -p["hi"])
         rows = _unique([p["row"] for p in pts])
         if form == "bar":
-            fig.add_trace(go.Bar(
-                y=rows, x=[p["hi"] - p["lo"] if p["lo"] != p["hi"] else p["hi"] for p in pts],
-                base=[p["lo"] if p["lo"] != p["hi"] else 0 for p in pts], orientation="h",
-                marker_color=DARK, text=[show(p) for p in pts], textposition="outside",
-                cliponaxis=False, hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+            # From 0; a range ("70-80%") is solid to its low end, lighter to its high end
+            # (negative figures: one bar from the low to the high end)
+            if signed:
+                fig.add_trace(go.Bar(
+                    y=rows, x=[p["hi"] - p["lo"] if p["lo"] != p["hi"] else p["hi"] for p in pts],
+                    base=[p["lo"] if p["lo"] != p["hi"] else 0 for p in pts], orientation="h",
+                    marker_color=DARK, text=[show(p) for p in pts], textposition="outside",
+                    cliponaxis=False, hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+            else:
+                fig.add_trace(go.Bar(
+                    y=rows, x=[p["lo"] for p in pts], orientation="h", marker_color=DARK,
+                    hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+                fig.add_trace(go.Bar(
+                    y=rows, x=[p["hi"] - p["lo"] for p in pts], orientation="h", marker_color=MUTED,
+                    text=[show(p) for p in pts], textposition="outside", cliponaxis=False,
+                    hovertext=[p["hover"] for p in pts], hoverinfo="text", showlegend=False))
+                fig.update_layout(barmode="stack")
             fig.update_layout(bargap=0.35)
         else:
             # Stem from 0; a range ("20-40%") is a thick segment on the stem
@@ -1373,6 +1424,27 @@ def _draw(c, go, colors, this_year):
             fig.update_yaxes(range=[0, 105])
         fig.update_yaxes(title=axis)
     return fig, legend
+
+
+def _shorten(text, limit):
+    """Text cut to at most `limit` characters at a word boundary, with "…" if cut."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+def _is_year(raw, claim):
+    """True if a number is only ever a year in its finding ("in 2025", "a 2024 survey", "(2023)"),
+    not a figure ("2000 developers", "2025%")."""
+    if not re.fullmatch(r"(19[5-9]\d|20\d\d)", raw):
+        return False
+    before = r"(?:in|since|by|until|from|during|for|of|between|and|to|year|early|late|mid|fy|q[1-4]|the|a|an|en|depuis|seit|im|desde|à|au|dal|nel)\s+$|\d\s*[-–]\s*$"
+    after = r"^\s*(?:[,.;:)\]–—-]|$|study|survey|report|data|edition|census|figures|results|年|\s*[-–]\s*\d)"
+    spots = list(re.finditer(rf"(?<![\d.,]){raw}(?![\d])", claim))
+    return bool(spots) and all(
+        re.search(before, claim[:m.start()], re.I) or re.search(after, claim[m.end():], re.I)
+        or claim[max(0, m.start() - 1):m.start()] == "(" for m in spots)
 
 
 def _in_text(raw, text):

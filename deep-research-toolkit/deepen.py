@@ -121,6 +121,7 @@ def run_deepen(args):
                 "title": r["title"],
                 "domain": r["domain"],
                 "url": url,
+                "snippet": r.get("snippet", "")[:300],
                 "content": pages[url][:CONTENT_CHARS],
                 "quality": classify_source(r["domain"]),
                 "lang": detect_lang(pages[url]),

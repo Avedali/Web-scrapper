@@ -592,6 +592,8 @@ def run_explore(args):
             "date": s.get("date", ""),
             "authors": s.get("authors") or [],
             "site": s.get("site", ""),
+            "page_title": s.get("page_title", ""),
+            "snippet": s.get("snippet", "")[:300],   # Search result text: holds the date when the page has none
             "content": s["content"][:CONTENT_CHARS],
         }
         for i, (url, s) in enumerate(sources.items())

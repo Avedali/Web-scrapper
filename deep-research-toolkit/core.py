@@ -804,8 +804,23 @@ def _is_group(name):
     return name.lower().startswith("the ") or bool(_GROUP_WORDS & set(words)) or len(words) > 4
 
 
+_CYRILLIC = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяєіїґ",
+                     ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+                      "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya",
+                      "ye", "i", "yi", "g"]))
+
+
+def romanise(name):
+    """A Cyrillic name in Latin letters, as APA asks: "Дмитриевич" → "Dmitrievich"."""
+    if not re.search("[\u0400-\u04FF]", name):
+        return name
+    out = "".join(_CYRILLIC.get(ch.lower(), ch) if ch.lower() in _CYRILLIC else ch for ch in name)
+    return re.sub(r"\b(\w)", lambda m: m.group(1).upper(), out) if name[:1].isupper() else out
+
+
 def _apa_person(name):
     """A person's name as APA writes it: "Jane A. Doe" → "Doe, J. A."; "Doe, Jane" → "Doe, J."."""
+    name = romanise(name)
     if _is_group(name):
         return name
     if "," in name:
@@ -821,14 +836,33 @@ def _apa_person(name):
 
 def _apa_surname(name):
     """The surname of a person, for in-text citations."""
+    name = romanise(name)
     if _is_group(name):
         return name
     return name.split(",")[0].strip() if "," in name else name.split()[-1]
 
 
+_MON = {m[:3].lower(): i for i, m in enumerate(_MONTHS, 1)}
+
+
+def source_date(s):
+    """A source's date as YYYY-MM-DD: from the page, else from the search result ("Mar 18, 2026 · ..."), else ""."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s.get("date") or ""):
+        return s["date"]
+    snippet = (s.get("snippet") or "")[:40]
+    m = re.match(r"\s*([A-Z][a-z]{2})[a-z]*\.? (\d{1,2}), (\d{4})", snippet)          # Mar 18, 2026
+    if m and m.group(1).lower() in _MON:
+        return f"{m.group(3)}-{_MON[m.group(1).lower()]:02d}-{int(m.group(2)):02d}"
+    m = re.match(r"\s*(\d{1,2}) ([A-Z][a-z]{2})[a-z]*\.? (\d{4})", snippet)           # 18 Mar 2026
+    if m and m.group(2).lower() in _MON:
+        return f"{m.group(3)}-{_MON[m.group(2).lower()]:02d}-{int(m.group(1)):02d}"
+    m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", snippet)
+    return "-".join(m.groups()) if m else ""
+
+
 def _apa_date(s, year_only=False):
     """Return "2024, March 5", the year alone, or "n.d." when undated."""
-    date = s.get("date") or ""
+    date = source_date(s)
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date)
     if m and not year_only:
         return f"{m.group(1)}, {_MONTHS[int(m.group(2)) - 1]} {int(m.group(3))}"
