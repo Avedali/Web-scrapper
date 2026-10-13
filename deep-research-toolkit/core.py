@@ -350,7 +350,7 @@ def _page_meta(html, url=None):
     except Exception:
         doc = None
     if not doc:
-        return {"authors": [], "site": "", "date": ""}
+        return {"authors": [], "site": "", "date": "", "page_title": ""}
     authors = [a.strip() for a in re.split(r";|\band\b|\s&\s", doc.author or "") if a.strip()]
     date = doc.date or ""
     # A /YYYY/MM/DD/ date in the URL wins: the tags sometimes give the edit date
@@ -358,7 +358,8 @@ def _page_meta(html, url=None):
     if m and 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31:
         date = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     return {"authors": authors[:20], "site": (doc.sitename or "").strip(),
-            "date": date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else ""}
+            "date": date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else "",
+            "page_title": (doc.title or "").strip()}
 
 
 def fetch_page(url, max_chars=CONTENT_CHARS, use_browser=True):
@@ -783,10 +784,11 @@ def site_name(s):
         key = parts[-3]
     else:
         key = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
-    # Stated name, unless it only repeats the domain ("glean.com", "Stackoverflow")
+    # Stated name, unless it only repeats the domain ("glean.com", "Stackoverflow");
+    # "NanoTech Insight" and "LeMondeInformatique" add the word breaks, so they count
     site = (s.get("site") or "").strip()
-    if site and "." not in site and site.lower().replace(" ", "") != key:
-        return site
+    if site and "." not in site and (site.lower().replace(" ", "") != key or re.search(r" |[a-z][A-Z]", site)):
+        return re.sub(r"(?<=[a-z])(?=[A-Z][a-z])", " ", site) if " " not in site else site
     return SITE_NAMES.get(key, " ".join(w.capitalize() for w in key.split("-")))
 
 
@@ -833,12 +835,37 @@ def _apa_date(s, year_only=False):
     return (m.group(1) if m else str(s.get("year") or "")) or "n.d."
 
 
+def _clean_title(title, s):
+    """A title without a search engine's "..." cut or a trailing site name ("... - Le Monde")."""
+    title = (title or "").strip()
+    cut = bool(re.search(r"(\.\.\.|…)$", title))
+    title = re.sub(r"\s*(\.\.\.|…)$", "", title)
+    m = re.search(r"\s+[-|–—·]\s+([^-|–—·]+)$", title)
+    if m:
+        tail = re.sub(r"\W", "", m.group(1).lower())
+        names = [re.sub(r"\W", "", x.lower()) for x in (site_name(s), s.get("domain") or "")]
+        if (cut and len(m.group(1).split()) <= 3) or any(tail and tail in n for n in names):
+            title = title[:m.start()]
+    return title.strip().rstrip(".")
+
+
+def _authors(s):
+    """Named authors; a one-word name beside full names is a publication ("Paul Krill, Infoworld")."""
+    names = [a for a in (s.get("authors") or []) if a.strip()]
+    if any(len(a.split()) >= 2 for a in names):
+        names = [a for a in names if len(a.split()) >= 2 or "," in a or _is_group(a)]
+    return names
+
+
 def apa_reference(s):
     """Return a source as an APA 7 reference; with no person named, the site is the author:
     Doe, J., & Lee, K. (2024, March 5). *Title* [English title]. Site. URL"""
-    title = (s.get("title") or s.get("domain") or "").strip().rstrip(".")
-    translated = f" [{s['title_en'].strip().rstrip('.')}]" if s.get("title_en") else ""
-    people = [_apa_person(a) for a in (s.get("authors") or [])][:20]
+    title = s.get("title") or ""
+    if re.search(r"(\.\.\.|…)$", title.strip()) and s.get("page_title"):
+        title = s["page_title"]   # The search engine cut the title; the page has it whole
+    title = _clean_title(title, s) or s.get("domain") or ""
+    translated = f" [{_clean_title(s['title_en'], s)}]" if s.get("title_en") else ""
+    people = [_apa_person(a) for a in _authors(s)][:20]
     date = _apa_date(s)
     url = s.get("url", "")
     if people:
@@ -851,7 +878,7 @@ def apa_reference(s):
 def apa_in_text(sources):
     """Return an APA in-text citation of sources, sorted: (Doe & Lee, 2024; GitHub, n.d.)."""
     def one(s):
-        people = s.get("authors") or []
+        people = _authors(s)
         if len(people) == 1:
             who = _apa_surname(people[0])
         elif len(people) == 2:

@@ -177,11 +177,16 @@ def run_viz(args):
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
                 srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
+                if not re.search(r"\d", title) and c["form"] in ("dots", "box"):
+                    # A title that only names the topic: give the range the figures span
+                    lo, hi = min(p["lo"] for p in c["points"]), max(p["hi"] for p in c["points"])
+                    title = (f"{c['measure']}: {_fmt(lo, c['unit'])} to {_fmt(hi, c['unit'])} "
+                             f"across {len({p['idx'] for p in c['points']})} sources")
                 save(fig, re.sub(r"\W+", "_", f"{c['theme']} {c['form']}".lower()).strip("_")[:50],
                      f"{c['theme']}: {title}", _wrap(title, 70), keep_legend=legend,
                      note=_wrap(f"Sources: {apa_in_text(srcs)}", 150),
                      paper_note="Sources:<br>" + "<br>".join(
-                         _wrap(re.sub(r"\*([^*]+)\*", r"<i>\1</i>", apa_reference(x)), 160) for x in srcs))
+                         _wrap(re.sub(r"\*([^*]+)\*", r"<i>\1</i>", apa_reference(x)), 120) for x in srcs))
 
         # ── A chart on request ("adoption by country"): only that, in requested/ ─
         request = (getattr(args, "question", None) or "").strip()
@@ -571,6 +576,7 @@ MAX_NUMBERED = 80     # Findings with numbers shown to the AI for one theme
 MAX_POINTS = 20       # Figures in one table
 TABLES_PER_THEME = 3  # Tables of figures the AI may extract for one theme
 DISTRIBUTION_MIN = 8  # Figures of one measure that make a box plot
+MEDIAN_MIN = 5        # Figures needed for a median line on a dot plot
 MAX_LINES = 5         # Lines in one line chart
 
 # How a figure was obtained (one marker each, in chart order) and what kind of number it is
@@ -649,6 +655,7 @@ def _theme_charts(brief, by_idx, api_key, model):
             api_key, model, temp=0) or ""
         blocks = re.split(r"(?m)^\W*TABLE\W*$", reply)[1:]
         made = [c for c in (_read_table(b, found, by_idx) for b in blocks) if c][:TABLES_PER_THEME]
+        made = [c for c in (_same_measure(c, api_key, model) for c in made) if c]
         if not made:
             print(f"   {t['title']}: no chart (no 2 figures measure the same thing)")
         for c in made:
@@ -703,6 +710,7 @@ def _read_table(reply, found, by_idx):
     measure = field("MEASURE")
     unit = re.search(r"\(([^)]*)\)\s*$", measure)
     unit = unit.group(1) if unit else ""
+    unit = re.sub(r"^\s*(percentage|percent|per cent|pct)(?=\s|$)", "%", unit, flags=re.I)   # "percentage of developers" → "% of developers"
     points = []
     for line in reply.splitlines():
         parts = [x.strip() for x in line.strip().lstrip("-• ").split("|")]
@@ -739,13 +747,19 @@ def _read_table(reply, found, by_idx):
             "lo": values[0], "hi": values[-1], "year": year,
             "idx": lead.get("idx"), "sources": set(f["sources"]),
             "source": f"{lead.get('title', '')[:80]} ({lead.get('domain', '')})",
+            "cite": apa_in_text([lead]) if lead else "",
         })
     points = points[:MAX_POINTS]
     if len(points) < 2:
         return None
 
-    # The title may only use numbers on the chart or in its findings
-    title = field("TITLE")
+    return {"title": _checked_title(field("TITLE"), points), "measure": re.sub(r"\s*\([^)]*\)\s*$", "", measure), "unit": unit,
+            "ordered": field("ORDERED").lower().startswith("y"),
+            "parts": field("PARTS").lower().startswith("y"), "points": points}
+
+
+def _checked_title(title, points):
+    """The title, or "" if it uses a number that is not on the chart or in its findings."""
     allowed = set().union(*(verify.numbers(p["claim"]) for p in points))
     for p in points:
         for v in (p["lo"], p["hi"]):
@@ -753,13 +767,34 @@ def _read_table(reply, found, by_idx):
         allowed.add(p["year"])
     unknown = {x for x in re.findall(r"\d+(?:[.,]\d+)?", title)
                if not (verify._readings(x.replace(",", ".")) & allowed)}
-    if unknown or not title:
-        if title:
-            print(f"   chart title replaced (numbers not in its figures: {', '.join(sorted(unknown))}): {title}")
-        title = ""
-    return {"title": title, "measure": re.sub(r"\s*\([^)]*\)\s*$", "", measure), "unit": unit,
-            "ordered": field("ORDERED").lower().startswith("y"),
-            "parts": field("PARTS").lower().startswith("y"), "points": points}
+    if unknown and title:
+        print(f"   chart title replaced (numbers not in its figures: {', '.join(sorted(unknown))}): {title}")
+    return "" if unknown else title
+
+
+def _same_measure(c, api_key, model):
+    """Drop figures that measure something else than the table's MEASURE (e.g. a usage share
+    put in a table of perceived benefits). Returns the table, or None if fewer than 2 are left."""
+    pts = c["points"]
+    reply = call_ai(
+        f"MEASURE: {c['measure']}" + (f" ({c['unit']})" if c["unit"] else "") + "\n\n"
+        "Each line below is a figure filed under this measure, with the finding it comes from. "
+        "Say for each whether the figure measures exactly this quantity: the same thing counted, "
+        "among the same kind of people or units. A share of people who use something does not "
+        "measure what they gain from it; a share who feel an effect is not a measured effect.\n\n"
+        "Answer one line per figure, exactly: <number> | yes or no\n\n"
+        + "\n".join(f"{i}. {p['label']}: {p['lo']:g}" + ("" if p["lo"] == p["hi"] else f" to {p['hi']:g}")
+                    + f" -- finding: {p['claim']}" for i, p in enumerate(pts, 1)),
+        api_key, model, temp=0) or ""
+    off = {int(m.group(1)) for m in re.finditer(r"(?m)^\W*(\d+)\W*\|\s*no\b", reply, re.I)}
+    for i in sorted(off):
+        if i <= len(pts):
+            print(f"   left out of the chart (measures something else): {pts[i - 1]['label']}")
+    c["points"] = [p for i, p in enumerate(pts, 1) if i not in off]
+    if len(c["points"]) < 2:
+        return None
+    c["title"] = _checked_title(c["title"], c["points"])
+    return c
 
 
 def _stem(word):
@@ -837,9 +872,16 @@ def _draw(c, go, colors, this_year):
             text = f"{p['lo']:g}-{_fmt(p['hi'], unit)}"
         return ("up to " if p["statistic"] == "up to" else "") + text
 
+    if form == "dots":
+        # One wording per category ("Increased" / "Increasing productivity"), source under it
+        first = {}
+        for p in pts:
+            p["label"] = first.setdefault(tuple(sorted(_stem(w) for w in re.findall(r"\w+", p["label"].lower()))), p["label"])
     for p in pts:
         extra = ", ".join(x for x in (p["who"], f"n={p['n']}" if p["n"] else "") if x)
         p["row"] = _wrap(p["label"] + (f" ({extra})" if extra and form in ("dots", "box") else ""))
+        if form == "dots" and p.get("cite"):
+            p["row"] += f"<br><span style='font-size:11px;color:#6B6B6B'>{_wrap(p['cite'], 34)}</span>"
         p["hover"] = (f"{p['label']}{' (' + p['series'] + ')' if p['series'] else ''}: {show(p)}"
                       f"<br>Measured by: {p['who'] or 'not stated'}"
                       f"<br>Method: {p['method']}; number: {p['statistic']}"
@@ -894,9 +936,9 @@ def _draw(c, go, colors, this_year):
                             line=dict(width=2, color=color), opacity=1 if form == "dots" else 0.8),
                 text=[show(p) for p in mp] if form == "dots" else None, textposition="middle right",
                 cliponaxis=False, hovertext=[p["hover"] for p in mp], hoverinfo="text"))
-        # Median line from 3+ figures, leaving out "up to" maxima
+        # Median line from MEDIAN_MIN+ figures, leaving out "up to" maxima
         typical = sorted((p["lo"] + p["hi"]) / 2 for p in pts if p["statistic"] != "up to")
-        if len(typical) >= 3:
+        if len(typical) >= MEDIAN_MIN:
             k = len(typical) // 2
             median = typical[k] if len(typical) % 2 else (typical[k - 1] + typical[k]) / 2
             fig.add_vline(x=median, line_dash="dash", line_color=GRAY, line_width=1,
@@ -904,7 +946,9 @@ def _draw(c, go, colors, this_year):
                           annotation_position="top", annotation_font_color=GRAY)
         legend = True
         if rows:
-            fig.update_yaxes(categoryorder="array", categoryarray=rows, autorange="reversed")
+            pad = max(0, 4 - len(rows)) * 0.4   # Few rows: keep them together, not at the edges
+            fig.update_yaxes(categoryorder="array", categoryarray=rows,
+                             range=[len(rows) - 0.5 + pad, -0.5 - pad])
         value_axis()
 
     elif form in ("bar", "lollipop"):
@@ -1053,10 +1097,20 @@ def _readings_one(raw):
 
 
 def _wrap(text, width=28):
-    """Break a long label into lines of about `width` characters for the chart axis."""
+    """Break a long label into lines of about `width` characters for the chart axis.
+    A word longer than a line (a URL) is broken after a slash."""
     lines, line = [], ""
     for word in text.split():
-        if line and len(line) + len(word) + 1 > width:
+        joiner = " " if line else ""
+        while len(line) + len(joiner) + len(word) > width and "/" in word[:width]:
+            cut = word.rindex("/", 0, width) + 1
+            if line and len(line) + len(joiner) + cut > width:
+                lines.append(line)
+                line, joiner = "", ""
+                continue
+            lines.append(line + joiner + word[:cut])
+            line, joiner, word = "", "", word[cut:]
+        if line and len(line) + 1 + len(word) > width:
             lines.append(line)
             line = word
         else:
