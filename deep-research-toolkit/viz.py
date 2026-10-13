@@ -21,7 +21,7 @@ import datetime
 
 from core import (call_ai, source_label, apa_reference, apa_in_text,
                   load_title_translations)
-import verify                             # Checks each charted number against its source
+import verify
 
 
 
@@ -36,7 +36,6 @@ def run_viz(args):
     print("MODE 3: VISUALIZE (paper + slide formats)")
     print("=" * 60)
 
-    # ── Dependencies ────────────────────────────────────────────────
     try:
         import pandas as pd
     except ImportError:
@@ -48,7 +47,6 @@ def run_viz(args):
     except ImportError:
         sys.exit("pip install plotly")
 
-    # ── Output folders and corpus ───────────────────────────────────
     paper_root = os.path.join(args.corpus, "charts_paper")
     slide_root = os.path.join(args.corpus, "charts_slide")
     os.makedirs(paper_root, exist_ok=True)
@@ -176,7 +174,6 @@ def run_viz(args):
             colors = {"accent": ACCENT, "dark": DARK, "muted": MUTED, "gray": GRAY, "blue": "#457B9D"}
             for c in _theme_charts(brief, by_idx, api_key, args.model):
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
-                # Sources APA style: in-text on the slide, full references on the paper
                 srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
                 save(fig, re.sub(r"\W+", "_", f"{c['theme']} {c['form']}".lower()).strip("_")[:50],
@@ -264,7 +261,6 @@ def run_viz(args):
 
         n_total = len(df)
 
-        # Slide title computed from the data: AI tool makers vs other sources
         is_vendor = df["quality"].str.contains("vendor", case=False, na=False)
         if is_vendor.any() and (~is_vendor).any():
             v_mean = df.loc[is_vendor, "sentiment"].mean()
@@ -296,7 +292,6 @@ def run_viz(args):
             fig = go.Figure()
 
             for _, row in data.iterrows():
-                # Accent for strong sentiment (more than 0.1 from neutral)
                 color = ACCENT if abs(row["m"]) > 0.1 else GRAY
 
                 fig.add_trace(go.Scatter(
@@ -319,7 +314,6 @@ def run_viz(args):
 
             fig.add_vline(x=0, line_dash="solid", line_color=DARK, line_width=1)
 
-            # Room right of the dots for the "+0.44 (n=12)" labels
             lo_x, hi_x = min(0, data["m"].min()), max(0, data["m"].max())
             span = (hi_x - lo_x) or 1
             fig.update_xaxes(range=[lo_x - 0.05 * span, hi_x + 0.3 * span])
@@ -360,7 +354,6 @@ def run_viz(args):
 
     if topic_col in df.columns and "lang" in df.columns:
 
-        # Languages × topics, without sources that have no usable evidence
         sub = df[df[topic_col].notna() & (df[topic_col] != "no usable evidence")]
         ct = pd.crosstab(sub["lang"], sub[topic_col])
 
@@ -393,7 +386,6 @@ def run_viz(args):
         fig = go.Figure()
 
         for q, c in counts.items():
-            # Accent for the types most likely to be biased
             color = ACCENT if q.startswith(("AI tool makers", "Low-quality")) else MUTED
 
             fig.add_trace(go.Scatter(
@@ -411,7 +403,7 @@ def run_viz(args):
                 showlegend=False,
             ))
 
-        fig.update_xaxes(range=[0, counts.max() * 1.15])   # Room for the count labels
+        fig.update_xaxes(range=[0, counts.max() * 1.15])
         save(fig, "source_types",
              f"Number of sources of each type (N={len(df)})",
              f"Where the {len(df)} sources come from", appendix=True)
@@ -436,7 +428,6 @@ def run_viz(args):
 
             if level_col in sim_df.columns and "pro_met" in sim_df.columns:
 
-                # Share of the professional spec each page met in the browser test
                 sim_df = sim_df[sim_df["pro_total"].notna() & (sim_df["pro_total"] > 0)].copy()
                 sim_df["spec_pct"] = 100 * sim_df["pro_met"] / sim_df["pro_total"]
                 fig = px.box(
@@ -911,7 +902,6 @@ def _draw(c, go, colors, this_year):
         value_axis()
 
     elif form == "heatmap":
-        # Categories down the side, series across the top
         rows = list(dict.fromkeys(p["label"] for p in pts))
         cols = list(dict.fromkeys(p["series"] for p in pts))
         cell = {(p["label"], p["series"]): p for p in pts}
@@ -937,7 +927,6 @@ def _draw(c, go, colors, this_year):
         fig.update_yaxes(showticklabels=False)
 
     elif form == "treemap":
-        # Each part's area is its share
         fig.add_trace(go.Treemap(
             labels=[f"{p['label']}<br>{show(p)}" for p in pts], parents=[""] * len(pts),
             values=[p["hi"] for p in pts], marker=dict(colors=[p["hi"] for p in pts],
@@ -950,7 +939,6 @@ def _draw(c, go, colors, this_year):
             locations=[_country(p["label"]) for p in pts], z=[p["hi"] for p in pts],
             text=[p["hover"] for p in pts], hoverinfo="text",
             colorscale=[[0, "#D3E9EA"], [1, DARK]], colorbar=dict(title=unit)))
-        # Value on each country, white on dark ones; all country outlines
         lo, hi = min(p["hi"] for p in pts), max(p["hi"] for p in pts)
         fig.add_trace(go.Scattergeo(
             locations=[_country(p["label"]) for p in pts], text=[show(p) for p in pts], mode="text",
