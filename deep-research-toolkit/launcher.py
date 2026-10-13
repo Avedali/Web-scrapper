@@ -74,7 +74,7 @@ def run_mode(mode, extra_args=None, log=None):
     return proc.wait()
 
 
-# Modes for "Run everything", in order (viz charts include simulate scores)
+# "Run everything" order; viz follows simulate (charts its scores), deepen is left out
 FULL_RUN = ["explore", "analyze", "stats", "synthesize", "simulate", "viz"]
 
 
