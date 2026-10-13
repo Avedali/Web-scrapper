@@ -165,14 +165,21 @@ def init_search(serper_key=None, brave_key=None):
     pass
 
 
+# Searches that found nothing, and why, for the summary search_many prints
+_SEARCH_FAILS = []
+
+
 def search_web(query, n=5, region="us-en"):
     """Return up to n results as {title, url, snippet, domain}: ddgs first, Google if it finds nothing."""
-    results = []
+    import time
+    results, reason = [], ""
 
-    # Tier 1: ddgs, two tries (it picks engines at random)
-    for attempt in range(2):
+    # Tier 1: ddgs, three tries with a pause (engines slow down rapid requests)
+    for attempt in range(3):
         if not _SEARCH_DDG or results:
             break
+        if attempt:
+            time.sleep(3 * attempt)
         try:
             for r in DDGS().text(query, region=region, max_results=n):
                 results.append({
@@ -181,8 +188,7 @@ def search_web(query, n=5, region="us-en"):
                     "snippet": r.get("body", ""),
                 })
         except Exception as e:
-            if attempt == 1:
-                print(f"      Web search error: {type(e).__name__}: {e}")
+            reason = "timed out" if "timeout" in f"{type(e).__name__} {e}".lower() else "no results"
 
     # Tier 2: Google; results come as dicts or (title, url[, snippet]) tuples
     if not results and _SEARCH_GOOGLE:
@@ -202,12 +208,11 @@ def search_web(query, n=5, region="us-en"):
                         "url": str(r[1]),
                         "snippet": str(r[2]) if len(r) > 2 else "",
                     })
+        except Exception:
+            pass   # Counted below as a search that found nothing
 
-            if results:
-                print(f"      DDG empty → used Google fallback ({len(results)} results)")
-
-        except Exception as e:
-            print(f"      Google fallback error: {type(e).__name__}: {e}")
+    if not results:
+        _SEARCH_FAILS.append(reason or "no results")
 
     for r in results:
         r["domain"] = urlparse(r.get("url", "")).netloc
@@ -495,8 +500,16 @@ def search_many(jobs, workers=3):
     if jobs and _SEARCH == "none":
         sys.exit("\n   No web search library is installed (ddgs). "
                  "Run install.py, or: pip install ddgs")
+    _SEARCH_FAILS.clear()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda job: search_web(job[0], n=job[1], region=job[2]), jobs))
+        found = list(pool.map(lambda job: search_web(job[0], n=job[1], region=job[2]), jobs))
+    # One summary line instead of an error per search
+    if _SEARCH_FAILS:
+        timed_out = _SEARCH_FAILS.count("timed out")
+        print(f"      {len(_SEARCH_FAILS)} of {len(jobs)} searches found nothing"
+              + (f" ({timed_out} timed out after 3 tries)" if timed_out else "")
+              + "; the run continues with the others")
+    return found
 
 
 # ════════════════════════════════════════════════════════════════════════
