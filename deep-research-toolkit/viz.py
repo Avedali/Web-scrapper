@@ -177,7 +177,7 @@ def run_viz(args):
                 fig, legend = _draw(c, go, colors, datetime.date.today().year)
                 srcs = [by_idx[i] for i in dict.fromkeys(p["idx"] for p in c["points"]) if i in by_idx]
                 title = c["title"] or c["measure"]
-                if not re.search(r"\d", title) and len({p["idx"] for p in c["points"]}) > 1:
+                if not re.search(r"\d", title) and len({p["idx"] for p in c["points"]}) > 1 and c.get("shape") != "related":
                     # A title that only names the topic: give the range the figures span
                     lo, hi = min(p["lo"] for p in c["points"]), max(p["hi"] for p in c["points"])
                     title = (f"{c['measure']}: {_fmt(lo, c['unit'])} to {_fmt(hi, c['unit'])} "
@@ -202,7 +202,7 @@ def run_viz(args):
             if not made:
                 print(f"\n   Not enough data for a chart on '{request}': "
                       + ("fewer than 2 findings with numbers match it." if matched < 2 else
-                         f"{matched} findings match, but no 2 of them measure the same thing.")
+                         f"{matched} findings match, but no 2 of their figures are in the same unit.")
                       + "\n   Try a broader request, or run deepen to look for more evidence.")
                 return
             draw_all(made)
@@ -584,7 +584,9 @@ MAX_LINES = 5         # Lines in one line chart
 
 # What a table's figures are, as the AI says it (the chart is then chosen from the data)
 SHAPES = {
-    "compare": "figures for different groups, options or sources, to compare",
+    "compare": "figures of one measure for different groups, options or sources, to compare",
+    "related": "different but related measures on one topic in the same unit (% of developers who "
+               "use AI daily, who trust its output, who feel faster); each category says what its figure measures",
     "parts": "the parts of one whole that add up to about 100% (or several wholes, one per series)",
     "nested parts": "parts of a whole where each part belongs to a larger group, given in the series column",
     "stages": "successive stages where each is a subset of the one before (heard of → tried → use daily)",
@@ -635,14 +637,21 @@ def _theme_charts(brief, by_idx, api_key, model):
             f"THEME: {t['title']}\nKEY FINDING OF THIS THEME: {t.get('key_finding', '')}\n\n"
             f"Below are this theme's findings that contain numbers (ID: claim). Extract up to "
             f"{TABLES_PER_THEME} TABLES of figures that show what the evidence on this theme "
-            "says, as a careful researcher would. Make a table only where at least 2 figures "
-            "measure the same thing; most themes need one or two.\n\n"
+            "says, as a careful researcher would. Make a table wherever at least 2 figures belong "
+            "on one chart; most themes have one to three.\n\n"
             "Rules:\n"
-            "- One MEASURE per table: a single quantity in one unit. Every figure in the table "
-            "measures it. People's own estimates (a survey asking whether they feel faster) "
-            "and measured outcomes (timed tasks, output data) are different measures, except in "
-            "a table that sets the two side by side for the same group of one study (put "
-            "'perceived' and 'measured' in the series column).\n"
+            "- Best is a table whose figures all measure the same thing (one quantity in one unit, "
+            "among the same kind of people or units), from one or several sources. People's own "
+            "estimates (a survey asking whether they feel faster) and measured outcomes (timed "
+            "tasks, output data) are different measures, except in a table that sets the two side "
+            "by side for the same group of one study (put 'perceived' and 'measured' in the series "
+            "column).\n"
+            "- Figures on the same topic in the same unit that measure different things (use, trust, "
+            "perceived speed, spending...) can still share a table, with SHAPE related: MEASURE is "
+            "then the topic and the shared unit, e.g. 'Developers and AI tools (% of developers)', "
+            "and each row's category says exactly what that figure measures, and among whom if the "
+            "groups differ ('use AI daily', 'trust AI output', 'companies using AI'). Never put "
+            "figures in different units in one table.\n"
             "- Include every figure the findings give for the measure, also those that disagree "
             "with the key finding. Do not choose figures to fit a story.\n"
             "- Write only what each finding states. If it does not say the method, the sample "
@@ -662,7 +671,7 @@ def _theme_charts(brief, by_idx, api_key, model):
             "MEASURE SIZE: <for relation only, if there is a third measure: it, with its unit in brackets>\n"
             f"Then 2 to {MAX_POINTS} rows:\n"
             "- C12 | <category: who or what the figure is about (a group, a country, an answer "
-            "option), at most 6 words> | <series: a second split when one category has several "
+            "option), at most 8 words; in a related table, what the figure measures> | <series: a second split when one category has several "
             "figures, e.g. a year, 'perceived'/'measured', 'before'/'after'; otherwise empty> | "
             "<who measured it, at most 4 words> | <method: " + " / ".join(METHODS) + "> | <kind of "
             "number: " + " / ".join(STATISTICS) + "> | <the number as written in the finding, "
@@ -676,7 +685,7 @@ def _theme_charts(brief, by_idx, api_key, model):
         made = [c for c in (_read_table(b, found, by_idx) for b in blocks) if c][:TABLES_PER_THEME]
         made = [c for c in (_same_measure(c, api_key, model) for c in made) if c]
         if not made:
-            print(f"   {t['title']}: no chart (no 2 figures measure the same thing)")
+            print(f"   {t['title']}: no chart (no 2 figures in the same unit)")
         for c in made:
             c["theme"] = t["title"]
             c["form"] = _form(c)
@@ -813,23 +822,37 @@ def _checked_title(title, points):
 
 
 def _same_measure(c, api_key, model):
-    """Drop figures that measure something else than the table's MEASURE (e.g. a usage share
-    put in a table of perceived benefits). Returns the table, or None if fewer than 2 are left."""
-    pts = c["points"]
+    """Check each figure belongs in its table: it measures the table's MEASURE (or, in a related
+    table, is in its unit and its label says what it measures). Wrong labels are fixed, figures
+    that do not belong dropped. Returns the table, or None if fewer than 2 are left."""
+    pts, related = c["points"], c.get("shape") == "related"
+    ask = ("Each line below is a figure on this topic, with its label and the finding it comes "
+           "from. Say for each whether the figure is in this unit, and whether its label says "
+           "exactly what the figure measures (and among whom, if the finding says)."
+           if related else
+           "Each line below is a figure filed under this measure, with the finding it comes from. "
+           "Say for each whether the figure measures exactly this quantity: the same thing counted, "
+           "among the same kind of people or units. A share of people who use something does not "
+           "measure what they gain from it; a share who feel an effect is not a measured effect.")
     reply = call_ai(
-        f"MEASURE: {c['measure']}" + (f" ({c['unit']})" if c["unit"] else "") + "\n\n"
-        "Each line below is a figure filed under this measure, with the finding it comes from. "
-        "Say for each whether the figure measures exactly this quantity: the same thing counted, "
-        "among the same kind of people or units. A share of people who use something does not "
-        "measure what they gain from it; a share who feel an effect is not a measured effect.\n\n"
-        "Answer one line per figure, exactly: <number> | yes or no\n\n"
+        f"{'TOPIC AND UNIT' if related else 'MEASURE'}: {c['measure']}"
+        + (f" ({c['unit']})" if c["unit"] else "") + f"\n\n{ask}\n\n"
+        "Answer one line per figure, exactly one of:\n<number> | yes\n<number> | no\n"
+        "<number> | label: <a label that says what the figure measures, at most 8 words> "
+        "(when the figure belongs but its label is wrong or vague)\n\n"
         + "\n".join(f"{i}. {p['label']}: {p['lo']:g}" + ("" if p["lo"] == p["hi"] else f" to {p['hi']:g}")
                     + f" -- finding: {p['claim']}" for i, p in enumerate(pts, 1)),
         api_key, model, temp=0) or ""
     off = {int(m.group(1)) for m in re.finditer(r"(?m)^\W*(\d+)\W*\|\s*no\b", reply, re.I)}
+    for m in re.finditer(r"(?m)^\W*(\d+)\W*\|\s*label\s*:\s*(.+)$", reply, re.I):
+        i, label = int(m.group(1)), m.group(2).strip().strip("'\"")[:60]
+        p = pts[i - 1] if 1 <= i <= len(pts) else None
+        if p and label and all(_in_text(x, p["claim"]) for x in re.findall(r"\d+(?:[.,]\d+)?", label)):
+            p["label"] = label
     for i in sorted(off):
         if i <= len(pts):
-            print(f"   left out of the chart (measures something else): {pts[i - 1]['label']}")
+            print(f"   left out of the chart ({'other unit or topic' if related else 'measures something else'}): "
+                  f"{pts[i - 1]['label']}")
     c["points"] = [p for i, p in enumerate(pts, 1) if i not in off]
     if len(c["points"]) < 2:
         return None
@@ -867,7 +890,8 @@ def _form(c):
       map         one value per country: choropleth for shares and rates, bubble map for counts
       spread      one category with HISTOGRAM_MIN+ figures: histogram; DISTRIBUTION_MIN+: box;
                   several categories with GROUP_MIN+ figures each: box per category (VIOLIN_MIN+: violin)
-      compare     one value per category: bar (up to BAR_MAX) or lollipop
+      compare     one value per category: bar (up to BAR_MAX) or lollipop; also for related
+                  indicators (different measures in one unit), one bar each
     One category from several sources: the sources are the categories ("JetBrains, 2025").
     Several categories with several sources each: one bar per category and source, side by side.
     """
@@ -931,13 +955,14 @@ def _form(c):
         rate = "%" in c["unit"] or re.search(r"\bper\b|rate|average|share|index|score", c["unit"] + " " + c["measure"], re.I)
         return "map" if rate else "bubblemap"
 
-    # Spread of many figures
-    if len(by_label) == 1 and len(pts) >= HISTOGRAM_MIN:
-        return "histogram"
-    if len(by_label) == 1 and len(pts) >= DISTRIBUTION_MIN:
-        return "box"
-    if len(by_label) >= 2 and all(len(v) >= GROUP_MIN for v in by_label.values()):
-        return "violin" if all(len(v) >= VIOLIN_MIN for v in by_label.values()) else "boxes"
+    # Spread of many figures (of one measure, so not for related indicators)
+    if shape != "related":
+        if len(by_label) == 1 and len(pts) >= HISTOGRAM_MIN:
+            return "histogram"
+        if len(by_label) == 1 and len(pts) >= DISTRIBUTION_MIN:
+            return "box"
+        if len(by_label) >= 2 and all(len(v) >= GROUP_MIN for v in by_label.values()):
+            return "violin" if all(len(v) >= VIOLIN_MIN for v in by_label.values()) else "boxes"
 
     # Compare one value per category
     if len(by_label) == 1:
