@@ -1,24 +1,10 @@
-"""
-verify.py: checks that keep the brief tied to its sources
-============================================================
+"""verify.py: checks that keep the brief tied to its sources.
+Run: python agent.py verify [brief.md]
 
-The claim ledger and the fact-check gate are built on two checks:
-
-  A. quote_in_source(quote, source)
-     Is this quote in the source? The quote is compared word for word, but
-     differences in formatting (spacing, curly quotes, capitals, words split
-     across lines) are ignored. It catches one problem: a quote the AI made up.
-
-  B. judge_support(premise, hypothesis)
-     Does the premise (a quote from a source) support the hypothesis (a
-     claim or a sentence of the brief)? A local model trained for this task
-     ("natural language inference") judges the meaning, in 100+ languages.
-     It runs on this computer, so it costs nothing. It is also independent of
-     the AI that wrote the text, so it doesn't repeat that AI's mistakes.
-       "the sky is often perceived as blue"  →  "the sky is blue"
-       is not supported (the claim drops the hedge). The claim is then
-       corrected to the quote's wording and kept.
-"""
+How it works:
+  Quote check: quote_in_source() finds a quote in its source, ignoring formatting
+  Local judge: judge_support() tests by meaning (NLI, 100+ languages) whether a passage supports a claim
+  Gate: rules, the local judge, an AI review and an independent audit decide PASS or NEEDS REVIEW"""
 
 import re
 import unicodedata
@@ -29,38 +15,28 @@ from difflib import SequenceMatcher
 # A. IS THE QUOTE IN THE SOURCE?
 # ════════════════════════════════════════════════════════════════════════
 
-QUOTE_MIN_CHARS = 15     # Shorter "quotes" ("AI tools") prove nothing
+QUOTE_MIN_CHARS = 15     # Shortest quote that counts
 QUOTE_MATCH = 0.9        # Share of the quote that must match, in order
 
 
 def normalize(text):
-    """
-    Return the text reduced to what matching needs: the same letters and
-    numbers, without formatting. Curly quotes, dashes, capitals, extra spaces, soft hyphens
-    and words split across lines ("produc-\\ntivity") all disappear.
-    """
-    text = unicodedata.normalize("NFKC", text or "")   # Full-width → normal, "ﬁ" → "fi"
-    text = text.replace("­", "")                  # Soft hyphens
-    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)  # Words split across lines
-    text = re.sub(r"[^\w%$€£¥.,]+", " ", text.lower())  # Punctuation → space (keep 4.5%, $1,000)
-    text = re.sub(r"(?<!\d)[.,]|[.,](?!\d)", " ", text)  # ...and keep . and , only inside numbers
+    """Return lowercase letters and numbers only, without quotes, dashes, soft hyphens or line-break splits."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = text.replace("­", "")
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
+    text = re.sub(r"[^\w%$€£¥.,]+", " ", text.lower())
+    text = re.sub(r"(?<!\d)[.,]|[.,](?!\d)", " ", text)  # Keep . and , only inside numbers
     return re.sub(r"\s+", " ", text).strip()
 
 
 def quote_in_source(quote, source):
-    """
-    True if `quote` appears in `source`: exactly after normalizing, or with
-    at least QUOTE_MATCH of its characters matching in order (pages extracted
-    from HTML lose and gain the odd character).
-    """
+    """True if `quote` is in `source` after normalizing, or QUOTE_MATCH of it matches in order."""
     q, s = normalize(quote), normalize(source)
     if len(q) < QUOTE_MIN_CHARS:
         return False
     if q in s:
         return True
-    # Fuzzy match, made fast: find where pieces of the quote occur in the
-    # source, and compare the quote with the source text around each place
-    # (character pieces, so it works in Japanese and Chinese too)
+    # Fuzzy match only around places where 20-character pieces of the quote occur
     starts = set()
     for i in range(0, max(1, len(q) - 20), 10):
         piece = q[i:i + 20]
@@ -81,18 +57,15 @@ def quote_in_source(quote, source):
 # B. DOES THE QUOTE SUPPORT THE CLAIM? (by meaning)
 # ════════════════════════════════════════════════════════════════════════
 
-NLI_MODEL = "joeddav/xlm-roberta-large-xnli"   # Same model analyze uses (already downloaded)
-SUPPORTED = 0.5        # Probability of "entailment" needed to count as supported
-CONTRADICTED = 0.5     # Probability of "contradiction" that counts as contradicted
+NLI_MODEL = "joeddav/xlm-roberta-large-xnli"   # Same model as analyze
+SUPPORTED = 0.5        # Entailment probability for "supported"
+CONTRADICTED = 0.5     # Contradiction probability for "contradicted"
 
-_nli = {}   # The loaded model, kept so it's loaded once
+_nli = {}   # Loaded model cache
 
 
 def judge_available():
-    """
-    True if the local judge can run (PyTorch and transformers are installed,
-    as in the full install). Without it, the other checks still run.
-    """
+    """True if PyTorch and transformers are installed for the local judge."""
     if "available" not in _nli:
         try:
             import torch  # noqa: F401
@@ -106,7 +79,7 @@ def judge_available():
 
 
 def _load_nli():
-    """Load the model once; on an Apple Silicon Mac, on its GPU if that works."""
+    """Load the NLI model once, on the Apple GPU (mps) when available."""
     if "model" not in _nli:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -126,10 +99,7 @@ def _load_nli():
 
 
 def judge_support_many(pairs, batch_size=8):
-    """
-    For each (premise, hypothesis) pair, the model's probabilities as
-    {"entailment": p, "neutral": p, "contradiction": p}.
-    """
+    """Return {"entailment": p, "neutral": p, "contradiction": p} for each (premise, hypothesis) pair."""
     nli = _load_nli()
     torch, results = nli["torch"], []
     for i in range(0, len(pairs), batch_size):
@@ -143,7 +113,7 @@ def judge_support_many(pairs, batch_size=8):
         except Exception:
             if nli["device"] == "cpu":
                 raise
-            # The Mac GPU failed mid-run: use the CPU for the rest of the run
+            # GPU failed: fall back to CPU for the rest of the run
             nli["model"].to("cpu")
             nli["device"] = "cpu"
             with torch.no_grad():
@@ -154,32 +124,30 @@ def judge_support_many(pairs, batch_size=8):
 
 
 def verdict(probs):
-    """'supported', 'contradicted' or 'not shown' from judge_support_many's output."""
+    """Return 'supported', 'contradicted' or 'not shown' for one probability dict."""
     if probs["entailment"] >= SUPPORTED and probs["entailment"] > probs["contradiction"]:
         return "supported"
     if probs["contradiction"] >= CONTRADICTED:
         return "contradicted"
-    return "not shown"   # Overstated, narrower, or about something else
+    return "not shown"
 
 
 def judge_support(premise, hypothesis):
-    """'supported', 'contradicted' or 'not shown' for one pair."""
+    """Return the verdict for one (premise, hypothesis) pair."""
     return verdict(judge_support_many([(premise, hypothesis)])[0])
 
 
 # ════════════════════════════════════════════════════════════════════════
-# THE GATE, LAYER 1-2: RULES IN CODE + THE LOCAL JUDGE
+# THE GATE, LAYERS 1-2: RULES + LOCAL JUDGE
 # ════════════════════════════════════════════════════════════════════════
-# Works on any brief whose claims cite sources as [n]: one that synthesize
-# wrote, or one a teammate edited by hand (python agent.py verify).
 
-MAX_CITES = 3            # A claim needs 1-3 sources; with more, the reader can't tell which one says it
+MAX_CITES = 3            # Max sources per claim
 PASSAGES = 5             # Source sentences shown to the judge per claim
-MATCH_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Same as BERTopic
+MATCH_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Passage matching
 
 
 def sentences(text):
-    """Split text into sentences (keeps lists and headings as their own lines)."""
+    """Split text into sentences; each line is split separately."""
     out = []
     for line in text.split("\n"):
         out += [x.strip() for x in re.split(r"(?<=[.!?。！？])\s+", line) if x.strip()]
@@ -187,35 +155,26 @@ def sentences(text):
 
 
 def citations(sentence):
-    """The [n] source numbers a sentence cites."""
+    """Return the [n] source numbers a sentence cites."""
     return [int(n) for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", sentence)
             for n in re.split(r"\s*,\s*", group)]
 
 
 def _readings(raw):
-    """
-    The ways one written number can be read, in one standard form: "1,000"
-    → {"1000"}; "0,47" → {"0.47"}; "1.500" is 1.5 in English but 1500 in
-    German → {"1.5", "1500"}.
-    """
+    """Return the possible readings of a written number: "1.500" gives {"1.5", "1500"}."""
     n = raw.replace("\u00a0", " ")
     out = set()
     if re.fullmatch(r"\d{1,3}(?:[, .]\d{3})+", n) and not n.startswith("0"):
-        out.add(re.sub(r"[, .]", "", n))                 # Thousands separators
+        out.add(re.sub(r"[, .]", "", n))
     if re.fullmatch(r"\d+[.,]\d+", n) and not (out and "," in n):
-        out.add(n.replace(",", "."))                     # A decimal point or comma
-        # ("1,000" is read as a thousand only; "1.500" stays ambiguous)
+        out.add(n.replace(",", "."))
     if not out:
         out.add(re.sub(r"[ ,]", "", n) if re.fullmatch(r"[\d ,]+", n) else n.replace(",", "."))
     return {x.rstrip("0").rstrip(".") if "." in x else x for x in out}
 
 
 def number_readings(text):
-    """
-    The numbers in a text, each as the set of its possible readings. Single
-    digits are left out ("3 risks" is too common to check); [n] citations are
-    ignored.
-    """
+    """Return {raw number: readings} for a text, skipping single digits and [n] citations."""
     text = unicodedata.normalize("NFKC", re.sub(r"\[[\d,\s]+\]", " ", text or ""))
     found = {}
     for raw in re.findall(r"\d+(?:[.,\u00a0 ]\d+)*", text):
@@ -226,7 +185,7 @@ def number_readings(text):
 
 
 def numbers(text):
-    """Every reading of every number in a text, as one set (for lookups)."""
+    """Return every reading of every number in a text as one set."""
     return set().union(*number_readings(text).values()) if text else set()
 
 
@@ -234,7 +193,7 @@ _matcher = {}
 
 
 def _match_model():
-    """The sentence-matching model (None if sentence-transformers isn't installed)."""
+    """Return the sentence-matching model, or None if sentence-transformers is missing."""
     if "model" not in _matcher:
         try:
             from sentence_transformers import SentenceTransformer
@@ -245,11 +204,7 @@ def _match_model():
 
 
 def best_passages(claim, source_texts, k=PASSAGES):
-    """
-    The k sentences of the cited sources that best match `claim`: by
-    meaning when the matching model is installed (so an English sentence finds
-    its passage in a Japanese source), otherwise by shared words and numbers.
-    """
+    """Return the k source sentences closest to `claim`, by meaning or else by shared words and numbers."""
     candidates = []
     for text in source_texts:
         candidates += [s for s in sentences(text) if 25 <= len(s) <= 600]
@@ -271,26 +226,17 @@ def best_passages(claim, source_texts, k=PASSAGES):
         scores = [len(words & (set(re.findall(r"\w{4,}", c.lower())) | numbers(c)))
                   for c in candidates]
     top = sorted(range(len(candidates)), key=lambda i: -scores[i])
-    return list(dict.fromkeys(candidates[i] for i in top))[:k]   # Best match first
+    return list(dict.fromkeys(candidates[i] for i in top))[:k]
 
 
 def statements(text):
-    """The sentences of a text that say something (not headings, tables or fragments)."""
+    """Return sentences that state something, skipping headings, tables and fragments."""
     return [s for s in sentences(text)
             if not s.startswith(("#", "**", "---", "|")) and len(re.findall(r"\w+", s)) >= 4]
 
 
 def check_sentences(text, by_idx, findings="", use_judge=True):
-    """
-    Check every sentence of `text` (one section, or a whole brief). Returns one
-    report per sentence that states something: {"sentence", "cites", "problems"
-    (list of strings), "passages" (what the judge read)}.
-
-    Rules (code): cites at most MAX_CITES sources, all of which exist; every
-    number appears in the cited sources (for an uncited sentence, which reports
-    this study's own results, in the research findings instead); not a repeat.
-    Judge (local model): the cited passages support the sentence's meaning.
-    """
+    """Return {"sentence", "cites", "problems", "passages"} per statement: cite, number, repeat and judge checks."""
     use_judge = use_judge and judge_available()
     findings_numbers = numbers(findings)
     seen, reports, to_judge = set(), [], []
@@ -318,8 +264,7 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
         report = {"sentence": s, "cites": cites, "problems": problems, "passages": []}
         reports.append(report)
         if use_judge and source_texts and not missing_src:
-            # "A [19] and B [166]" is two claims: each part is judged against
-            # its own sources' passages
+            # Judge each cited part against its own sources
             for part, part_cites in claim_parts(s):
                 texts = [by_idx[n].get("content", "") for n in part_cites if n in by_idx]
                 passages = best_passages(part, texts)
@@ -327,13 +272,13 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
                     report["passages"] += passages
                     to_judge.append((report, part, passages))
 
-    # The local judge, all at once (batched): do the passages support each part?
+    # Batched judge run; a sentence gets its weakest part's verdict
     if to_judge:
         verdicts = judge_with_passages([(part, passages) for _, part, passages in to_judge])
         order = {"supported": 0, "not shown": 1, "contradicted": 2}
         for (report, _, _), v in zip(to_judge, verdicts):
             if order[v] >= order[report.get("judge", "supported")]:
-                report["judge"] = v      # The sentence gets its weakest part's verdict
+                report["judge"] = v
         for report in reports:
             if report.get("judge", "supported") != "supported":
                 report["problems"].append(f"local judge: {report['judge']} by the cited passages")
@@ -341,17 +286,10 @@ def check_sentences(text, by_idx, findings="", use_judge=True):
 
 
 def judge_with_passages(items):
-    """
-    Return 'supported', 'contradicted' or 'not shown' for each (claim,
-    passages) item, with the passages ordered best match first. Each passage
-    is judged on its own, and the best two are also judged together; the
-    highest support score decides. (When all passages were joined into one
-    text, a single supporting sentence was outweighed by the unrelated ones.)
-    A contradiction counts only if it comes from the best-matching passage.
-    """
+    """Return a verdict per (claim, passages) item; contradiction counts only from the best passage."""
     pairs, spans = [], []
     for claim, passages in items:
-        options = list(dict.fromkeys(passages))           # Without duplicates
+        options = list(dict.fromkeys(passages))
         if len(options) > 1:
             options.append(" ".join(options[:2]))
         claims = list(dict.fromkeys([claim, core_claim(claim)]))
@@ -363,7 +301,7 @@ def judge_with_passages(items):
         mine = probs[start:start + n_options * n_claims]
         if max(p["entailment"] for p in mine) >= SUPPORTED:
             out.append("supported")
-        elif mine[0]["contradiction"] >= CONTRADICTED:   # Best passage vs the full claim
+        elif mine[0]["contradiction"] >= CONTRADICTED:
             out.append("contradicted")
         else:
             out.append("not shown")
@@ -378,19 +316,13 @@ _LEAD_INS = [
     r"show|shows|showed|suggest|suggests|suggested|reveal|reveals|revealed|reported|reports|"
     r"noted|notes|estimates|estimated)\s+(?:that\s+)?",
     r"(?:according to [^,]+,|teams report(?:ing)?|developers report(?:ing)?)\s*",
-    # "GitHub reports (that) ...", "A 2025 Stack Overflow survey found ...",
-    # "another indicated that ..."
     r"(?:an?\s+)?(?:[\w&.'’\-]+\s+){0,4}?(?:reports?|reported|says|said|found|finds|"
     r"estimates|claims|notes|states|indicated|indicates|showed|shows)\s+(?:that\s+)?",
 ]
 
 
 def core_claim(claim):
-    """
-    The fact in a claim, without its lead-in: "and another study indicated
-    that 45% of examples failed" → "45% of examples failed". The local judge
-    can fail on such lead-ins even when the passage states the fact exactly.
-    """
+    """Return the claim without lead-ins like "another study indicated that" (they confuse the judge)."""
     text = claim.split("; ")[-1].strip()
     for _ in range(3):
         before = text
@@ -402,11 +334,7 @@ def core_claim(claim):
 
 
 def claim_parts(sentence):
-    """
-    Split a sentence at its citations into (text, [cited sources]) parts:
-    "A grew 40% [19], and B fell [166, 192]." → [("A grew 40%", [19]),
-    ("and B fell", [166, 192])]. Text after the last citation is ignored.
-    """
+    """Split a sentence at its citations into (text, [cited sources]) parts."""
     parts, start = [], 0
     for m in re.finditer(r"\[(\d+(?:\s*,\s*\d+)*)\]", sentence):
         text = sentence[start:m.start()].strip(" ,;:")
@@ -414,7 +342,7 @@ def claim_parts(sentence):
         if len(re.findall(r"\w+", text)) >= 3:
             parts.append((text, cites))
         elif parts:
-            parts[-1] = (parts[-1][0], parts[-1][1] + cites)   # "[3][4]" → one part
+            parts[-1] = (parts[-1][0], parts[-1][1] + cites)
         start = m.end()
     return parts
 
@@ -422,12 +350,8 @@ def claim_parts(sentence):
 # ════════════════════════════════════════════════════════════════════════
 # THE GATE, LAYER 3: AI REVIEW AND REPAIR
 # ════════════════════════════════════════════════════════════════════════
-# The local judge flags sentences; an AI model reads the passages and decides
-# what to do with each one. It is a stronger model than the writer: in a test,
-# the default model deleted 25 of 25 flagged sentences, and this one corrected
-# 19 of 24.
 
-CHECK_MODEL = "google/gemini-2.5-flash"
+CHECK_MODEL = "google/gemini-2.5-flash"   # Reviewer model, stronger than the writer
 
 REVIEW_RULES = (
     "Rules:\n"
@@ -443,7 +367,7 @@ REVIEW_RULES = (
 
 
 def _review_prompt(items, findings):
-    """The AI review prompt for one section's sentences."""
+    """Return the AI review prompt for one section's sentences."""
     blocks = []
     for i, it in enumerate(items, 1):
         if it["cites"]:
@@ -472,22 +396,15 @@ def _review_prompt(items, findings):
 
 
 def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge=True):
-    """
-    The gate for one section: rules and the local judge flag sentences, the
-    AI reviews the flagged ones and every uncited one, fixes are re-checked by
-    the rules, and anything that still fails is removed. Returns
-    (new text, outcomes), with one outcome per reviewed sentence for the log,
-    or (text, None) if the AI call failed (the section is then marked
-    "NOT CHECKED").
-    """
+    """Gate one section; return (new text, outcome lines), or (text, None) if the AI call failed."""
     from core import call_ai
 
     reports = check_sentences(text, by_idx, findings, use_judge=use_judge)
-    # Repeats need no AI call: the later copy is deleted
+    # Repeats are deleted without an AI call
     outcomes = []
     for r in reports:
         if "repeats an earlier sentence" in r["problems"]:
-            at = text.rfind(r["sentence"])          # rfind finds the last copy, which is deleted
+            at = text.rfind(r["sentence"])
             if at != -1:
                 text = text[:at] + text[at + len(r["sentence"]):]
             outcomes.append(f"REPEAT: {r['sentence']}\n  → DELETED")
@@ -497,7 +414,7 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
         return text, outcomes
 
     def ask(batch):
-        """{position in batch (1-based): (action, fix)} from one review call (None if it failed)."""
+        """Return {1-based position: (action, fix)} from one review call, or None if it failed."""
         reply = call_ai(_review_prompt(batch, findings), api_key, model, temp=0, max_tokens=12000)
         if not reply:
             return None
@@ -509,7 +426,7 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
     answers = ask(items)
     if answers is None:
         return text, None
-    # Sentences the AI skipped get one more, smaller call; still unanswered → deleted
+    # Retry skipped sentences once
     unanswered = [i for i in range(1, len(items) + 1) if i not in answers]
     if unanswered:
         again = ask([items[i - 1] for i in unanswered]) or {}
@@ -526,8 +443,7 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
                 outcomes.append(f"KEPT ({label}): {it['sentence']}\n  → the AI judged it supported")
             continue
         if action == "FIX" and fix:
-            # A fix must pass the rules itself (numbers in its sources, real
-            # citations, at most MAX_CITES), and the judge mustn't contradict it
+            # A fix must pass the rules and not be contradicted by the judge
             check = check_sentences(fix, by_idx, findings, use_judge=use_judge)
             bad = [p for r in check for p in r["problems"]
                    if not p.startswith("local judge") or "contradicted" in p]
@@ -539,7 +455,7 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
         elif action == "KEEP":
             outcomes.append(f"KEPT BY AI BUT BREAKS A RULE ({'; '.join(hard)}): {it['sentence']}\n  → DELETED")
         elif not it["cites"] and action == "NO ANSWER":
-            continue   # An uncited sentence the AI didn't mention: leave it
+            continue
         else:
             outcomes.append(f"{action} ({label}): {it['sentence']}\n  → DELETED")
         text = text.replace(it["sentence"], "", 1)
@@ -550,26 +466,21 @@ def review_section(text, by_idx, findings, api_key, model=CHECK_MODEL, use_judge
 
 
 # ════════════════════════════════════════════════════════════════════════
-# THE GATE, LAYER 4: INDEPENDENT AUDIT AND THE VERDICT
+# THE GATE, LAYER 4: AUDIT AND VERDICT
 # ════════════════════════════════════════════════════════════════════════
 
-AUDIT_SAMPLE = 20        # Final sentences re-checked against their sources' full text
-PASS_UNSUPPORTED = 0.10  # At most this share of the sample unsupported
-PASS_DELETED = 0.20      # At most this share of the draft's statements deleted
+AUDIT_SAMPLE = 20        # Sentences re-checked against full sources
+PASS_UNSUPPORTED = 0.10  # Max unsupported share of the audit sample
+PASS_DELETED = 0.20      # Max deleted share of the draft's statements
 
 
 def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
-    """
-    Re-check a random sample of the final cited sentences against the full
-    text of their sources, instead of the passages the gate picked. This is
-    an automated version of a human audit. Returns a list of (sentence, verdict, reason)
-    with verdict SUPPORTED / PARTLY / UNSUPPORTED / ERROR.
-    """
+    """Return (sentence, SUPPORTED/PARTLY/UNSUPPORTED/ERROR, reason) for a random sample checked against full sources."""
     import random
     from concurrent.futures import ThreadPoolExecutor
     from core import call_ai
 
-    cited = [s for s in statements(text) if citations(s)]   # statements() leaves out "[166]" fragments
+    cited = [s for s in statements(text) if citations(s)]
     sample = random.Random(seed).sample(cited, min(n, len(cited)))
 
     def one(sentence):
@@ -590,13 +501,7 @@ def audit(text, by_idx, api_key, model=CHECK_MODEL, n=AUDIT_SAMPLE, seed=0):
 
 
 def make_verdict(audit_results, n_reviewed, n_deleted, not_checked, n_statements=0):
-    """
-    PASS or NEEDS REVIEW, with the reasons and the numbers behind them.
-    NEEDS REVIEW: a section wasn't checked, the audit found more than
-    PASS_UNSUPPORTED unsupported, or the gate deleted more than PASS_DELETED
-    of the draft's statements (if the checker had to delete that much, the
-    brief was badly written).
-    """
+    """Return the PASS / NEEDS REVIEW verdict dict with its reasons and counts."""
     graded = [v for _, v, _ in audit_results if v != "ERROR"]
     counts = {k: graded.count(k) for k in ("SUPPORTED", "PARTLY", "UNSUPPORTED")}
     reasons = []
@@ -618,7 +523,7 @@ def make_verdict(audit_results, n_reviewed, n_deleted, not_checked, n_statements
 
 
 def verdict_line(v):
-    """One line for the brief's header and the console."""
+    """Return the verdict as one line for the brief header and console."""
     a, n = v["audit"], v["audit_sample"]
     audit_text = (f"independent audit of {n} sentences: {a['SUPPORTED']} supported, "
                   f"{a['PARTLY']} partly, {a['UNSUPPORTED']} unsupported") if n else "no audit"
@@ -629,16 +534,11 @@ def verdict_line(v):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# THE WHOLE GATE, AND "python agent.py verify"
+# THE WHOLE GATE AND "python agent.py verify"
 # ════════════════════════════════════════════════════════════════════════
 
 def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL, run_audit=True):
-    """
-    Run the gate over a brief's [(title, text)] sections. Returns
-    (checked sections, log lines, verdict dict). run_audit=False skips the
-    independent audit (for parts checked after the main audit, which
-    merge_verdicts then adds to the main verdict).
-    """
+    """Return (checked sections, log lines, verdict) for [(title, text)] sections; run_audit=False skips the audit."""
     checked, log, not_checked, n_reviewed, n_deleted = [], [], [], 0, 0
     n_statements = sum(len(statements(text)) for _, text in sections)
     for title, text in sections:
@@ -670,11 +570,7 @@ def gate(sections, by_idx, findings, api_key, model=CHECK_MODEL, run_audit=True)
 
 
 def merge_verdicts(main, extra):
-    """
-    One verdict for a brief checked in two parts: the main part (with the
-    audit) and parts written afterwards (no audit). Counts are added, and
-    PASS / NEEDS REVIEW is decided again on the totals.
-    """
+    """Combine the main verdict (with audit) and a later unaudited one into one verdict."""
     graded = main["audit"]
     fake_audit = [("", k, "") for k in ("SUPPORTED", "PARTLY", "UNSUPPORTED") for _ in range(graded[k])]
     v = make_verdict(fake_audit, main["reviewed"] + extra["reviewed"],
@@ -686,7 +582,7 @@ def merge_verdicts(main, extra):
 
 
 def split_brief(brief):
-    """A brief's (header, [(title, text)] sections, references) parts."""
+    """Return a brief's (header, [(title, text)] sections, references)."""
     body, _, refs = brief.partition("\n## References")
     chunks = re.split(r"^## ", body, flags=re.M)
     header = chunks[0]
@@ -698,12 +594,7 @@ def split_brief(brief):
 
 
 def run_verify(args):
-    """
-    python agent.py verify [brief.md]: runs the fact-check gate on a brief
-    (by default the newest brief_*.md), e.g. after a teammate edited it.
-    Writes <brief>_verified.md (corrected) and <brief>_verify_report.md; the
-    original is not changed.
-    """
+    """Gate a brief (default: newest brief_*.md); writes <brief>_verified.md and <brief>_verify_report.md."""
     import glob
     import json
     import os

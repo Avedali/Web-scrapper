@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""
-Deep Research Toolkit
-======================
-Usage:
-    python agent.py explore    --key KEY    # 1.a  Exploratory research (collects sources, takes no position)
-    python agent.py synthesize              # 1.b  Read everything → propose thesis → outline
-    python agent.py deepen     --key KEY    # 1.c  Targeted research to support the thesis
-    python agent.py analyze                 # 2.a  NLP: sentiment, zero-shot, NER, topics
-    python agent.py stats                   # 2.b  Statistical tests (pingouin)
-    python agent.py viz                     # 3    Charts (paper + slide versions)
-    python agent.py ask        --key KEY "q"# 4    Teammates ask plain-language questions
-    python agent.py simulate   --key KEY    # 5    Visual benchmark (search page / kanban / data explorer)
-
-Typical workflow:
-    explore → analyze → stats → synthesize → deepen → analyze → viz → simulate
+"""agent.py: command-line entry point of the Deep Research Toolkit.
+Run: python agent.py MODE [--key KEY] ["question"]
+Modes: explore, synthesize, deepen, analyze, stats, viz, ask, simulate, verify
+Typical workflow: explore → analyze → stats → synthesize → deepen → analyze → viz → simulate
 """
 import argparse
 import faulthandler
@@ -21,17 +10,12 @@ import os
 import subprocess
 import sys
 
-# If a C library crashes (no Python error, only "Segmentation fault" or
-# "double free"), print where every thread was, so the log shows what broke.
+# Print every thread's stack on a C-level crash (segfault, double free)
 faulthandler.enable()
 
 
 def use_toolkit_venv():
-    """
-    If install.py put the packages in a private environment (.venv, which it
-    does for Homebrew's Python on a Mac), run this script again with that
-    environment's Python so every package is found.
-    """
+    """Re-run this script with the .venv Python when install.py created one."""
     venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
     python = (os.path.join(venv, "Scripts", "python.exe") if os.name == "nt"
               else os.path.join(venv, "bin", "python"))
@@ -46,9 +30,7 @@ def main():
         "analyze", "stats", "viz", "ask", "simulate", "verify",
     ])
     ap.add_argument("--key", default=None)
-    # Default model: cheap, 1M-token context, and reliable in all 9 languages.
-    # (meta-llama/llama-4-scout was the old default; via OpenRouter it often
-    # returned Chinese/Korean queries with the native characters missing.)
+    # Default model: cheap, 1M-token context, reliable in all 9 languages
     ap.add_argument("--model", default="google/gemini-2.5-flash-lite")
     ap.add_argument("--serper", default=None)
     ap.add_argument("--brave", default=None)
@@ -75,5 +57,5 @@ def main():
     getattr(module, fn_name)(a)
 
 if __name__ == "__main__":
-    use_toolkit_venv()   # Packages may live in .venv (see install.py)
+    use_toolkit_venv()
     main()

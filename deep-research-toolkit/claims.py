@@ -1,27 +1,11 @@
 """
-claims.py: the claim ledger. Every fact the brief may use, tied to its source
-===============================================================================
+claims.py: claim ledger for synthesize.py, every fact tied to a source sentence.
 
-Before anything is written, every usable source is read once and its factual
-claims are listed, each with the exact sentence of the source that states it:
-
-  1. EXTRACT  The AI lists each source's claims (in English) with a quote (in
-              the source's language). Cached in scratchpad/claims.json, so
-              re-running synthesize doesn't pay for this again.
-  2. CHECK    A: the quote must appear in the source (verify.quote_in_source).
-                 If it doesn't, the AI made it up, and the claim is dropped.
-              B: the quote must support the claim by meaning (the local judge).
-                 A claim that overstates its quote ("the sky is blue" from "the
-                 sky is often perceived as blue") is rewritten by the AI to keep
-                 the quote's hedge and scope. The claim stays in the ledger.
-  3. MERGE    Sources that report the same finding ("up to 55% faster") become
-              one claim backed by several sources, so it's written once.
-  4. ASSIGN   Each merged claim goes to the one section it fits best. A claim
-              the conclusion doesn't own can't be restated in the conclusion.
-
-The writer cites claim IDs such as {C12} instead of source numbers. Code turns
-each ID into the claim's sources [3, 17], so a number can't end up on the
-wrong source.
+How it works:
+Extract: The AI lists each source's claims in English with a verbatim quote (cached in claims.json)
+Check: Claims whose quote is missing from the source are dropped; overstated ones are rewritten
+Merge: Claims with the same meaning and numbers become one finding backed by several sources
+Assign: Each finding goes to one section; the writer cites it by ID ({C12})
 """
 
 import json
@@ -36,12 +20,8 @@ CLAIMS_PER_SOURCE = 10       # Most a source contributes (a long report has more
 TRANSLATE_BATCH = 40         # Claims translated per AI call
 MERGE_SIMILARITY = 0.85      # How alike two claims must be (by meaning) to be one finding
 MIN_RELEVANCE = 0.20         # A claim less related than this to every section is left out
-CLAIMS_IN_BRIEF = 260        # Findings the theme sections use in total: the most
-                             # relevant ones, shared between however many themes there
-                             # are. (A fixed number per theme made an 8-theme brief a
-                             # third longer than a 6-theme one.) About 20 words each,
-                             # so ~5,000 words of themes in a ~6,500-word brief.
-MAX_CLAIMS_PER_SECTION = 60  # ...but no section takes more than this
+CLAIMS_IN_BRIEF = 260        # Findings shared by all theme sections
+MAX_CLAIMS_PER_SECTION = 60  # Cap per section
 MAX_PER_SOURCE_IN_SECTION = 4  # Keeps one prolific source from filling a section
 
 
@@ -86,18 +66,14 @@ def _parse_claims(answer, wanted):
 
 
 def extract_claims(corpus, api_key, model, corpus_dir=SCRATCHPAD):
-    """
-    Return {idx: [{"claim", "quote"}...]} for every usable source, using and
-    updating the cache in corpus_dir/claims.json. This function does not
-    check the claims; check_claims does that.
-    """
+    """Return {idx: [{"claim", "quote"}...]} for every usable source, cached in claims.json."""
     path = os.path.join(corpus_dir, CLAIMS_FILE)
     cache = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             cache = json.load(f)
     todo = [s for s in corpus if cache.get(str(s["idx"]), {}).get("key") != _content_key(s)]
-    for attempt in range(2):   # The second pass retries sources the AI skipped
+    for attempt in range(2):
         if not todo:
             break
         print(f"   Listing the claims in {len(todo)} sources..." if attempt == 0 else
@@ -121,18 +97,8 @@ def extract_claims(corpus, api_key, model, corpus_dir=SCRATCHPAD):
 
 
 def _translate_claims(cache, api_key, model):
-    """
-    Translate into English the claims the AI left in their source's language
-    (it is told to write English, but sometimes copies a Japanese or German
-    sentence). The brief is written in English, so an untranslated claim was
-    read less well, and a word count of the findings left it out. The
-    original stays in "original". A translation is used only if it keeps
-    every number of the original. A source whose claims change is checked
-    again (check_claims compares each claim with its quote).
-    """
+    """Translate non-English claims into English; keeps "original" and requires equal numbers."""
     def foreign(text):
-        # Mostly non-Latin letters (Japanese, Korean, Chinese, Russian), or a
-        # detected language other than English (the detector needs 50+ characters)
         letters = re.findall(r"[^\W\d_]", text)
         latin = sum(1 for ch in letters if ch.isascii() or "\u00c0" <= ch <= "\u024f")
         return (letters and latin / len(letters) < 0.7) or detect_lang(text) not in ("en", "unknown")
@@ -164,12 +130,7 @@ def _translate_claims(cache, api_key, model):
 
 
 def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_dir=SCRATCHPAD):
-    """
-    Run checks A and B on every claim not checked yet; correct the ones whose
-    quote doesn't clearly support them. Each claim gets a "status":
-    ok / corrected / dropped: quote not in source / dropped: contradicted /
-    dropped: not supported. Saves the results into the cache.
-    """
+    """Check unchecked claims against their quotes, set each "status" and save the cache."""
     stats = {"ok": 0, "corrected": 0, "dropped": 0}
     to_judge, to_fix = [], []
     for key, entry in cache.items():
@@ -182,7 +143,7 @@ def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_
             else:
                 to_judge.append(c)
     if to_judge and not verify.judge_available():
-        for c in to_judge:   # Quote verified; meaning not checked (light install)
+        for c in to_judge:   # No local judge: quote check only
             c["status"] = "ok"
         to_judge = []
     if to_judge:
@@ -196,7 +157,6 @@ def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_
             else:
                 to_fix.append(c)
 
-    # Overstated / narrower: the AI rewrites the claim to say what its quote says
     if to_fix:
         print(f"   Correcting {len(to_fix)} claims their quotes don't clearly support...")
         for start in range(0, len(to_fix), 40):
@@ -219,7 +179,7 @@ def check_claims(cache, by_idx, api_key, check_model=verify.CHECK_MODEL, corpus_
                 elif new.upper().startswith("DROP"):
                     c["status"] = "dropped: not supported"
                 elif re.sub(r"\W+", " ", new).strip().lower() == re.sub(r"\W+", " ", c["claim"]).strip().lower():
-                    c["status"] = "ok"   # The AI confirmed it as written
+                    c["status"] = "ok"
                 else:
                     c["original_claim"], c["claim"], c["status"] = c["claim"], new, "corrected"
 
@@ -247,13 +207,7 @@ def _rank(source):
 
 
 def merge_claims(cache, by_idx):
-    """
-    Turn the checked claims into findings: [{"id": "C1", "claim", "sources":
-    [idx...] (strongest first), "quotes": {idx: quote}}]. Two claims are
-    merged when they mean the same (similarity >= MERGE_SIMILARITY) and their
-    numbers agree (all of one claim's numbers appear in the other). "55% faster"
-    and "26% faster" stay separate however alike the rest of the wording is.
-    """
+    """Return findings [{"id", "claim", "sources", "quotes"}] merging claims of equal meaning and numbers."""
     flat = []
     for key, entry in cache.items():
         for c in entry["claims"]:
@@ -269,11 +223,9 @@ def merge_claims(cache, by_idx):
         emb = model.encode([c["claim"] for c in flat], batch_size=64, convert_to_tensor=True)
         communities = util.community_detection(emb, threshold=MERGE_SIMILARITY, min_community_size=1)
         for community in communities:
-            # Same meaning and compatible numbers: one source's "19% slower"
-            # and another's "16 developers were 19% slower" are the same study;
-            # "55% faster" and "26% faster" are not. Most specific claim first.
+            # Split by numbers: a claim joins a group whose numbers include its own
             members = sorted(community, key=lambda i: -len(verify.numbers(flat[i]["claim"])))
-            sub = []   # [(numbers of the group's most specific claim, [members])]
+            sub = []
             for i in members:
                 nums = verify.numbers(flat[i]["claim"])
                 home = next((g for g in sub if nums <= g[0]), None)
@@ -284,14 +236,13 @@ def merge_claims(cache, by_idx):
             groups += [m for _, m in sub]
     else:
         seen = {}
-        for i, c in enumerate(flat):   # Without the matching model: identical text only
+        for i, c in enumerate(flat):
             seen.setdefault(re.sub(r"\W+", " ", c["claim"].lower()), []).append(i)
         groups = list(seen.values())
 
     findings = []
     for members in groups:
         most_numbers = max(len(verify.numbers(flat[i]["claim"])) for i in members)
-        # Worded as the strongest source among the most specific claims has it
         wording = min((i for i in members if len(verify.numbers(flat[i]["claim"])) == most_numbers),
                       key=lambda i: _rank(by_idx[flat[i]["src"]]))
         members = sorted(members, key=lambda i: _rank(by_idx[flat[i]["src"]]))
@@ -312,7 +263,7 @@ def merge_claims(cache, by_idx):
 # ════════════════════════════════════════════════════════════════════════
 
 def outline_blocks(outline, titles):
-    """Return {title: the outline text under that title}, which says what each section is about."""
+    """Return {title: outline text under that title}."""
     lines, blocks, current = outline.split("\n"), {t: t for t in titles}, None
     for line in lines:
         hit = next((t for t in titles if t.lower() in line.lower()), None)
@@ -324,20 +275,12 @@ def outline_blocks(outline, titles):
 
 
 def assign_claims(findings, titles, outline):
-    """
-    Put each finding in the one section it is most related to (by meaning,
-    compared with the section's outline text). The assignment is
-    {title: [finding...]}. Findings unrelated to every section are left out.
-    Each section keeps its most related findings: its share of
-    CLAIMS_IN_BRIEF, at most MAX_CLAIMS_PER_SECTION, and at most
-    MAX_PER_SOURCE_IN_SECTION led by one source.
-    Returns (assignment, number of related findings left unused).
-    """
+    """Return ({title: [finding...]}, unused count), each finding in its closest section."""
     blocks = outline_blocks(outline, titles)
     model = verify._match_model()
     assignment = {t: [] for t in titles}
     if model is None or not findings:
-        for i, f in enumerate(findings):   # Without the model: round-robin
+        for i, f in enumerate(findings):
             assignment[titles[i % len(titles)]].append((1.0, f))
     else:
         from sentence_transformers import util
@@ -372,17 +315,11 @@ def assign_claims(findings, titles, outline):
 DISAGREE_TOPIC = 0.55     # Findings at least this alike are about the same subject
 DISAGREE_SURE = 0.7       # How sure the local judge must be that they contradict
 MAX_DISAGREEMENTS = 8     # Pairs shown in the brief's "disagrees" section
-MAX_PAIRS_JUDGED = 300    # Most alike pairs sent to the local judge (it takes ~0.1s each)
+MAX_PAIRS_JUDGED = 300    # Most alike pairs sent to the local judge
 
 
 def find_disagreements(findings, most=MAX_DISAGREEMENTS):
-    """
-    Pairs of findings from different sources that are about the same subject
-    and contradict each other, most certain first: [(finding, finding)].
-    Example: developers report feeling 20% faster / a controlled trial found
-    them 19% slower. Each finding appears in at most one pair. Returns [] if
-    the matching model or the local judge isn't installed.
-    """
+    """Return [(finding, finding)] pairs from different sources that contradict, surest first."""
     model = verify._match_model()
     if model is None or not verify.judge_available() or len(findings) < 2:
         return []
@@ -396,7 +333,6 @@ def find_disagreements(findings, most=MAX_DISAGREEMENTS):
     candidates = sorted(candidates, reverse=True)[:MAX_PAIRS_JUDGED]
     if not candidates:
         return []
-    # Judge both directions (A against B, B against A) and keep the stronger
     probs = verify.judge_support_many(
         [(findings[i]["claim"], findings[j]["claim"]) for _, i, j in candidates]
         + [(findings[j]["claim"], findings[i]["claim"]) for _, i, j in candidates])
